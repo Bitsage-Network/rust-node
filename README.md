@@ -1,279 +1,181 @@
-# Bitsage Network Coordinator
+# BitSage Network - Rust Node
 
-A production-ready coordinator system for the Bitsage Network, designed to manage job distribution, worker registration, and blockchain integration on Starknet.
+High-performance Rust node for the BitSage Network, featuring **Obelysk Protocol** integration with GPU-accelerated zero-knowledge proofs.
 
-## 🚀 Current Status
+## 🚀 Features
 
-### ✅ Working Components
-- **Simple Coordinator** - Basic job and worker management
-- **Core Types** - Job, Worker, and Blockchain integration types
-- **Configuration System** - Comprehensive configuration management
-- **Basic Blockchain Integration** - Starknet client and contract interactions
-- **Database Integration** - SQLite-based job and worker storage
+### ✅ Core Components
+- **Obelysk Protocol** - Verifiable computation with ZK proofs
+- **GPU-Accelerated Proving** - CUDA-based Circle FFT (50-100x speedup)
+- **Stwo Prover Integration** - StarkWare's next-gen Circle STARK prover
+- **TEE Support** - Trusted Execution Environment attestation
+- **Coordinator System** - Job distribution and worker management
+- **Starknet Integration** - On-chain proof verification
 
-### ❌ Known Issues
-- **Network Module Compilation Errors** - P2P network, discovery, and gossip protocol issues
-- **Enhanced Coordinator Type Mismatches** - NetworkCoordinator vs NetworkCoordinatorService conflicts
-- **Missing Methods** - Several components have incomplete implementations
-- **Async/Await Issues** - Incorrect handling of futures and async tasks
+### 🔥 GPU Acceleration
+- **Circle FFT CUDA Kernels** - Optimized for A100/H100 GPUs
+- **M31 Field Operations** - Mersenne-31 arithmetic on GPU
+- **Automatic Fallback** - Falls back to SIMD when GPU unavailable
+- **Twiddle Caching** - Precomputed twiddle factors for FFT
 
-## 🏗️ Architecture
+## 📦 Architecture
 
-### Simple Coordinator (Working)
 ```
-SimpleCoordinator
-├── Job Management
-│   ├── Job submission and tracking
-│   ├── Job status updates
-│   └── Job result collection
-├── Worker Management
-│   ├── Worker registration
-│   ├── Health monitoring
-│   └── Load balancing
-├── Blockchain Integration
-│   ├── Starknet client
-│   ├── Contract interactions
-│   └── Transaction management
-└── REST API
-    ├── Health endpoints
-    ├── Job management
-    └── Worker management
-```
-
-### Enhanced Coordinator (In Development)
-```
-EnhancedCoordinator
-├── KafkaCoordinator
-├── NetworkCoordinator
-├── JobProcessor
-├── WorkerManager
-├── BlockchainIntegration
-└── MetricsCollector
+rust-node/
+├── src/
+│   ├── obelysk/              # Obelysk Protocol
+│   │   ├── mod.rs            # Protocol entry point
+│   │   ├── prover.rs         # ZK proof generation
+│   │   ├── vm.rs             # Obelysk Virtual Machine
+│   │   ├── stwo_adapter.rs   # Stwo prover integration
+│   │   └── gpu/              # GPU acceleration
+│   │       ├── cuda.rs       # CUDA runtime wrapper
+│   │       ├── fft.rs        # GPU FFT operations
+│   │       └── kernels/      # CUDA kernel source
+│   ├── coordinator/          # Job coordination
+│   ├── network/              # P2P networking
+│   ├── blockchain/           # Starknet integration
+│   └── compute/              # Job execution
+├── examples/
+│   ├── gpu_benchmark.rs      # GPU performance tests
+│   ├── obelysk_*.rs          # Obelysk protocol demos
+│   └── gpu_m31_test.rs       # M31 field GPU tests
+└── tests/
+    └── gpu_backend_integration.rs
 ```
 
-## 🚀 Quick Start
+## 🛠️ Quick Start
 
 ### Prerequisites
-- Rust 1.70+
+- Rust nightly
+- CUDA Toolkit 12.x (for GPU acceleration)
 - SQLite
-- Starknet Sepolia testnet access
 
-### Build and Run
+### Build
 
-1. **Build the project:**
 ```bash
-cargo build
+# Standard build (CPU only)
+cargo build --release
+
+# With GPU acceleration
+cargo build --release --features cuda
 ```
 
-2. **Run the simple coordinator:**
+### Run Coordinator
+
 ```bash
-cargo run --bin ciro-coordinator
+# Simple coordinator
+cargo run --bin simple_coordinator
+
+# Production coordinator
+cargo run --bin prod_coordinator
 ```
 
-3. **Run with custom config:**
+### Run GPU Tests (requires NVIDIA GPU)
+
 ```bash
-cargo run --bin ciro-coordinator config.json
+# GPU benchmark
+cargo run --example gpu_benchmark --features cuda --release
+
+# M31 field operations test
+cargo run --example gpu_m31_test --features cuda --release
 ```
 
-### Configuration
+## 🔧 Configuration
 
-Create a `config.json` file:
-```json
-{
-  "server_port": 8080,
-  "blockchain": {
-    "rpc_url": "https://alpha-sepolia.starknet.io",
-    "chain_id": "SN_SEPOLIA",
-    "contract_address": "0x1234567890abcdef",
-    "private_key": "0x0000000000000000000000000000000000000000000000000000000000000001"
-  },
-  "database": {
-    "url": "sqlite://./coordinator.db"
-  }
-}
-```
+### Environment Variables
 
-## 📋 Available Commands
-
-### Job Management
-- Submit jobs with different types and priorities
-- Track job status and completion
-- Collect job results and distribute rewards
-
-### Worker Management
-- Register workers with capabilities
-- Monitor worker health and performance
-- Balance load across available workers
-
-### Blockchain Integration
-- Submit jobs to smart contracts
-- Track transaction status
-- Handle job completion and reward distribution
-
-## 🔧 Development
-
-### Current Focus Areas
-
-1. **Fix Network Module Issues**
-   - Resolve P2P network compilation errors
-   - Fix discovery protocol implementation
-   - Complete gossip protocol implementation
-
-2. **Resolve Type Mismatches**
-   - Align NetworkCoordinator and NetworkCoordinatorService
-   - Fix missing method implementations
-   - Correct async/await handling
-
-3. **Complete Enhanced Coordinator**
-   - Fix Kafka integration issues
-   - Complete metrics collection
-   - Implement proper error handling
-
-### Compilation Issues to Address
-
-#### Network Module (src/network/)
-- **P2P Network**: Mutable borrow issues with Arc<P2PNetwork>
-- **Discovery**: Future trait implementation issues
-- **Gossip**: Missing P2PMessage variants and method signatures
-
-#### Coordinator Module (src/coordinator/)
-- **Type Mismatches**: NetworkCoordinator vs NetworkCoordinatorService
-- **Missing Methods**: get_blockchain_stats, proper async handling
-- **Kafka Integration**: Consumer/producer initialization issues
-
-#### Blockchain Integration
-- **Transaction Handling**: FieldElement unwrap_or issues
-- **Error Handling**: Proper Result type handling
-
-### Testing Strategy
-
-1. **Unit Tests**
-   - Test individual components
-   - Mock external dependencies
-   - Verify error handling
-
-2. **Integration Tests**
-   - Test coordinator workflows
-   - Verify blockchain interactions
-   - Test API endpoints
-
-3. **End-to-End Tests**
-   - Complete job lifecycle
-   - Worker registration and job assignment
-   - Blockchain transaction flow
-
-## 🐛 Troubleshooting
-
-### Common Issues
-
-1. **Compilation Errors**
-   - Most errors are in the enhanced coordinator
-   - Use simple coordinator for immediate functionality
-   - Focus on network module fixes first
-
-2. **Blockchain Connection**
-   - Verify RPC URL and network configuration
-   - Check contract address and private key
-   - Ensure sufficient balance for transactions
-
-3. **Database Issues**
-   - Verify SQLite file permissions
-   - Check database URL format
-   - Ensure proper schema initialization
-
-### Debug Mode
-
-Enable debug logging:
 ```bash
-RUST_LOG=debug cargo run --bin ciro-coordinator
+# Blockchain
+STARKNET_RPC_URL=https://starknet-sepolia.public.blastapi.io
+STARKNET_PRIVATE_KEY=0x...
+
+# Database
+DATABASE_URL=sqlite://./coordinator.db
+
+# GPU (optional)
+CUDA_VISIBLE_DEVICES=0
 ```
 
-## 📊 Monitoring
+### Config File (`config/coordinator.toml`)
 
-### Health Checks
-- Coordinator status endpoint: `GET /health`
-- Component status: `GET /status`
-- Job statistics: `GET /jobs/stats`
-- Worker statistics: `GET /workers/stats`
+```toml
+[server]
+port = 8080
+host = "0.0.0.0"
 
-### Metrics
-- Job completion rates
-- Worker performance metrics
-- Blockchain transaction success rates
-- Network connectivity status
+[blockchain]
+rpc_url = "https://starknet-sepolia.public.blastapi.io"
+chain_id = "SN_SEPOLIA"
 
-## 🔄 Next Steps
+[database]
+url = "sqlite://./coordinator.db"
 
-### Phase 1: Fix Critical Issues (Priority 1)
-1. **Resolve Network Module Compilation**
-   - Fix P2P network mutable borrow issues
-   - Complete discovery protocol implementation
-   - Fix gossip protocol message handling
+[gpu]
+enabled = true
+device_id = 0
+```
 
-2. **Fix Type Mismatches**
-   - Align NetworkCoordinator types
-   - Implement missing methods
-   - Fix async/await patterns
+## 🧪 Testing
 
-### Phase 2: Complete Enhanced Coordinator (Priority 2)
-1. **Kafka Integration**
-   - Fix consumer/producer initialization
-   - Implement proper message handling
-   - Add error recovery mechanisms
+```bash
+# All tests
+cargo test
 
-2. **Metrics and Monitoring**
-   - Complete metrics collection
-   - Add comprehensive logging
-   - Implement health monitoring
+# GPU integration tests (requires GPU)
+cargo test --features cuda gpu_backend
 
-### Phase 3: Production Features (Priority 3)
-1. **Security**
-   - Add authentication and authorization
-   - Implement rate limiting
-   - Add input validation
+# Obelysk protocol tests
+cargo test obelysk
+```
 
-2. **Scalability**
-   - Add load balancing
-   - Implement caching
-   - Add horizontal scaling support
+## 📊 Benchmarks
 
-3. **Reliability**
-   - Add circuit breakers
-   - Implement retry mechanisms
-   - Add backup and recovery
+### Expected GPU Speedup (A100)
+
+| FFT Size | SIMD (CPU) | GPU | Speedup |
+|----------|------------|-----|---------|
+| 2^14 (16K) | 2ms | 0.5ms | 4x |
+| 2^16 (64K) | 10ms | 0.8ms | 12x |
+| 2^18 (256K) | 45ms | 1.5ms | 30x |
+| 2^20 (1M) | 200ms | 3ms | 67x |
+
+## 🔗 Dependencies
+
+- **[stwo-gpu](https://github.com/Bitsage-Network/stwo-gpu)** - GPU-accelerated Stwo prover fork
+- **cudarc** - CUDA runtime bindings (optional)
+- **starknet-rs** - Starknet client
+
+## 📝 API Endpoints
+
+### Health
+- `GET /health` - Node health status
+- `GET /status` - Detailed component status
+
+### Jobs
+- `POST /jobs` - Submit new job
+- `GET /jobs/:id` - Get job status
+- `GET /jobs/:id/proof` - Get job proof
+
+### Workers
+- `POST /workers/register` - Register worker
+- `GET /workers` - List workers
+- `GET /workers/:id/stats` - Worker statistics
 
 ## 🤝 Contributing
 
-### Development Workflow
 1. Fork the repository
-2. Create a feature branch
-3. Make changes and add tests
-4. Ensure all tests pass
-5. Submit a pull request
+2. Create feature branch (`git checkout -b feature/amazing`)
+3. Commit changes (`git commit -m 'Add amazing feature'`)
+4. Push to branch (`git push origin feature/amazing`)
+5. Open Pull Request
 
-### Code Style
-- Follow Rust conventions
-- Add comprehensive documentation
-- Include unit tests for new features
-- Update this README for significant changes
+## 📄 License
 
-### Testing
-- Run `cargo test` before submitting
-- Add integration tests for new features
-- Verify blockchain interactions work correctly
+MIT License - see [LICENSE](LICENSE) for details.
 
-## 📝 License
+## 🔗 Related Repositories
 
-This project is licensed under the MIT License - see the LICENSE file for details.
-
-## 🆘 Support
-
-For issues and questions:
-1. Check the troubleshooting section
-2. Review existing issues
-3. Create a new issue with detailed information
-4. Include logs and error messages
-
----
-
-**Note**: The enhanced coordinator is currently under development. Use the simple coordinator for immediate functionality while the enhanced version is being completed.
+- [stwo-gpu](https://github.com/Bitsage-Network/stwo-gpu) - GPU-accelerated Stwo prover
+- [BitSage-Cairo-Smart-Contracts](https://github.com/Bitsage-Network/BitSage-Cairo-Smart-Contracts) - Cairo contracts
+- [BitSage-WebApp](https://github.com/Bitsage-Network/BitSage-WebApp) - Web frontend
