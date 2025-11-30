@@ -1,0 +1,33 @@
+# BitSage Coordinator Configuration
+
+[network]
+listen_address = "0.0.0.0:8080"
+p2p_listen_address = "/ip4/0.0.0.0/tcp/9000"
+max_peers = 100
+enable_mdns = true
+
+[database]
+url = "postgresql://bitsage:bitsage_dev_password@postgres:5432/bitsage"
+max_connections = 10
+min_connections = 2
+
+[starknet]
+rpc_url = "http://starknet-devnet:5050"
+network = "devnet"
+# These will be set after deployment
+job_manager_address = "0x0"
+proof_verifier_address = "0x0"
+
+[job_processing]
+max_concurrent_jobs = 100
+job_timeout_seconds = 3600
+retry_attempts = 3
+
+[worker_management]
+health_check_interval_seconds = 60
+worker_timeout_seconds = 300
+
+[logging]
+level = "info"
+format = "json"
+

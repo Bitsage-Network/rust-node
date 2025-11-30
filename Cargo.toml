@@ -1,0 +1,148 @@
+[package]
+name = "bitsage-node"
+version = "0.1.0"
+edition = "2021"
+authors = ["Ciro Labs <contact@bitsage.network>"]
+license = "MIT"
+repository = "https://github.com/Ciro-AI-Labs/bitsage-network"
+homepage = "https://bitsage.network"
+description = "Bitsage Network Worker and Coordinator Node"
+keywords = ["starknet", "ai", "depin", "compute", "blockchain"]
+categories = ["cryptography", "network-programming", "mathematics"]
+rust-version = "1.70"
+
+[dependencies]
+# ===== Core Dependencies =====
+tokio = { version = "1.35", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+anyhow = "1.0"
+thiserror = "1.0"
+uuid = { version = "1.6", features = ["v4", "serde"] }
+clap = { version = "4.4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+config = "0.13"
+
+# ===== Async & Networking =====
+reqwest = { version = "0.11", features = ["json"] }
+axum = "0.7"
+tower = "0.4"
+tower-http = { version = "0.5", features = ["cors", "trace"] }
+tokio-stream = "0.1"
+async-stream = "0.3"
+url = "2.5"
+
+# ===== Cryptography =====
+rand = "0.8"
+sha2 = "0.10"
+sha3 = "0.10"
+blake2 = "0.10"
+
+# ===== Obelysk / Stwo ZK Proving =====
+# Note: Stwo is StarkWare's next-gen prover using Circle STARKs over Mersenne-31
+# VENDORED: Using local copy in ../libs/stwo to apply patches for latest nightly compatibility
+stwo-prover = { path = "../libs/stwo/crates/stwo", package = "stwo", features = ["prover", "parallel"] }
+stwo-constraint-framework = { path = "../libs/stwo/crates/constraint-framework", features = ["prover", "parallel"] }
+itertools = "0.12"  # Used for polynomial operations and by Stwo
+num-traits = "0.2"  # Numerical traits
+
+# ===== GPU Acceleration (Optional) =====
+# CUDA support for 50-100x speedup on proof generation
+cudarc = { version = "0.11", optional = true, features = ["driver", "nvrtc"] }
+half = { version = "2.3", optional = true }  # f16 support for GPU
+
+# ... (rest of file)
+
+# ===== Database =====
+sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "postgres", "chrono", "uuid", "rust_decimal"] }
+rust_decimal = { version = "1.33", features = ["serde"] }
+
+# ===== Starknet =====
+starknet = "0.7"
+starknet-accounts = "0.7"
+starknet-providers = "0.7"
+starknet-contract = "0.7"
+starknet-core = "0.7"
+starknet-crypto = "0.6"
+
+# ===== Utilities =====
+chrono = { version = "=0.4.34", features = ["serde"] }
+futures = "0.3"
+parking_lot = "0.12"
+dashmap = "5.5"
+once_cell = "1.19"
+lazy_static = "1.4"
+
+# ===== Job Processing =====
+rayon = "1.8"
+crossbeam = "0.8"
+
+# ===== P2P Networking =====
+libp2p = { version = "0.53", features = [
+    "tokio",
+    "tcp",
+    "websocket", 
+    "dns",
+    "quic",
+    "noise",
+    "yamux",
+    "gossipsub",
+    "kad",
+    "request-response",
+    "json",
+    "identify",
+    "ping",
+    "mdns",
+    "floodsub",
+    "macros",
+    "serde"
+] }
+multiaddr = "0.18"
+libp2p-identity = "0.1"
+void = "1.0"
+async-trait = "0.1"
+bincode = "1.3"
+md5 = "0.8.0"
+toml = "0.9.2"
+rdkafka = "0.37.0"
+
+# ===== Docker Integration (Optional) =====
+# bollard = "0.15"
+
+# ===== DataFusion (Data Plane) =====
+datafusion = "35.0.0"
+datafusion-proto = "35.0.0"
+object_store = { version = "0.9.0", features = ["aws"] }
+parquet = "50.0.0"
+
+# ===== Security (TEE/Crypto) =====
+aes-gcm = "0.10.3"
+rsa = "0.9.6"
+ed25519-dalek = "2.1.1"
+hex = "0.4.3"
+# sha2 = "0.10.8" # Removed duplicate
+# uuid = { version = "1.6", features = ["v4", "serde"] } # Removed duplicate
+
+[dev-dependencies]
+tokio-test = "0.4"
+
+[features]
+default = []
+# GPU acceleration with CUDA (requires NVIDIA GPU)
+# Usage: cargo build --features cuda
+cuda = ["cudarc", "half"]
+# GPU acceleration with ROCm (future, for AMD GPUs)
+rocm = []
+
+[[bin]]
+name = "ciro-worker"
+path = "src/bin/worker.rs"
+
+# TODO: Re-enable coordinator binary when import issues are resolved
+# [[bin]]
+# name = "ciro-coordinator"
+# path = "src/coordinator_main.rs"
+
+# [patch.crates-io]
+# No patches needed when using stable Rust

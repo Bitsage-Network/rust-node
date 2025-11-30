@@ -1,0 +1,22 @@
+[worker]
+id = "local-test-worker"
+coordinator_address = "http://127.0.0.1:8080"
+
+[capabilities]
+gpu_count = 0
+gpu_memory_gb = 0
+gpu_model = "None"
+tee_type = "None"
+gpu_tee_support = false
+cpu_cores = 8
+ram_gb = 16
+disk_gb = 500
+max_concurrent_jobs = 2
+
+[network]
+listen_port = 8081
+enable_p2p = false
+
+[security]
+enable_tee = false
+verify_attestations = false

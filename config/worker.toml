@@ -1,0 +1,29 @@
+# BitSage Worker Configuration
+
+[network]
+coordinator_url = "http://coordinator:8080"
+heartbeat_interval_seconds = 30
+
+[capabilities]
+# These will be auto-detected, but can be overridden
+gpu_enabled = false
+cpu_cores = 8
+ram_gb = 16
+max_parallel_tasks = 4
+
+[execution]
+# Supported job types
+supported_job_types = [
+    "ai_inference",
+    "ai_training",
+    "data_pipeline",
+    "proof_generation"
+]
+
+# Security
+enable_tee = false  # Set to true if running on H100/TDX hardware
+
+[logging]
+level = "info"
+format = "json"
+

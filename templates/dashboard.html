@@ -1,0 +1,489 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CIRO Network - Blockchain Indexer Dashboard</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: #333;
+            min-height: 100vh;
+        }
+        
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        
+        .header {
+            background: rgba(255, 255, 255, 0.1);
+            backdrop-filter: blur(10px);
+            border-radius: 20px;
+            padding: 30px;
+            margin-bottom: 30px;
+            text-align: center;
+            color: white;
+        }
+        
+        .header h1 {
+            font-size: 2.5em;
+            margin-bottom: 10px;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+        }
+        
+        .header p {
+            font-size: 1.2em;
+            opacity: 0.9;
+        }
+        
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+        
+        .stat-card {
+            background: rgba(255, 255, 255, 0.95);
+            border-radius: 15px;
+            padding: 25px;
+            text-align: center;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.1);
+            transition: transform 0.3s ease, box-shadow 0.3s ease;
+        }
+        
+        .stat-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 12px 40px rgba(0,0,0,0.15);
+        }
+        
+        .stat-number {
+            font-size: 2.5em;
+            font-weight: bold;
+            color: #667eea;
+            margin-bottom: 10px;
+        }
+        
+        .stat-label {
+            font-size: 1.1em;
+            color: #666;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+        
+        .events-section {
+            background: rgba(255, 255, 255, 0.95);
+            border-radius: 20px;
+            padding: 30px;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.1);
+        }
+        
+        .section-title {
+            font-size: 1.8em;
+            margin-bottom: 20px;
+            color: #333;
+            border-bottom: 3px solid #667eea;
+            padding-bottom: 10px;
+        }
+        
+        .filters {
+            display: flex;
+            gap: 15px;
+            margin-bottom: 25px;
+            flex-wrap: wrap;
+        }
+        
+        .filter-input {
+            padding: 10px 15px;
+            border: 2px solid #e1e5e9;
+            border-radius: 10px;
+            font-size: 1em;
+            transition: border-color 0.3s ease;
+        }
+        
+        .filter-input:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+        
+        .refresh-btn {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 10px;
+            cursor: pointer;
+            font-size: 1em;
+            font-weight: 600;
+            transition: transform 0.2s ease;
+        }
+        
+        .refresh-btn:hover {
+            transform: scale(1.05);
+        }
+        
+        .events-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 20px;
+        }
+        
+        .events-table th,
+        .events-table td {
+            padding: 15px;
+            text-align: left;
+            border-bottom: 1px solid #e1e5e9;
+        }
+        
+        .events-table th {
+            background: #f8f9fa;
+            font-weight: 600;
+            color: #495057;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            font-size: 0.9em;
+        }
+        
+        .events-table tr:hover {
+            background: #f8f9fa;
+        }
+        
+        .event-type {
+            background: #667eea;
+            color: white;
+            padding: 5px 10px;
+            border-radius: 15px;
+            font-size: 0.8em;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+        
+        .contract-name {
+            font-weight: 600;
+            color: #495057;
+        }
+        
+        .block-number {
+            font-family: 'Courier New', monospace;
+            background: #e9ecef;
+            padding: 3px 8px;
+            border-radius: 5px;
+            font-size: 0.9em;
+        }
+
+        /* Ensure long hex/data content wraps instead of overflowing */
+        .events-table td:nth-child(5) {
+            max-width: 480px;
+            white-space: normal;
+            word-break: break-word;
+            overflow-wrap: anywhere;
+        }
+
+        .keys-data {
+            display: block;
+            max-width: 100%;
+            white-space: pre-wrap; /* preserve JSON formatting, allow wrapping */
+            word-break: break-word;
+            overflow-wrap: anywhere;
+            font-family: 'Courier New', monospace;
+            font-size: 0.85em;
+            color: #666;
+            background: #f8f9fa;
+            padding: 8px 10px;
+            border-radius: 6px;
+        }
+        
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: #666;
+            font-size: 1.1em;
+        }
+        
+        .loading::after {
+            content: '...';
+            animation: dots 2s infinite;
+        }
+        
+        @keyframes dots {
+            0%, 20% { content: '.'; }
+            40% { content: '..'; }
+            60%, 100% { content: '...'; }
+        }
+        
+        .status-indicator {
+            display: inline-block;
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            margin-right: 8px;
+        }
+        
+        .status-running {
+            background: #28a745;
+            box-shadow: 0 0 10px rgba(40, 167, 69, 0.5);
+        }
+        
+        .status-stopped {
+            background: #dc3545;
+        }
+        
+        @media (max-width: 768px) {
+            .container {
+                padding: 10px;
+            }
+            
+            .header {
+                padding: 20px;
+            }
+            
+            .header h1 {
+                font-size: 2em;
+            }
+            
+            .filters {
+                flex-direction: column;
+            }
+            
+            .events-table {
+                font-size: 0.9em;
+            }
+            
+            .events-table th,
+            .events-table td {
+                padding: 10px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🌐 CIRO Network</h1>
+            <p>Blockchain Event Indexer Dashboard</p>
+            <p><span class="status-indicator status-running"></span>Indexer Status: <span id="indexer-status">Loading...</span></p>
+        </div>
+        
+        <div class="stats-grid">
+            <div class="stat-card">
+                <div class="stat-number" id="total-events">-</div>
+                <div class="stat-label">Total Events</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-number" id="total-blocks">-</div>
+                <div class="stat-label">Blocks Processed</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-number" id="last-block">-</div>
+                <div class="stat-label">Latest Block</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-number" id="contracts-monitored">2</div>
+                <div class="stat-label">Contracts Monitored</div>
+            </div>
+        </div>
+        
+        <div class="events-section">
+            <h2 class="section-title">📋 Recent Events</h2>
+            
+            <div class="filters">
+                <select class="filter-input" id="contract-filter">
+                    <option value="">All Contracts</option>
+                    <option value="ciro_token">CIRO Token</option>
+                    <option value="cdc_pool">CDC Pool</option>
+                    <option value="job_manager">Job Manager</option>
+                    <option value="treasury_timelock">Treasury Timelock</option>
+                    <option value="reputation_manager">Reputation Manager</option>
+                    <option value="simple_events">SimpleEvents</option>
+                    <option value="linear_vesting">Linear Vesting</option>
+                    <option value="milestone_vesting">Milestone Vesting</option>
+                    <option value="burn_manager">Burn Manager</option>
+                </select>
+                
+                <select class="filter-input" id="event-type-filter">
+                    <option value="">All Event Types</option>
+                    <option value="proposed">Transaction Proposed</option>
+                    <option value="approved">Transaction Approved</option>
+                    <option value="executed">Transaction Executed</option>
+                    <option value="emergency_pause">Emergency Pause</option>
+                </select>
+                
+                <input type="number" class="filter-input" id="limit-input" placeholder="Limit" value="50" min="1" max="200">
+                <input type="number" class="filter-input" id="page-input" placeholder="Page" value="1" min="1">
+                
+                <button class="refresh-btn" onclick="loadEvents()">🔄 Refresh</button>
+            </div>
+            
+            <div id="events-content">
+                <div class="loading">Loading events</div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let eventsPollInterval;
+        
+        // Load initial data
+        document.addEventListener('DOMContentLoaded', function() {
+            loadStats();
+            loadContracts();
+            loadEvents();
+            
+            // Set up auto-refresh every 30 seconds
+            eventsPollInterval = setInterval(() => {
+                loadStats();
+                loadContracts();
+                loadEvents();
+            }, 30000);
+        });
+        
+        async function loadStats() {
+            try {
+                const response = await fetch('/api/stats');
+                const stats = await response.json();
+                
+                document.getElementById('total-events').textContent = stats.total_events.toLocaleString();
+                
+                // Use values returned by the API
+                document.getElementById('total-blocks').textContent = stats.total_blocks.toLocaleString();
+                document.getElementById('last-block').textContent = stats.last_block.toLocaleString();
+                document.getElementById('indexer-status').textContent = 'Running';
+                
+            } catch (error) {
+                console.error('Failed to load stats:', error);
+                document.getElementById('indexer-status').textContent = 'Error';
+                document.querySelector('.status-indicator').className = 'status-indicator status-stopped';
+            }
+        }
+        
+        async function loadContracts() {
+            try {
+                const response = await fetch('/api/contracts');
+                const contracts = await response.json();
+                
+                // Update contracts monitored count
+                document.getElementById('contracts-monitored').textContent = contracts.length;
+                
+                // Update contract filter dropdown
+                const contractFilter = document.getElementById('contract-filter');
+                contractFilter.innerHTML = '<option value="">All Contracts</option>';
+                contracts.forEach(contract => {
+                    const option = document.createElement('option');
+                    option.value = contract.address;
+                    option.textContent = contract.name;
+                    contractFilter.appendChild(option);
+                });
+                
+            } catch (error) {
+                console.error('Failed to load contracts:', error);
+                document.getElementById('contracts-monitored').textContent = '?';
+            }
+        }
+        
+        let currentPage = 1;
+        async function loadEvents() {
+            try {
+                const contract = document.getElementById('contract-filter').value;
+                const eventType = document.getElementById('event-type-filter').value;
+                const limit = document.getElementById('limit-input').value || 50;
+                const page = document.getElementById('page-input').value || 1;
+                currentPage = parseInt(page, 10);
+                const offset = (currentPage - 1) * limit;
+                
+                const params = new URLSearchParams();
+                if (contract) params.append('contract', contract);
+                if (eventType) params.append('event_type', eventType);
+                params.append('limit', limit);
+                params.append('offset', offset);
+                
+                const response = await fetch(`/api/events?${params}`);
+                const events = await response.json();
+                
+                renderEventsTable(events);
+                
+            } catch (error) {
+                console.error('Failed to load events:', error);
+                document.getElementById('events-content').innerHTML = 
+                    '<div class="loading">Failed to load events. Check if indexer is running.</div>';
+            }
+        }
+        
+        function renderEventsTable(events) {
+            if (events.length === 0) {
+                document.getElementById('events-content').innerHTML = 
+                    '<div class="loading">No events found. Indexer may still be syncing...</div>';
+                return;
+            }
+            
+            const table = `
+                <table class="events-table">
+                    <thead>
+                        <tr>
+                            <th>Event Type</th>
+                            <th>Contract</th>
+                            <th>Block</th>
+                            <th>Timestamp</th>
+                            <th>Keys/Data</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${events.map(event => `
+                            <tr>
+                                <td><span class="event-type">${event.event_type}</span></td>
+                                <td>
+                                    <div class="contract-name">${event.contract_address.substring(0, 12)}...</div>
+                                    <small style="color: #666;">${event.contract_address}</small>
+                                </td>
+                                <td><span class="block-number">${event.block_number.toLocaleString()}</span></td>
+                                <td>${new Date(event.timestamp * 1000).toLocaleString()}</td>
+                                <td><span class="keys-data">${JSON.stringify(event.data)}</span></td>
+                            </tr>
+                        `).join('')}
+                    </tbody>
+                </table>
+                <div style="display:flex; justify-content:flex-end; gap:10px; margin-top:12px;">
+                    <button class="refresh-btn" id="prev-page">⬅ Prev</button>
+                    <div style="align-self:center; color:#666;">Page ${currentPage}</div>
+                    <button class="refresh-btn" id="next-page">Next ➡</button>
+                </div>
+            `;
+            
+            document.getElementById('events-content').innerHTML = table;
+
+            document.getElementById('prev-page').onclick = () => {
+                const pageInput = document.getElementById('page-input');
+                const p = Math.max(1, (parseInt(pageInput.value || '1', 10) - 1));
+                pageInput.value = p;
+                loadEvents();
+            };
+            document.getElementById('next-page').onclick = () => {
+                const pageInput = document.getElementById('page-input');
+                const p = (parseInt(pageInput.value || '1', 10) + 1);
+                pageInput.value = p;
+                loadEvents();
+            };
+        }
+        
+        // Manual refresh
+        function refreshData() {
+            loadStats();
+            loadEvents();
+        }
+        
+        // Add event listeners to filters
+        document.getElementById('contract-filter').addEventListener('change', loadEvents);
+        document.getElementById('event-type-filter').addEventListener('change', loadEvents);
+        document.getElementById('limit-input').addEventListener('change', loadEvents);
+        document.getElementById('page-input').addEventListener('change', loadEvents);
+    </script>
+</body>
+</html>

@@ -1,0 +1,660 @@
+//! # Database Layer
+//!
+//! This module handles database operations for jobs, tasks, and workers using PostgreSQL.
+
+use crate::node::coordinator::{JobState, WorkerInfo, TaskStatus};
+use crate::storage::models::*;
+use anyhow::{Result, Context};
+use chrono::Utc;
+use sqlx::PgPool;
+use std::collections::HashMap;
+use tracing::info;
+
+/// Database interface for CIRO Network
+pub struct Database {
+    pool: PgPool,
+}
+
+impl Database {
+    /// Create a new database instance with connection pool
+    pub async fn new(database_url: &str) -> Result<Self> {
+        let pool = PgPool::connect(database_url)
+            .await
+            .context("Failed to connect to PostgreSQL database")?;
+        
+        info!("Successfully connected to PostgreSQL database");
+        Ok(Self { pool })
+    }
+
+    /// Initialize database schema by running migrations
+    pub async fn initialize(&self) -> Result<()> {
+        info!("Initializing database schema...");
+        
+        // Run the migration SQL
+        let migration_sql = include_str!("../../migrations/001_initial_schema.sql");
+        sqlx::query(migration_sql)
+            .execute(&self.pool)
+            .await
+            .context("Failed to run database migrations")?;
+        
+        info!("Database schema initialized successfully");
+        Ok(())
+    }
+
+    /// Health check for database connection
+    pub async fn health_check(&self) -> Result<()> {
+        sqlx::query("SELECT 1")
+            .execute(&self.pool)
+            .await
+            .context("Database health check failed")?;
+        Ok(())
+    }
+
+    // ===== JOB OPERATIONS =====
+
+    /// Store job state in the database
+    pub async fn store_job(&self, job_state: &JobState) -> Result<()> {
+        let job_input = CreateJobInput {
+            job_id: job_state.job_id.to_string(),
+            job_type: format!("{:?}", job_state.request.job_type),
+            priority: job_state.request.priority.to_string(),
+            parameters: serde_json::to_value(&job_state.request.job_type)?,
+            metadata: serde_json::json!({
+                "max_cost": job_state.request.max_cost,
+                "deadline": job_state.request.deadline,
+                "client_address": job_state.request.client_address,
+                "callback_url": job_state.request.callback_url
+            }),
+            cpu_cores: None, // Will be calculated from tasks
+            memory_mb: None, // Will be calculated from tasks
+            gpu_memory_mb: None, // Will be calculated from tasks
+            storage_gb: None, // Will be calculated from tasks
+            parallelization_strategy: None, // Will be determined during job splitting
+            chunk_size: None, // Will be determined during job splitting
+        };
+
+        self.create_job(job_input).await?;
+        info!("Stored job {} in database", job_state.job_id);
+        Ok(())
+    }
+
+    /// Create a new job in the database
+    pub async fn create_job(&self, input: CreateJobInput) -> Result<JobRecord> {
+        let record = sqlx::query_as!(
+            JobRecord,
+            r#"
+            INSERT INTO jobs (
+                job_id, job_type, status, priority, parameters, metadata,
+                cpu_cores, memory_mb, gpu_memory_mb, storage_gb,
+                parallelization_strategy, chunk_size
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            RETURNING *
+            "#,
+            input.job_id,
+            input.job_type,
+            "pending",
+            input.priority,
+            input.parameters,
+            input.metadata,
+            input.cpu_cores,
+            input.memory_mb,
+            input.gpu_memory_mb,
+            input.storage_gb,
+            input.parallelization_strategy,
+            input.chunk_size
+        )
+        .fetch_one(&self.pool)
+        .await
+        .context("Failed to create job")?;
+
+        Ok(record)
+    }
+
+    /// Get job by job_id
+    pub async fn get_job(&self, job_id: &str) -> Result<Option<JobRecord>> {
+        let record = sqlx::query_as!(
+            JobRecord,
+            "SELECT * FROM jobs WHERE job_id = $1",
+            job_id
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .context("Failed to get job")?;
+
+        Ok(record)
+    }
+
+    /// Update job status
+    pub async fn update_job_status(&self, job_id: &str, status: &str) -> Result<()> {
+        let now = Utc::now();
+        let (started_at, completed_at) = match status {
+            "processing" => (Some(now), None),
+            "completed" | "failed" | "cancelled" => (None, Some(now)),
+            _ => (None, None),
+        };
+
+        sqlx::query!(
+            r#"
+            UPDATE jobs 
+            SET status = $1, 
+                started_at = COALESCE($2, started_at),
+                completed_at = COALESCE($3, completed_at),
+                updated_at = NOW()
+            WHERE job_id = $4
+            "#,
+            status,
+            started_at,
+            completed_at,
+            job_id
+        )
+        .execute(&self.pool)
+        .await
+        .context("Failed to update job status")?;
+
+        info!("Updated job {} status to {}", job_id, status);
+        Ok(())
+    }
+
+    /// Get jobs with optional filtering
+    pub async fn get_jobs(&self, filter: Option<JobFilter>) -> Result<Vec<JobRecord>> {
+        let mut query = "SELECT * FROM jobs WHERE 1=1".to_string();
+        let mut params: Vec<Box<dyn sqlx::Encode<'_, sqlx::Postgres> + Send + Sync>> = Vec::new();
+        let mut param_count = 0;
+
+        if let Some(f) = filter {
+            if let Some(status) = f.status {
+                param_count += 1;
+                query.push_str(&format!(" AND status = ${}", param_count));
+                params.push(Box::new(status));
+            }
+            if let Some(job_type) = f.job_type {
+                param_count += 1;
+                query.push_str(&format!(" AND job_type = ${}", param_count));
+                params.push(Box::new(job_type));
+            }
+            if let Some(priority) = f.priority {
+                param_count += 1;
+                query.push_str(&format!(" AND priority = ${}", param_count));
+                params.push(Box::new(priority));
+            }
+        }
+
+        query.push_str(" ORDER BY created_at DESC");
+
+        let records = sqlx::query_as::<_, JobRecord>(&query)
+            .fetch_all(&self.pool)
+            .await
+            .context("Failed to get jobs")?;
+
+        Ok(records)
+    }
+
+    // ===== WORKER OPERATIONS =====
+
+    /// Store worker information in the database
+    pub async fn store_worker(&self, worker_info: &WorkerInfo) -> Result<()> {
+        let worker_input = CreateWorkerInput {
+            worker_id: worker_info.worker_id.to_string(),
+            capabilities: serde_json::to_value(&worker_info.capabilities)?,
+            cpu_cores: worker_info.capabilities.cpu_cores as i32,
+            memory_mb: (worker_info.capabilities.ram_gb * 1024) as i32,
+            gpu_memory_mb: (worker_info.capabilities.gpu_memory / 1024 / 1024) as i32,
+            storage_gb: 100, // Default storage, could be configurable
+            ip_address: None, // Network info not available in current WorkerInfo
+            port: None, // Network info not available in current WorkerInfo
+            public_key: None, // Network info not available in current WorkerInfo
+            version: None, // Version not available in current WorkerInfo
+            os_info: None, // OS info not available in current WorkerInfo
+            hardware_info: serde_json::json!({
+                "gpu_memory": worker_info.capabilities.gpu_memory,
+                "cpu_cores": worker_info.capabilities.cpu_cores,
+                "ram_gb": worker_info.capabilities.ram_gb,
+                "supported_job_types": worker_info.capabilities.supported_job_types,
+                "docker_enabled": worker_info.capabilities.docker_enabled,
+                "max_parallel_tasks": worker_info.capabilities.max_parallel_tasks
+            }),
+        };
+
+        self.create_worker(worker_input).await?;
+        info!("Stored worker {} in database", worker_info.worker_id);
+        Ok(())
+    }
+
+    /// Create a new worker in the database
+    pub async fn create_worker(&self, input: CreateWorkerInput) -> Result<WorkerRecord> {
+        let record = sqlx::query_as!(
+            WorkerRecord,
+            r#"
+            INSERT INTO workers (
+                worker_id, capabilities, cpu_cores, memory_mb, gpu_memory_mb, storage_gb,
+                ip_address, port, public_key, version, os_info, hardware_info
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            ON CONFLICT (worker_id) DO UPDATE SET
+                capabilities = EXCLUDED.capabilities,
+                cpu_cores = EXCLUDED.cpu_cores,
+                memory_mb = EXCLUDED.memory_mb,
+                gpu_memory_mb = EXCLUDED.gpu_memory_mb,
+                storage_gb = EXCLUDED.storage_gb,
+                ip_address = EXCLUDED.ip_address,
+                port = EXCLUDED.port,
+                public_key = EXCLUDED.public_key,
+                version = EXCLUDED.version,
+                os_info = EXCLUDED.os_info,
+                hardware_info = EXCLUDED.hardware_info,
+                last_heartbeat = NOW(),
+                last_seen = NOW()
+            RETURNING *
+            "#,
+            input.worker_id,
+            input.capabilities,
+            input.cpu_cores,
+            input.memory_mb,
+            input.gpu_memory_mb,
+            input.storage_gb,
+                         input.ip_address,
+            input.port,
+            input.public_key,
+            input.version,
+            input.os_info,
+            input.hardware_info
+        )
+        .fetch_one(&self.pool)
+        .await
+        .context("Failed to create worker")?;
+
+        Ok(record)
+    }
+
+    /// Get worker by worker_id
+    pub async fn get_worker(&self, worker_id: &str) -> Result<Option<WorkerRecord>> {
+        let record = sqlx::query_as!(
+            WorkerRecord,
+            "SELECT * FROM workers WHERE worker_id = $1",
+            worker_id
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .context("Failed to get worker")?;
+
+        Ok(record)
+    }
+
+    /// Update worker status and heartbeat
+    pub async fn update_worker_status(&self, worker_id: &str, input: UpdateWorkerStatusInput) -> Result<()> {
+        sqlx::query!(
+            r#"
+            UPDATE workers 
+            SET status = $1, 
+                last_heartbeat = $2,
+                last_seen = $3,
+                jobs_completed = COALESCE($4, jobs_completed),
+                jobs_failed = COALESCE($5, jobs_failed),
+                total_compute_time_ms = COALESCE($6, total_compute_time_ms),
+                average_response_time_ms = COALESCE($7, average_response_time_ms),
+                reputation_score = COALESCE($8, reputation_score)
+            WHERE worker_id = $9
+            "#,
+            input.status,
+            input.last_heartbeat,
+            input.last_seen,
+            input.jobs_completed,
+            input.jobs_failed,
+            input.total_compute_time_ms,
+            input.average_response_time_ms,
+            input.reputation_score,
+            worker_id
+        )
+        .execute(&self.pool)
+        .await
+        .context("Failed to update worker status")?;
+
+        Ok(())
+    }
+
+    /// Get workers with optional filtering
+    pub async fn get_workers(&self, filter: Option<WorkerFilter>) -> Result<Vec<WorkerRecord>> {
+        let mut query = "SELECT * FROM workers WHERE 1=1".to_string();
+
+        if let Some(f) = filter {
+            if let Some(status) = f.status {
+                query.push_str(&format!(" AND status = '{}'", status));
+            }
+            if let Some(min_cpu) = f.min_cpu_cores {
+                query.push_str(&format!(" AND cpu_cores >= {}", min_cpu));
+            }
+            if let Some(min_memory) = f.min_memory_mb {
+                query.push_str(&format!(" AND memory_mb >= {}", min_memory));
+            }
+            if let Some(min_gpu) = f.min_gpu_memory_mb {
+                query.push_str(&format!(" AND gpu_memory_mb >= {}", min_gpu));
+            }
+        }
+
+        query.push_str(" ORDER BY reputation_score DESC, last_heartbeat DESC");
+
+        let records = sqlx::query_as::<_, WorkerRecord>(&query)
+            .fetch_all(&self.pool)
+            .await
+            .context("Failed to get workers")?;
+
+        Ok(records)
+    }
+
+    // ===== TASK OPERATIONS =====
+
+    /// Create a new task in the database
+    pub async fn create_task(&self, input: CreateTaskInput) -> Result<TaskRecord> {
+        let record = sqlx::query_as!(
+            TaskRecord,
+            r#"
+            INSERT INTO tasks (
+                task_id, job_id, task_type, sequence_number, dependencies,
+                parameters, input_data, max_retries
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            RETURNING *
+            "#,
+            input.task_id,
+            input.job_id,
+            input.task_type,
+            input.sequence_number,
+            input.dependencies.as_ref().map(|deps| deps.as_slice()),
+            input.parameters,
+            input.input_data,
+            input.max_retries.unwrap_or(3)
+        )
+        .fetch_one(&self.pool)
+        .await
+        .context("Failed to create task")?;
+
+        Ok(record)
+    }
+
+    /// Update task status in the database
+    pub async fn update_task_status(&self, task_id: &str, input: UpdateTaskStatusInput) -> Result<()> {
+        sqlx::query!(
+            r#"
+            UPDATE tasks 
+            SET status = $1,
+                worker_id = COALESCE($2, worker_id),
+                started_at = COALESCE($3, started_at),
+                completed_at = COALESCE($4, completed_at),
+                output_data = COALESCE($5, output_data),
+                cpu_usage_percent = COALESCE($6, cpu_usage_percent),
+                memory_usage_mb = COALESCE($7, memory_usage_mb),
+                gpu_usage_percent = COALESCE($8, gpu_usage_percent),
+                processing_time_ms = COALESCE($9, processing_time_ms),
+                error_message = COALESCE($10, error_message),
+                updated_at = NOW()
+            WHERE task_id = $11
+            "#,
+            input.status,
+            input.worker_id,
+            input.started_at,
+            input.completed_at,
+            input.output_data,
+            input.cpu_usage_percent,
+            input.memory_usage_mb,
+            input.gpu_usage_percent,
+            input.processing_time_ms,
+            input.error_message,
+            task_id
+        )
+        .execute(&self.pool)
+        .await
+        .context("Failed to update task status")?;
+
+        info!("Updated task {} status to {}", task_id, input.status);
+        Ok(())
+    }
+
+    /// Get task by task_id
+    pub async fn get_task(&self, task_id: &str) -> Result<Option<TaskRecord>> {
+        let record = sqlx::query_as!(
+            TaskRecord,
+            "SELECT * FROM tasks WHERE task_id = $1",
+            task_id
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .context("Failed to get task")?;
+
+        Ok(record)
+    }
+
+    /// Get job ID for a given task
+    pub async fn get_job_id_for_task(&self, task_id: &str) -> Result<Option<String>> {
+        let row = sqlx::query!(
+            "SELECT job_id FROM tasks WHERE task_id = $1",
+            task_id
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .context("Failed to get job ID for task")?;
+
+        Ok(row.map(|r| r.job_id))
+    }
+
+    /// Get tasks with optional filtering
+    pub async fn get_tasks(&self, filter: Option<TaskFilter>) -> Result<Vec<TaskRecord>> {
+        let mut query = "SELECT * FROM tasks WHERE 1=1".to_string();
+
+        if let Some(f) = filter {
+            if let Some(status) = f.status {
+                query.push_str(&format!(" AND status = '{}'", status));
+            }
+            if let Some(job_id) = f.job_id {
+                query.push_str(&format!(" AND job_id = '{}'", job_id));
+            }
+            if let Some(worker_id) = f.worker_id {
+                query.push_str(&format!(" AND worker_id = '{}'", worker_id));
+            }
+            if let Some(task_type) = f.task_type {
+                query.push_str(&format!(" AND task_type = '{}'", task_type));
+            }
+        }
+
+        query.push_str(" ORDER BY sequence_number ASC");
+
+        let records = sqlx::query_as::<_, TaskRecord>(&query)
+            .fetch_all(&self.pool)
+            .await
+            .context("Failed to get tasks")?;
+
+        Ok(records)
+    }
+
+    // ===== SYSTEM STATE OPERATIONS =====
+
+    /// Initialize system state
+    pub async fn initialize_system_state(&self, coordinator_id: &str) -> Result<SystemStateRecord> {
+        let record = sqlx::query_as!(
+            SystemStateRecord,
+            r#"
+            INSERT INTO system_state (coordinator_id, status, configuration)
+            VALUES ($1, 'initializing', '{}')
+            ON CONFLICT (coordinator_id) DO UPDATE SET
+                status = EXCLUDED.status,
+                last_updated = NOW()
+            RETURNING *
+            "#,
+            coordinator_id
+        )
+        .fetch_one(&self.pool)
+        .await
+        .context("Failed to initialize system state")?;
+
+        Ok(record)
+    }
+
+    /// Update system state
+    pub async fn update_system_state(&self, coordinator_id: &str, status: &str) -> Result<()> {
+        sqlx::query!(
+            r#"
+            UPDATE system_state 
+            SET status = $1, last_updated = NOW()
+            WHERE coordinator_id = $2
+            "#,
+            status,
+            coordinator_id
+        )
+        .execute(&self.pool)
+        .await
+        .context("Failed to update system state")?;
+
+        Ok(())
+    }
+
+    /// Get system metrics
+    pub async fn get_system_metrics(&self) -> Result<HashMap<String, i64>> {
+        let mut metrics = HashMap::new();
+
+        // Get job counts by status
+        let job_counts = sqlx::query!(
+            "SELECT status, COUNT(*) as count FROM jobs GROUP BY status"
+        )
+        .fetch_all(&self.pool)
+        .await
+        .context("Failed to get job counts")?;
+
+        for row in job_counts {
+            metrics.insert(format!("jobs_{}", row.status), row.count.unwrap_or(0));
+        }
+
+        // Get worker counts by status
+        let worker_counts = sqlx::query!(
+            "SELECT status, COUNT(*) as count FROM workers GROUP BY status"
+        )
+        .fetch_all(&self.pool)
+        .await
+        .context("Failed to get worker counts")?;
+
+        for row in worker_counts {
+            metrics.insert(format!("workers_{}", row.status), row.count.unwrap_or(0));
+        }
+
+        // Get task counts by status
+        let task_counts = sqlx::query!(
+            "SELECT status, COUNT(*) as count FROM tasks GROUP BY status"
+        )
+        .fetch_all(&self.pool)
+        .await
+        .context("Failed to get task counts")?;
+
+        for row in task_counts {
+            metrics.insert(format!("tasks_{}", row.status), row.count.unwrap_or(0));
+        }
+
+        Ok(metrics)
+    }
+
+    // ===== ANALYTICS AND REPORTING =====
+
+    /// Archive completed job to history
+    pub async fn archive_job(&self, job_id: &str) -> Result<()> {
+        let job = self.get_job(job_id).await?;
+        if let Some(job_record) = job {
+            if job_record.status == "completed" || job_record.status == "failed" {
+                let job_data = serde_json::to_value(&job_record)?;
+                let performance_metrics = serde_json::json!({
+                    "processing_time_ms": job_record.processing_time_ms,
+                    "total_tasks": job_record.total_tasks,
+                    "completed_tasks": job_record.completed_tasks,
+                    "failed_tasks": job_record.failed_tasks
+                });
+
+                sqlx::query!(
+                    r#"
+                    INSERT INTO job_history (
+                        job_id, job_data, performance_metrics, job_type,
+                        completion_time_ms, total_tasks, worker_count
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+                    "#,
+                    job_id,
+                    job_data,
+                    performance_metrics,
+                    job_record.job_type,
+                    job_record.processing_time_ms,
+                    job_record.total_tasks,
+                    1i32 // TODO: Calculate actual worker count
+                )
+                .execute(&self.pool)
+                .await
+                .context("Failed to archive job")?;
+
+                info!("Archived job {} to history", job_id);
+            }
+        }
+        Ok(())
+    }
+
+    /// Get performance analytics
+    pub async fn get_performance_analytics(&self) -> Result<HashMap<String, serde_json::Value>> {
+        let mut analytics = HashMap::new();
+
+        // Average job completion time by type
+        let avg_completion_times = sqlx::query!(
+            r#"
+            SELECT job_type, AVG(completion_time_ms) as avg_time
+            FROM job_history
+            WHERE completion_time_ms IS NOT NULL
+            GROUP BY job_type
+            "#
+        )
+        .fetch_all(&self.pool)
+        .await
+        .context("Failed to get average completion times")?;
+
+        let mut completion_times = HashMap::new();
+        for row in avg_completion_times {
+            completion_times.insert(row.job_type, row.avg_time);
+        }
+        analytics.insert("avg_completion_times".to_string(), serde_json::to_value(completion_times)?);
+
+        // Worker performance metrics
+        let worker_performance = sqlx::query!(
+            r#"
+            SELECT worker_id, reputation_score, jobs_completed, jobs_failed,
+                   average_response_time_ms, total_compute_time_ms
+            FROM workers
+            WHERE jobs_completed > 0
+            ORDER BY reputation_score DESC
+            LIMIT 10
+            "#
+        )
+        .fetch_all(&self.pool)
+        .await
+        .context("Failed to get worker performance")?;
+
+        analytics.insert("top_workers".to_string(), serde_json::to_value(worker_performance)?);
+
+        Ok(analytics)
+    }
+
+    /// Close database connection pool
+    pub async fn close(&self) {
+        self.pool.close().await;
+        info!("Database connection pool closed");
+    }
+}
+
+// Helper function to convert our types to database types
+impl From<&TaskStatus> for &str {
+    fn from(status: &TaskStatus) -> Self {
+        match status {
+            TaskStatus::Pending => "pending",
+            TaskStatus::Queued => "pending",
+            TaskStatus::Assigned => "assigned",
+            TaskStatus::Running => "processing",
+            TaskStatus::Completed => "completed",
+            TaskStatus::Failed => "failed",
+            TaskStatus::Cancelled => "cancelled",
+        }
+    }
+}
+
+impl From<TaskStatus> for String {
+    fn from(status: TaskStatus) -> Self {
+        let str_status: &str = (&status).into();
+        str_status.to_string()
+    }
+} 
