@@ -35,7 +35,7 @@
 //! 4. **Proof Output**: Only cryptographic proof leaves the system
 //! 5. **Attestation**: Hardware attestation proves correct execution
 
-use anyhow::{Result, anyhow, Context};
+use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 use sha2::{Sha256, Digest};
 use std::time::Instant;
@@ -43,7 +43,7 @@ use tracing::{info, warn, debug};
 
 use super::tee::{TEEContext, AttestationQuote};
 use crate::obelysk::{
-    ExecutionTrace, StarkProof, M31,
+    ExecutionTrace, StarkProof,
     stwo_adapter::{prove_with_stwo_gpu, is_gpu_available},
 };
 
@@ -225,70 +225,116 @@ impl GpuSecureProver {
             .unwrap_or(false)
     }
     
-    /// Encrypt payload for secure transmission
+    /// Encrypt payload for secure transmission using AES-256-GCM.
+    /// 
+    /// AES-256-GCM provides:
+    /// - Confidentiality: 256-bit AES encryption
+    /// - Integrity: 128-bit authentication tag
+    /// - Authenticity: AEAD (Authenticated Encryption with Associated Data)
+    /// 
+    /// # Security Properties
+    /// 
+    /// - Nonces are generated via OS CSPRNG (never reused)
+    /// - Authentication tag prevents tampering
+    /// - Session ID is bound to encryption context
     pub fn encrypt_payload(&self, data: &[u8]) -> Result<EncryptedPayload> {
+        use aes_gcm::{
+            aead::{Aead, KeyInit},
+            Aes256Gcm, Nonce,
+        };
+        use rand::RngCore;
+        
         let session_key = self.session_key
             .as_ref()
             .ok_or_else(|| anyhow!("No active session"))?;
         
-        // Generate nonce
-        use rand::RngCore;
-        let mut nonce = [0u8; 12];
-        rand::rngs::OsRng.fill_bytes(&mut nonce);
+        // Generate cryptographically secure random nonce (96 bits / 12 bytes)
+        // CRITICAL: Nonce must NEVER be reused with the same key
+        let mut nonce_bytes = [0u8; 12];
+        rand::rngs::OsRng.fill_bytes(&mut nonce_bytes);
+        let nonce = Nonce::from_slice(&nonce_bytes);
         
-        // For now, use simple XOR encryption as placeholder
-        // In production, use proper AES-GCM from `aes-gcm` crate
-        let ciphertext: Vec<u8> = data
-            .iter()
-            .enumerate()
-            .map(|(i, &b)| b ^ session_key.key[i % 32])
-            .collect();
+        // Initialize AES-256-GCM cipher with session key
+        let cipher = Aes256Gcm::new_from_slice(&session_key.key)
+            .map_err(|e| anyhow!("Failed to initialize AES-256-GCM: {:?}", e))?;
         
-        // Mock authentication tag
+        // Encrypt with authentication
+        // The ciphertext includes the 16-byte auth tag appended
+        let ciphertext_with_tag = cipher
+            .encrypt(nonce, data)
+            .map_err(|e| anyhow!("AES-256-GCM encryption failed: {:?}", e))?;
+        
+        // Split ciphertext and tag (tag is last 16 bytes)
+        let tag_offset = ciphertext_with_tag.len() - 16;
+        let ciphertext = ciphertext_with_tag[..tag_offset].to_vec();
         let mut tag = [0u8; 16];
-        let mut hasher = Sha256::new();
-        hasher.update(&ciphertext);
-        hasher.update(&session_key.key);
-        let hash = hasher.finalize();
-        tag.copy_from_slice(&hash[..16]);
+        tag.copy_from_slice(&ciphertext_with_tag[tag_offset..]);
+        
+        debug!(
+            "🔐 Encrypted {} bytes → {} bytes ciphertext + 16 byte tag",
+            data.len(),
+            ciphertext.len()
+        );
         
         Ok(EncryptedPayload {
             session_id: session_key.session_id().to_string(),
             ciphertext,
-            nonce,
+            nonce: nonce_bytes,
             tag,
         })
     }
     
-    /// Decrypt payload inside TEE
+    /// Decrypt payload inside TEE using AES-256-GCM.
+    /// 
+    /// # Security
+    /// 
+    /// - Verifies session ID before decryption
+    /// - Authentication tag is verified during decryption
+    /// - Fails safely on any tampering attempt
     fn decrypt_payload(&self, payload: &EncryptedPayload) -> Result<Vec<u8>> {
+        use aes_gcm::{
+            aead::{Aead, KeyInit},
+            Aes256Gcm, Nonce,
+        };
+        
         let session_key = self.session_key
             .as_ref()
             .ok_or_else(|| anyhow!("No active session"))?;
         
-        // Verify session ID
+        // Verify session ID matches
         if payload.session_id != session_key.session_id() {
-            return Err(anyhow!("Session ID mismatch"));
+            return Err(anyhow!("Session ID mismatch - possible replay attack"));
         }
         
-        // Verify authentication tag
-        let mut expected_tag = [0u8; 16];
-        let mut hasher = Sha256::new();
-        hasher.update(&payload.ciphertext);
-        hasher.update(&session_key.key);
-        let hash = hasher.finalize();
-        expected_tag.copy_from_slice(&hash[..16]);
-        
-        if payload.tag != expected_tag {
-            return Err(anyhow!("Authentication tag mismatch - data may be tampered"));
+        // Check session hasn't expired
+        if session_key.is_expired(self.config.session_timeout_secs) {
+            return Err(anyhow!("Session expired - please re-authenticate"));
         }
         
-        // Decrypt (simple XOR for placeholder)
-        let plaintext: Vec<u8> = payload.ciphertext
-            .iter()
-            .enumerate()
-            .map(|(i, &b)| b ^ session_key.key[i % 32])
-            .collect();
+        // Initialize AES-256-GCM cipher
+        let cipher = Aes256Gcm::new_from_slice(&session_key.key)
+            .map_err(|e| anyhow!("Failed to initialize AES-256-GCM: {:?}", e))?;
+        
+        let nonce = Nonce::from_slice(&payload.nonce);
+        
+        // Reconstruct ciphertext with tag for decryption
+        let mut ciphertext_with_tag = payload.ciphertext.clone();
+        ciphertext_with_tag.extend_from_slice(&payload.tag);
+        
+        // Decrypt and verify authentication tag
+        // This will fail if:
+        // 1. The ciphertext was modified
+        // 2. The nonce was tampered with
+        // 3. The tag doesn't match
+        let plaintext = cipher
+            .decrypt(nonce, ciphertext_with_tag.as_ref())
+            .map_err(|_| anyhow!("Decryption failed - data may be tampered or corrupted"))?;
+        
+        debug!(
+            "🔓 Decrypted {} bytes ciphertext → {} bytes plaintext",
+            payload.ciphertext.len(),
+            plaintext.len()
+        );
         
         Ok(plaintext)
     }
