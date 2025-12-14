@@ -21,6 +21,7 @@ pub mod security;
 pub mod cloud;
 pub mod api;
 pub mod obelysk;  // Obelysk Protocol: Native Stwo integration for zkML
+pub mod pricing;  // GPU-aware proof pricing and marketplace economics
 
 // Re-export commonly used types
 pub use types::{
