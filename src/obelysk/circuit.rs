@@ -48,6 +48,12 @@ pub enum Constraint {
         cols_a: usize,
         cols_b: usize,
     },
+    
+    /// Equality: a == b (asserts two values are equal)
+    Equality {
+        a: M31,
+        b: M31,
+    },
 }
 
 /// Circuit representation for Stwo
@@ -124,6 +130,11 @@ impl Circuit {
     /// Add a multiplication constraint
     pub fn add_multiplication_constraint(&mut self, a: usize, b: usize, c: usize) {
         self.constraints.push(Constraint::Multiplication { a, b, c });
+    }
+    
+    /// Add equality constraint: assert a == b
+    pub fn add_equality_constraint(&mut self, a: M31, b: M31) {
+        self.constraints.push(Constraint::Equality { a, b });
     }
     
     /// Get the trace width (number of columns)

@@ -15,6 +15,7 @@ use super::field::M31;
 use super::circuit::{Circuit, Constraint, LookupTable};
 use super::tee_types::{TEEQuote, TEEType, Certificate, EnclaveWhitelist};
 use super::vm::{ObelyskVM, OpCode, Instruction, ExecutionTrace};
+use super::ecdsa::{ECDSAVerifier, ECDSASignature, P256Point, ECDSACircuitConstraints};
 use serde::{Serialize, Deserialize};
 use anyhow::{Result, anyhow};
 
@@ -87,27 +88,81 @@ impl AttestationCircuit {
     
     /// Add signature verification constraints
     ///
-    /// In production, this would implement full ECDSA verification
-    /// For Phase 2, we create a mock verification circuit
+    /// Implements ECDSA P-256 verification as circuit constraints.
+    /// The verification proves that the signature is valid without
+    /// revealing the private key.
     fn add_signature_constraints(&self, mut circuit: Circuit) -> Result<Circuit> {
-        // NOTE: Real ECDSA verification in M31 field requires:
-        // 1. Point arithmetic on elliptic curve (P-256 or P-384)
-        // 2. Modular arithmetic in large field
-        // 3. Hash-to-field conversion (SHA-256)
-        //
-        // This is complex and will be fully implemented when integrating real Stwo
-        // For Phase 2 mock, we add placeholder constraints
-        
         // Verify signature format is correct
         if self.quote.signature.is_empty() {
             return Err(anyhow!("Empty signature"));
         }
         
-        // Add constraints for signature verification
-        // In real implementation: constrain ECDSA verification circuit
-        circuit.add_multiplication_constraint(0, 1, 2); // Placeholder
+        // Parse the signature
+        let signature = if self.quote.signature.len() == 64 {
+            ECDSASignature::from_bytes(self.quote.signature.as_slice().try_into()
+                .map_err(|_| anyhow!("Invalid signature length"))?)
+        } else {
+            ECDSASignature::from_der(&self.quote.signature)
+                .ok_or_else(|| anyhow!("Invalid DER signature"))?
+        };
+        
+        // Extract public key from certificate chain (first cert contains signing key)
+        let public_key = self.extract_public_key_from_cert_chain()?;
+        
+        // Hash the quote body (what was signed)
+        // The signed data is the report_data field
+        let quote_body = &self.quote.report_data;
+        let message_hash = sha256_hash(quote_body);
+        
+        // Create ECDSA circuit constraints
+        let ecdsa_constraints = ECDSACircuitConstraints::new(
+            &public_key,
+            &message_hash,
+            &signature,
+        );
+        
+        // Add ECDSA constraints to circuit
+        let num_constraints = ecdsa_constraints.add_to_circuit(&mut circuit);
+        tracing::debug!("Added {} ECDSA verification constraints", num_constraints);
+        
+        // Add final check: r == R.x (verification result)
+        // This ensures the signature is valid
+        for i in 0..8 {
+            circuit.add_equality_constraint(
+                ecdsa_constraints.r_limbs[i],
+                ecdsa_constraints.r_point_x_limbs[i],
+            );
+        }
         
         Ok(circuit)
+    }
+    
+    /// Extract public key from certificate chain
+    fn extract_public_key_from_cert_chain(&self) -> Result<P256Point> {
+        // The first certificate in the chain is the signing certificate
+        // Its public key is what we use to verify the quote signature
+        
+        if self.quote.certificate_chain.is_empty() {
+            return Err(anyhow!("Empty certificate chain"));
+        }
+        
+        let signing_cert = &self.quote.certificate_chain[0];
+        
+        // Extract public key bytes from certificate
+        // In production, parse X.509 DER to get SubjectPublicKeyInfo
+        // For now, we expect the public key to be stored directly
+        let pub_key_bytes = &signing_cert.public_key;
+        
+        if pub_key_bytes.len() == 65 && pub_key_bytes[0] == 0x04 {
+            // Uncompressed public key
+            P256Point::from_uncompressed(pub_key_bytes)
+                .ok_or_else(|| anyhow!("Invalid public key on certificate"))
+        } else if pub_key_bytes.len() == 33 {
+            // Compressed public key - would need decompression
+            Err(anyhow!("Compressed public keys not yet supported"))
+        } else {
+            Err(anyhow!("Invalid public key format in certificate"))
+        }
     }
     
     /// Add certificate chain validation constraints
@@ -209,20 +264,24 @@ impl ProofOfAttestation {
     
     /// Verify a TEE quote locally (fast check, no ZK proof)
     ///
-    /// This is used for optimistic verification
+    /// This performs full ECDSA signature verification without generating a ZK proof.
+    /// Used for optimistic verification.
     pub fn verify_quote_locally(&self, quote: &TEEQuote) -> Result<bool> {
         // Check 1: MRENCLAVE is whitelisted
         if !self.whitelist.is_allowed(&quote.mrenclave) {
+            tracing::debug!("Quote verification failed: MRENCLAVE not whitelisted");
             return Ok(false);
         }
         
         // Check 2: Quote has signature
         if quote.signature.is_empty() {
+            tracing::debug!("Quote verification failed: Empty signature");
             return Ok(false);
         }
         
         // Check 3: Certificate chain present
         if quote.certificate_chain.is_empty() {
+            tracing::debug!("Quote verification failed: Empty certificate chain");
             return Ok(false);
         }
         
@@ -234,15 +293,68 @@ impl ProofOfAttestation {
         
         let age_seconds = now.saturating_sub(quote.timestamp);
         if age_seconds > 86400 {  // 24 hours
+            tracing::debug!("Quote verification failed: Quote too old ({} seconds)", age_seconds);
             return Ok(false);
         }
         
-        // NOTE: In production, would also:
-        // - Verify ECDSA signature
-        // - Validate certificate chain
-        // - Check revocation lists
+        // Check 5: Verify ECDSA signature
+        let signing_cert = &quote.certificate_chain[0];
+        let pub_key_bytes = &signing_cert.public_key;
+        
+        match ECDSAVerifier::verify_tee_quote_signature(
+            pub_key_bytes,
+            &quote.report_data,
+            &quote.signature,
+        ) {
+            Ok(true) => {
+                tracing::debug!("Quote ECDSA signature verified successfully");
+            }
+            Ok(false) => {
+                tracing::debug!("Quote verification failed: Invalid ECDSA signature");
+                return Ok(false);
+            }
+            Err(e) => {
+                tracing::debug!("Quote verification failed: ECDSA error - {}", e);
+                return Ok(false);
+            }
+        }
+        
+        // Check 6: Validate certificate chain (simplified)
+        // In production, would verify:
+        // - Each cert signed by parent
+        // - Root matches trusted CA
+        // - No expired certs
+        // - No revoked certs
+        if !self.validate_cert_chain_basic(&quote.certificate_chain) {
+            tracing::debug!("Quote verification failed: Invalid certificate chain");
+            return Ok(false);
+        }
         
         Ok(true)
+    }
+    
+    /// Basic certificate chain validation
+    fn validate_cert_chain_basic(&self, chain: &[Certificate]) -> bool {
+        if chain.is_empty() {
+            return false;
+        }
+        
+        // Check all certs have required fields
+        for cert in chain {
+            if cert.public_key.is_empty() {
+                return false;
+            }
+            if cert.signature.is_empty() {
+                return false;
+            }
+        }
+        
+        // In production, would verify:
+        // 1. Each cert signed by next cert in chain
+        // 2. Root cert matches trusted CA (Intel/AMD/NVIDIA)
+        // 3. Current time within validity period
+        
+        true
     }
     
     /// Generate a ZK proof of attestation
@@ -325,6 +437,14 @@ fn bytes_to_m31(bytes: &[u8]) -> Vec<M31> {
             M31::new(val)
         })
         .collect()
+}
+
+/// SHA-256 hash helper
+fn sha256_hash(data: &[u8]) -> [u8; 32] {
+    use sha2::{Sha256, Digest};
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+    hasher.finalize().into()
 }
 
 #[cfg(test)]
