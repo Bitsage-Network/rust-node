@@ -1,12 +1,12 @@
 #[cfg(test)]
 mod real_blockchain_tests {
-    use ciro_worker::blockchain::{
+    use sage_worker::blockchain::{
         client::StarknetClient,
         contracts::JobManagerContract,
         types::*,
     };
-    use ciro_worker::node::coordinator::{JobRequest, JobType as CoordinatorJobType};
-    use ciro_worker::types::{JobId, WorkerId};
+    use sage_worker::node::coordinator::{JobRequest, JobType as CoordinatorJobType};
+    use sage_worker::types::{JobId, WorkerId};
     use starknet::core::types::FieldElement;
     use std::sync::Arc;
     use tokio::time::{sleep, Duration};
@@ -259,7 +259,7 @@ mod real_blockchain_tests {
     async fn test_contract_function_selectors() {
         println!("🔧 Testing contract function selectors...");
         
-        use ciro_worker::blockchain::types::selectors::*;
+        use sage_worker::blockchain::types::selectors::*;
         
         // Test that all selectors are computed correctly
         assert_ne!(*SUBMIT_AI_JOB, FieldElement::ZERO);
@@ -431,7 +431,7 @@ mod real_blockchain_tests {
         println!("✅ Contract Instance: {:#x}", contract_addr);
         
         // 3. Function selector validation
-        use ciro_worker::blockchain::types::selectors::*;
+        use sage_worker::blockchain::types::selectors::*;
         assert_ne!(*SUBMIT_AI_JOB, FieldElement::ZERO);
         assert_ne!(*GET_JOB_DETAILS, FieldElement::ZERO);
         assert_ne!(*GET_JOB_STATE, FieldElement::ZERO);
@@ -555,7 +555,7 @@ mod real_blockchain_tests {
         
         // Test 5: Function selectors
         print!("5. Function selector computation... ");
-        use ciro_worker::blockchain::types::selectors::*;
+        use sage_worker::blockchain::types::selectors::*;
         if *SUBMIT_AI_JOB != FieldElement::ZERO && *GET_JOB_STATE != FieldElement::ZERO {
             println!("✅ PASSED");
         } else {

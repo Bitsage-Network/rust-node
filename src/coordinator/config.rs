@@ -766,19 +766,19 @@ pub fn generate_default_config(environment: Environment) -> CoordinatorConfig {
     
     match environment {
         Environment::Development => {
-            config.database_url = "postgresql://localhost/ciro_dev".to_string();
+            config.database_url = "postgresql://localhost/sage_dev".to_string();
             config.blockchain.rpc_url = "https://starknet-sepolia.public.blastapi.io".to_string();
             config.logging.level = "debug".to_string();
             config.metrics.enable_metrics = false;
         }
         Environment::Staging => {
-            config.database_url = "postgresql://localhost/ciro_staging".to_string();
+            config.database_url = "postgresql://localhost/sage_staging".to_string();
             config.blockchain.rpc_url = "https://starknet-sepolia.public.blastapi.io".to_string();
             config.logging.level = "info".to_string();
             config.security.enable_authentication = true;
         }
         Environment::Production => {
-            config.database_url = "postgresql://ciro:password@localhost/ciro_prod".to_string();
+            config.database_url = "postgresql://sage:password@localhost/sage_prod".to_string();
             config.blockchain.rpc_url = "https://starknet-mainnet.public.blastapi.io".to_string();
             config.logging.level = "warn".to_string();
             config.security.enable_authentication = true;
@@ -803,7 +803,7 @@ mod tests {
     #[test]
     fn test_default_config() {
         let config = CoordinatorConfig::default();
-        assert_eq!(config.database_url, "postgresql://localhost/ciro");
+        assert_eq!(config.database_url, "postgresql://localhost/sage");
         assert_eq!(config.environment, Environment::Development);
     }
 

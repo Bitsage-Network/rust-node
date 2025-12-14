@@ -83,7 +83,7 @@ pub struct ContractAddresses {
     pub job_manager: FieldElement,
     pub cdc_pool: FieldElement,
     pub treasury_timelock: FieldElement,
-    pub ciro_token: FieldElement,
+    pub sage_token: FieldElement,
     pub governance_treasury: FieldElement,
     pub reputation_manager: FieldElement,
     pub simple_events: FieldElement,
@@ -440,7 +440,7 @@ impl EventIndexer {
         for addr in [
             self.contracts.reputation_manager,
             self.contracts.simple_events,
-            self.contracts.ciro_token,
+            self.contracts.sage_token,
             self.contracts.job_manager,
             self.contracts.cdc_pool,
             self.contracts.treasury_timelock,
@@ -516,7 +516,7 @@ impl EventIndexer {
         for addr in [
             self.contracts.reputation_manager,
             self.contracts.simple_events,
-            self.contracts.ciro_token,
+            self.contracts.sage_token,
             self.contracts.job_manager,
             self.contracts.cdc_pool,
             self.contracts.treasury_timelock,
@@ -672,7 +672,7 @@ impl EventIndexer {
         *address == self.contracts.reputation_manager ||
         *address == self.contracts.job_manager ||
         *address == self.contracts.cdc_pool ||
-        *address == self.contracts.ciro_token ||
+        *address == self.contracts.sage_token ||
         *address == self.contracts.governance_treasury ||
         *address == self.contracts.simple_events ||
         *address == self.contracts.linear_vesting ||
@@ -694,7 +694,7 @@ impl EventIndexer {
             "contract_type": contract_type,
         });
 
-        let ciro_event = CiroEvent {
+        let sage_event = CiroEvent {
             contract_address: contract_address.clone(),
             event_type: event_type.clone(),
             block_number,
@@ -703,13 +703,13 @@ impl EventIndexer {
         };
 
         // Store in database
-        self.database.store_event(&ciro_event).await
+        self.database.store_event(&sage_event).await
             .context("Failed to store event in database")?;
 
         // Extra visibility for SAGE token events while validating ingestion
-        if contract_type == "ciro_token" {
+        if contract_type == "sage_token" {
             info!(
-                "🟣 CIRO {} captured at block {} from {}",
+                "🟣 SAGE {} captured at block {} from {}",
                 event_type,
                 block_number,
                 contract_address
@@ -730,8 +730,8 @@ impl EventIndexer {
             "job_manager"
         } else if event.from_address == self.contracts.cdc_pool {
             "cdc_pool"
-        } else if event.from_address == self.contracts.ciro_token {
-            "ciro_token"
+        } else if event.from_address == self.contracts.sage_token {
+            "sage_token"
         } else if event.from_address == self.contracts.governance_treasury {
             "governance_treasury"
         } else if event.from_address == self.contracts.simple_events {
@@ -752,7 +752,7 @@ impl EventIndexer {
         } else if contract_type == "reputation_manager" && !event.keys.is_empty() {
             // Label RM events for visibility; we can refine by key later if needed
             "AdminAdjusted"
-        } else if contract_type == "ciro_token" {
+        } else if contract_type == "sage_token" {
             // Common ERC20 events
             if !event.keys.is_empty() {
                 match format!("0x{:x}", event.keys[0]).as_str() {

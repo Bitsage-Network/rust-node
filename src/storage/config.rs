@@ -35,9 +35,9 @@ impl Default for DatabaseConfig {
         Self {
             host: "localhost".to_string(),
             port: 5432,
-            database: "ciro_network".to_string(),
-            username: "ciro_user".to_string(),
-            password: "ciro_password".to_string(),
+            database: "sage_network".to_string(),
+            username: "sage_user".to_string(),
+            password: "sage_password".to_string(),
             max_connections: 20,
             min_connections: 5,
             connect_timeout: 30,
@@ -56,9 +56,9 @@ impl DatabaseConfig {
                 .unwrap_or_else(|_| "5432".to_string())
                 .parse()
                 .unwrap_or(5432),
-            database: env::var("POSTGRES_DB").unwrap_or_else(|_| "ciro_network".to_string()),
-            username: env::var("POSTGRES_USER").unwrap_or_else(|_| "ciro_user".to_string()),
-            password: env::var("POSTGRES_PASSWORD").unwrap_or_else(|_| "ciro_password".to_string()),
+            database: env::var("POSTGRES_DB").unwrap_or_else(|_| "sage_network".to_string()),
+            username: env::var("POSTGRES_USER").unwrap_or_else(|_| "sage_user".to_string()),
+            password: env::var("POSTGRES_PASSWORD").unwrap_or_else(|_| "sage_password".to_string()),
             max_connections: env::var("POSTGRES_MAX_CONNECTIONS")
                 .unwrap_or_else(|_| "20".to_string())
                 .parse()
@@ -153,7 +153,7 @@ mod tests {
         let config = DatabaseConfig::default();
         assert_eq!(config.host, "localhost");
         assert_eq!(config.port, 5432);
-        assert_eq!(config.database, "ciro_network");
+        assert_eq!(config.database, "sage_network");
     }
 
     #[test]
@@ -161,8 +161,8 @@ mod tests {
         let config = DatabaseConfig::default();
         let url = config.database_url();
         assert!(url.contains("postgresql://"));
-        assert!(url.contains("ciro_user"));
-        assert!(url.contains("ciro_network"));
+        assert!(url.contains("sage_user"));
+        assert!(url.contains("sage_network"));
     }
 
     #[test]

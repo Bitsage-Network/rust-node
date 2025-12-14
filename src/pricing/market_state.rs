@@ -43,7 +43,7 @@ pub enum GpuTier {
 }
 
 impl GpuTier {
-    /// Get minimum stake required for this tier (in CIRO tokens)
+    /// Get minimum stake required for this tier (in SAGE tokens)
     pub fn min_stake(&self) -> u64 {
         match self {
             GpuTier::Consumer => 1_000,
@@ -77,7 +77,7 @@ pub struct GpuInfo {
 pub struct GpuProvider {
     /// Unique provider ID (wallet address)
     pub id: String,
-    /// Provider's staked amount (in CIRO tokens)
+    /// Provider's staked amount (in SAGE tokens)
     pub stake_amount: u64,
     /// Current status
     pub status: ProviderStatus,
@@ -167,7 +167,7 @@ pub struct ProviderPoolStats {
     pub providers_by_region: HashMap<String, u64>,
     /// Average reputation
     pub avg_reputation: f64,
-    /// Total staked CIRO
+    /// Total staked SAGE
     pub total_staked: u64,
 }
 
@@ -393,7 +393,7 @@ mod tests {
         println!("Total providers: {}", stats.total_providers);
         println!("Online providers: {}", stats.online_providers);
         println!("Total bandwidth: {} GB/s", stats.total_bandwidth);
-        println!("Total staked: {} CIRO", stats.total_staked);
+        println!("Total staked: {} SAGE", stats.total_staked);
         println!("Average reputation: {:.2}", stats.avg_reputation);
 
         assert_eq!(stats.total_providers, 2);

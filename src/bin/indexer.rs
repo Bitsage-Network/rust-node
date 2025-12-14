@@ -58,9 +58,9 @@ struct Args {
     #[arg(long, default_value = "0x0000000000000000000000000000000000000000000000000000000000000000")]
     cdc_pool: String,
     
-    /// CIRO Token contract address (placeholder)
+    /// SAGE Token contract address (placeholder)
     #[arg(long, default_value = "0x0000000000000000000000000000000000000000000000000000000000000000")]
-    ciro_token: String,
+    sage_token: String,
     
     /// Governance Treasury contract address (placeholder)
     #[arg(long, default_value = "0x0000000000000000000000000000000000000000000000000000000000000000")]
@@ -163,7 +163,7 @@ async fn main() -> Result<()> {
         job_manager: parse_address(&args.job_manager)?,
         cdc_pool: parse_address(&args.cdc_pool)?,
         treasury_timelock: parse_address(&args.treasury_timelock)?,
-        ciro_token: parse_address(&args.ciro_token)?,
+        sage_token: parse_address(&args.sage_token)?,
         governance_treasury: parse_address(&args.governance_treasury)?,
         reputation_manager: parse_address(&reputation_manager_addr)?,
         simple_events: parse_address(&args.simple_events)?,

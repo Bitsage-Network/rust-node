@@ -56,11 +56,11 @@ impl Default for KafkaConfig {
     fn default() -> Self {
         Self {
             bootstrap_servers: "localhost:9092".to_string(),
-            consumer_group_id: "ciro-coordinator-group".to_string(),
-            job_intake_topic: "ciro.job.intake".to_string(),
-            worker_communication_topic: "ciro.worker.communication".to_string(),
-            result_distribution_topic: "ciro.result.distribution".to_string(),
-            health_metrics_topic: "ciro.health.metrics".to_string(),
+            consumer_group_id: "sage-coordinator-group".to_string(),
+            job_intake_topic: "sage.job.intake".to_string(),
+            worker_communication_topic: "sage.worker.communication".to_string(),
+            result_distribution_topic: "sage.result.distribution".to_string(),
+            health_metrics_topic: "sage.health.metrics".to_string(),
             auto_commit_interval_ms: 5000,
             session_timeout_ms: 30000,
             max_poll_interval_ms: 300000,
@@ -768,8 +768,8 @@ mod tests {
     async fn test_kafka_config_default() {
         let config = KafkaConfig::default();
         assert_eq!(config.bootstrap_servers, "localhost:9092");
-        assert_eq!(config.consumer_group_id, "ciro-coordinator-group");
-        assert_eq!(config.job_intake_topic, "ciro.job.intake");
+        assert_eq!(config.consumer_group_id, "sage-coordinator-group");
+        assert_eq!(config.job_intake_topic, "sage.job.intake");
         assert!(config.enable_auto_commit);
     }
 

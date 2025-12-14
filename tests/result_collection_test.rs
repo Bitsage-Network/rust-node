@@ -7,11 +7,11 @@ use std::sync::Arc;
 use tokio::time::{sleep, Duration};
 use starknet::core::types::FieldElement;
 
-use ciro_worker::blockchain::{
+use sage_worker::blockchain::{
     client::StarknetClient,
     contracts::JobManagerContract,
 };
-use ciro_worker::network::{
+use sage_worker::network::{
     P2PNetwork,
     p2p::P2PConfig,
     result_collection::{
@@ -19,7 +19,7 @@ use ciro_worker::network::{
         AggregationMethod, CollectionState
     },
 };
-use ciro_worker::types::{JobId, WorkerId};
+use sage_worker::types::{JobId, WorkerId};
 
 /// Helper function to create a test result collector
 async fn create_test_result_collector() -> ResultCollector {

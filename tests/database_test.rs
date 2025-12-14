@@ -1,9 +1,9 @@
 #[cfg(test)]
 mod tests {
-    use ciro_worker::storage::database_simple::*;
-    use ciro_worker::storage::models::*;
-    use ciro_worker::node::coordinator::*;
-    use ciro_worker::types::*;
+    use sage_worker::storage::database_simple::*;
+    use sage_worker::storage::models::*;
+    use sage_worker::node::coordinator::*;
+    use sage_worker::types::*;
 
     // Helper function to create test data
     fn create_test_job_state() -> JobState {

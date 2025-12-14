@@ -468,25 +468,25 @@ impl MetricsCollector {
         let mut output = String::new();
         
         if let Some(metrics) = metrics {
-            output.push_str(&format!("# HELP ciro_coordinator_total_jobs Total number of jobs\n"));
-            output.push_str(&format!("# TYPE ciro_coordinator_total_jobs counter\n"));
-            output.push_str(&format!("ciro_coordinator_total_jobs {}\n", metrics.total_jobs));
+            output.push_str(&format!("# HELP sage_coordinator_total_jobs Total number of jobs\n"));
+            output.push_str(&format!("# TYPE sage_coordinator_total_jobs counter\n"));
+            output.push_str(&format!("sage_coordinator_total_jobs {}\n", metrics.total_jobs));
             
-            output.push_str(&format!("# HELP ciro_coordinator_active_jobs Number of active jobs\n"));
-            output.push_str(&format!("# TYPE ciro_coordinator_active_jobs gauge\n"));
-            output.push_str(&format!("ciro_coordinator_active_jobs {}\n", metrics.active_jobs));
+            output.push_str(&format!("# HELP sage_coordinator_active_jobs Number of active jobs\n"));
+            output.push_str(&format!("# TYPE sage_coordinator_active_jobs gauge\n"));
+            output.push_str(&format!("sage_coordinator_active_jobs {}\n", metrics.active_jobs));
             
-            output.push_str(&format!("# HELP ciro_coordinator_total_workers Total number of workers\n"));
-            output.push_str(&format!("# TYPE ciro_coordinator_total_workers counter\n"));
-            output.push_str(&format!("ciro_coordinator_total_workers {}\n", metrics.total_workers));
+            output.push_str(&format!("# HELP sage_coordinator_total_workers Total number of workers\n"));
+            output.push_str(&format!("# TYPE sage_coordinator_total_workers counter\n"));
+            output.push_str(&format!("sage_coordinator_total_workers {}\n", metrics.total_workers));
             
-            output.push_str(&format!("# HELP ciro_coordinator_active_workers Number of active workers\n"));
-            output.push_str(&format!("# TYPE ciro_coordinator_active_workers gauge\n"));
-            output.push_str(&format!("ciro_coordinator_active_workers {}\n", metrics.active_workers));
+            output.push_str(&format!("# HELP sage_coordinator_active_workers Number of active workers\n"));
+            output.push_str(&format!("# TYPE sage_coordinator_active_workers gauge\n"));
+            output.push_str(&format!("sage_coordinator_active_workers {}\n", metrics.active_workers));
             
-            output.push_str(&format!("# HELP ciro_coordinator_system_health_score Overall system health score\n"));
-            output.push_str(&format!("# TYPE ciro_coordinator_system_health_score gauge\n"));
-            output.push_str(&format!("ciro_coordinator_system_health_score {}\n", metrics.system_health_score));
+            output.push_str(&format!("# HELP sage_coordinator_system_health_score Overall system health score\n"));
+            output.push_str(&format!("# TYPE sage_coordinator_system_health_score gauge\n"));
+            output.push_str(&format!("sage_coordinator_system_health_score {}\n", metrics.system_health_score));
         }
         
         Ok(output)
@@ -497,11 +497,11 @@ impl MetricsCollector {
         let mut output = String::new();
         
         if let Some(metrics) = metrics {
-            output.push_str(&format!("ciro.coordinator.total_jobs {}\n", metrics.total_jobs));
-            output.push_str(&format!("ciro.coordinator.active_jobs {}\n", metrics.active_jobs));
-            output.push_str(&format!("ciro.coordinator.total_workers {}\n", metrics.total_workers));
-            output.push_str(&format!("ciro.coordinator.active_workers {}\n", metrics.active_workers));
-            output.push_str(&format!("ciro.coordinator.system_health_score {}\n", metrics.system_health_score));
+            output.push_str(&format!("sage.coordinator.total_jobs {}\n", metrics.total_jobs));
+            output.push_str(&format!("sage.coordinator.active_jobs {}\n", metrics.active_jobs));
+            output.push_str(&format!("sage.coordinator.total_workers {}\n", metrics.total_workers));
+            output.push_str(&format!("sage.coordinator.active_workers {}\n", metrics.active_workers));
+            output.push_str(&format!("sage.coordinator.system_health_score {}\n", metrics.system_health_score));
         }
         
         Ok(output)

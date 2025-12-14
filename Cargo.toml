@@ -139,12 +139,12 @@ cuda = ["cudarc", "half"]
 rocm = []
 
 [[bin]]
-name = "ciro-worker"
+name = "sage-worker"
 path = "src/bin/worker.rs"
 
 # TODO: Re-enable coordinator binary when import issues are resolved
 # [[bin]]
-# name = "ciro-coordinator"
+# name = "sage-coordinator"
 # path = "src/coordinator_main.rs"
 
 # [patch.crates-io]

@@ -646,10 +646,10 @@ impl Default for GossipConfig {
     fn default() -> Self {
         Self {
             topics: vec![
-                "ciro-jobs".to_string(),
+                "sage-jobs".to_string(),
                 "bitsage-nodes".to_string(),
-                "ciro-results".to_string(),
-                "ciro-reputation".to_string(),
+                "sage-results".to_string(),
+                "sage-reputation".to_string(),
             ],
             message_id_fn: "sha256".to_string(),
             duplicate_cache_time: 60,

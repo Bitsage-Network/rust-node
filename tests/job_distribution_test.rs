@@ -3,15 +3,15 @@
 //! Tests for the P2P job distribution system including job announcements,
 //! worker bids, job assignments, and result collection.
 
-use ciro_worker::types::{JobId, WorkerId};
-use ciro_worker::network::job_distribution::{
+use sage_worker::types::{JobId, WorkerId};
+use sage_worker::network::job_distribution::{
     JobDistributor, JobDistributionConfig, JobAnnouncement, WorkerBid, 
     JobAssignment, JobResult, JobDistributionEvent
 };
-use ciro_worker::network::health_reputation::{WorkerReputation, HealthReputationConfig};
-use ciro_worker::blockchain::{StarknetClient, JobManagerContract, JobType, JobSpec, WorkerCapabilities};
-use ciro_worker::network::p2p::P2PNetwork;
-use ciro_worker::ai::model_registry::ModelRegistry;
+use sage_worker::network::health_reputation::{WorkerReputation, HealthReputationConfig};
+use sage_worker::blockchain::{StarknetClient, JobManagerContract, JobType, JobSpec, WorkerCapabilities};
+use sage_worker::network::p2p::P2PNetwork;
+use sage_worker::ai::model_registry::ModelRegistry;
 use std::sync::Arc;
 use uuid::Uuid;
 use chrono;
@@ -25,12 +25,12 @@ mod tests {
     fn create_test_job_spec() -> JobSpec {
         JobSpec {
             job_type: JobType::AIInference,
-            model_id: ciro_worker::blockchain::types::ModelId::new(
+            model_id: sage_worker::blockchain::types::ModelId::new(
                 starknet::core::types::FieldElement::from(1u32)
             ),
             input_data_hash: starknet::core::types::FieldElement::from_hex_be("0x0").unwrap(),
             expected_output_format: starknet::core::types::FieldElement::from_hex_be("0x0").unwrap(),
-            verification_method: ciro_worker::blockchain::types::VerificationMethod::StatisticalSampling,
+            verification_method: sage_worker::blockchain::types::VerificationMethod::StatisticalSampling,
             max_reward: 1000,
             sla_deadline: 3600,
             compute_requirements: vec![],
@@ -64,7 +64,7 @@ mod tests {
     }
 
     fn create_test_p2p_network() -> Arc<P2PNetwork> {
-        let config = ciro_worker::network::p2p::P2PConfig::default();
+        let config = sage_worker::network::p2p::P2PConfig::default();
         let (network, _receiver) = P2PNetwork::new(config).unwrap();
         Arc::new(network)
     }

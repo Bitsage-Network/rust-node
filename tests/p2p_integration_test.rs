@@ -3,7 +3,7 @@
 //! Tests for the complete P2P networking integration including job distribution,
 //! worker coordination, and result collection.
 
-use ciro_worker::{
+use sage_worker::{
     network::{
         p2p::{P2PNetwork, P2PConfig, P2PMessage},
         job_distribution::{JobDistributor, JobDistributionConfig, JobAnnouncement, WorkerBid, JobAssignment},
