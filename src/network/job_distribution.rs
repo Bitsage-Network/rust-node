@@ -790,21 +790,15 @@ mod tests {
             worker_id: WorkerId::new(),
             bid_amount: 800,
             estimated_completion_time: 1800,
-            worker_capabilities: crate::types::WorkerCapabilities {
+            worker_capabilities: WorkerCapabilities {
+                gpu_memory: 24 * 1024 * 1024 * 1024, // 24 GB
                 cpu_cores: 8,
-                memory_gb: 32,
-                gpu_count: 1,
-                gpu_model: Some("RTX3090".to_string()),
-                gpu_memory_gb: Some(24),
-                disk_gb: 1000,
-                max_concurrent_jobs: 4,
-                tee_type: crate::types::TeeType::None,
-                secure_enclave_memory_mb: None,
-                attestation_mechanism: None,
-                trusted_boot_enabled: false,
-                secure_storage_enabled: false,
-                network_isolation_enabled: false,
-                supported_os: vec!["linux".to_string()],
+                ram: 32 * 1024 * 1024 * 1024, // 32 GB
+                storage: 1000 * 1024 * 1024 * 1024, // 1 TB
+                bandwidth: 1000, // Mbps
+                capability_flags: 0,
+                gpu_model: FieldElement::ZERO,
+                cpu_model: FieldElement::ZERO,
             },
             reputation_score: 0.85,
             health_score: 0.9,

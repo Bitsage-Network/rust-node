@@ -50,7 +50,12 @@ pub enum OpCode {
     Eq,             // r[dst] = (r[src1] == r[src2])
     Lt,             // r[dst] = (r[src1] < r[src2])
     Gt,             // r[dst] = (r[src1] > r[src2])
-    
+
+    // Bitwise
+    Xor,            // r[dst] = r[src1] ^ r[src2]
+    And,            // r[dst] = r[src1] & r[src2]
+    Or,             // r[dst] = r[src1] | r[src2]
+
     // Halt
     Halt,
 }
@@ -171,6 +176,15 @@ impl ObelyskVM {
     /// Get mutable reference to memory (for ETL integration)
     pub fn memory_mut(&mut self) -> &mut HashMap<usize, M31> {
         &mut self.memory
+    }
+
+    /// Get public outputs (r0-r3 by default)
+    pub fn get_public_outputs(&self) -> Vec<M31> {
+        if self.public_outputs.is_empty() {
+            self.registers[0..4].to_vec()
+        } else {
+            self.public_outputs.clone()
+        }
     }
 
     /// Read a matrix from memory (descriptor: [rows, cols, data...])
@@ -352,6 +366,24 @@ impl ObelyskVM {
                 } else {
                     M31::ZERO
                 };
+            },
+
+            OpCode::Xor => {
+                let src1 = self.registers[instruction.src1 as usize];
+                let src2 = self.registers[instruction.src2 as usize];
+                self.registers[instruction.dst as usize] = M31::from(src1.value() ^ src2.value());
+            },
+
+            OpCode::And => {
+                let src1 = self.registers[instruction.src1 as usize];
+                let src2 = self.registers[instruction.src2 as usize];
+                self.registers[instruction.dst as usize] = M31::from(src1.value() & src2.value());
+            },
+
+            OpCode::Or => {
+                let src1 = self.registers[instruction.src1 as usize];
+                let src2 = self.registers[instruction.src2 as usize];
+                self.registers[instruction.dst as usize] = M31::from(src1.value() | src2.value());
             },
 
             OpCode::MatMul => {

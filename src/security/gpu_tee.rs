@@ -556,10 +556,11 @@ impl Drop for GpuSecureProver {
 mod tests {
     use super::*;
     use crate::obelysk::vm::{ObelyskVM, Instruction, OpCode};
+    use crate::obelysk::M31;
     
     fn create_test_trace() -> ExecutionTrace {
         let mut vm = ObelyskVM::new();
-        vm.set_public_inputs(vec![M31::new(5), M31::new(7)]);
+        vm.set_public_inputs(vec![M31::from(5u32), M31::from(7u32)]);
         
         let program = vec![
             Instruction {

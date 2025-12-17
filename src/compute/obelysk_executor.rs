@@ -393,7 +393,7 @@ impl ObelyskExecutor {
             dst: 0,
             src1: 0,
             src2: 0,
-            immediate: Some(0),
+            immediate: Some(M31::from(0)),
             address: None,
         });
         
@@ -405,7 +405,7 @@ impl ObelyskExecutor {
                 dst: 1,
                 src1: 0,
                 src2: 0,
-                immediate: Some((i + 1) as u32),
+                immediate: Some(M31::from((i + 1) as u32)),
                 address: None,
             });
             
@@ -457,7 +457,7 @@ impl ObelyskExecutor {
             dst: 0,
             src1: 0,
             src2: 0,
-            immediate: Some(0),
+            immediate: Some(M31::from(0)),
             address: None,
         });
         
@@ -480,7 +480,7 @@ impl ObelyskExecutor {
                 dst: 0,
                 src1: 0,
                 src2: 0,
-                immediate: Some(0x9e3779b9),  // Golden ratio constant
+                immediate: Some(M31::from(0x9e3779b9_u32)),  // Golden ratio constant
                 address: None,
             });
         }
@@ -508,7 +508,7 @@ impl ObelyskExecutor {
             dst: 0,
             src1: 0,
             src2: 0,
-            immediate: Some(0xDEADBEEF),
+            immediate: Some(M31::from(0xDEADBEEF_u32)),
             address: None,
         });
         
@@ -556,7 +556,7 @@ impl ObelyskExecutor {
             dst: 0,
             src1: 0,
             src2: 0,
-            immediate: Some(0),
+            immediate: Some(M31::from(0)),
             address: None,
         });
         
@@ -628,8 +628,6 @@ impl BatchObelyskExecutor {
         
         // Process in batches
         for chunk in jobs.chunks(self.batch_size) {
-            let mut handles = Vec::new();
-            
             for (job_id, job_type, payload) in chunk {
                 let executor = &self.executor;
                 let job_id = job_id.clone();

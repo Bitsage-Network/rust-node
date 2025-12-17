@@ -699,8 +699,8 @@ impl TEEContext {
         
         // Priority 4: Software fallback
         warn!("⚠️ No hardware TEE found. Using software attestation (INSECURE for production).");
-        TEEContext::Software(FallbackAttestor::new())
-    }
+            TEEContext::Software(FallbackAttestor::new())
+        }
     
     /// Create TEE context for a specific TEE type
     pub fn with_type(tee_type: TEEType) -> Result<Self> {

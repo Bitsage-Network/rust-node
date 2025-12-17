@@ -21,6 +21,10 @@ pub mod etl;          // ETL verification (Phase 4) ✅
 pub mod stwo_adapter; // Real Stwo integration layer (Phase 5) ✅
 pub mod gpu;          // GPU acceleration (CUDA/ROCm) (Phase 6) 🚀
 pub mod starknet;     // Starknet L2 on-chain verification (Phase 7) ⛓️
+pub mod elgamal;      // ElGamal EC encryption for privacy payments (Phase 8) 🔐
+pub mod privacy_client; // Privacy Router contract client (Phase 8) 🔐
+pub mod payment_client; // Payment Router contract client (Phase 8) 💰
+pub mod worker_keys;    // Worker keypair management (Phase 8) 🔑
 
 // Re-exports for convenience
 pub use vm::{ObelyskVM, OpCode, Instruction, ExecutionTrace};
@@ -33,3 +37,20 @@ pub use ecdsa::{ECDSAVerifier, ECDSASignature, P256Point, U256};
 pub use ml_gadgets::Matrix;
 pub use etl::{ETLBridge, ETLJob, ETLOpCode};
 pub use starknet::{ProofSerializer, CairoSerializedProof, StarknetClient, VerifierContract};
+pub use elgamal::{
+    Felt252, ECPoint, ElGamalCiphertext, EncryptionProof, EncryptedBalance, KeyPair,
+    encrypt, decrypt_point, derive_public_key, homomorphic_add, homomorphic_sub,
+    create_schnorr_proof, verify_schnorr_proof, create_decryption_proof, verify_decryption_proof,
+};
+pub use privacy_client::{
+    PrivacyRouterClient, WorkerPrivacyManager, PrivateAccount, PrivateWorkerPayment,
+    felt252_to_field_element, field_element_to_felt252,
+};
+pub use payment_client::{
+    PaymentRouterClient, PaymentToken, PaymentQuote, PaymentCalculator,
+    FeeDistribution, DiscountTiers, OTCConfig,
+};
+pub use worker_keys::{
+    WorkerKeyManager, PublicKeyExport, RegistrationSignature,
+    generate_worker_keys, verify_registration_signature,
+};
