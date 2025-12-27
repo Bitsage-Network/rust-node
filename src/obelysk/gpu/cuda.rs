@@ -14,6 +14,7 @@ use cudarc::nvrtc::compile_ptx;
 
 use anyhow::{Result, anyhow, Context};
 use std::sync::Arc;
+use tracing::{info, debug};
 use crate::obelysk::field::M31;
 use super::{GpuBackend, GpuBuffer};
 
@@ -21,12 +22,14 @@ use super::{GpuBackend, GpuBuffer};
 pub struct CudaBackend {
     device: Arc<CudaDevice>,
     stream: CudaStream,
-    
+
     // Pre-compiled CUDA kernels
     m31_add_kernel: CudaFunction,
     m31_sub_kernel: CudaFunction,
     m31_mul_kernel: CudaFunction,
     circle_fft_kernel: CudaFunction,
+    blake2s_batch_kernel: CudaFunction,
+    blake2s_merkle_kernel: CudaFunction,
 }
 
 impl CudaBackend {
@@ -56,34 +59,51 @@ impl CudaBackend {
     fn load_fft_kernel(device: &Arc<CudaDevice>) -> Result<CudaFunction> {
         let fft_src = include_str!("kernels/circle_fft.cu");
         let ptx = Self::compile_kernel(fft_src, "circle_fft")?;
-        
+
         device.get_func("circle_fft_naive", &ptx)
             .context("Failed to load circle_fft_naive kernel")
+    }
+
+    /// Load Blake2s kernels
+    fn load_blake2s_kernels(device: &Arc<CudaDevice>) -> Result<(CudaFunction, CudaFunction)> {
+        let blake2s_src = include_str!("kernels/blake2s.cu");
+        let ptx = Self::compile_kernel(blake2s_src, "blake2s")?;
+
+        let blake2s_batch = device.get_func("blake2s_batch", &ptx)
+            .context("Failed to load blake2s_batch kernel")?;
+        let blake2s_merkle = device.get_func("blake2s_merkle_layer", &ptx)
+            .context("Failed to load blake2s_merkle_layer kernel")?;
+
+        Ok((blake2s_batch, blake2s_merkle))
     }
 }
 
 impl GpuBackend for CudaBackend {
     fn init() -> Result<Self> {
-        println!("🚀 Initializing CUDA backend...");
-        
+        info!("Initializing CUDA backend");
+
         // Initialize CUDA device (use device 0)
         let device = CudaDevice::new(0)
             .context("Failed to initialize CUDA device. Is NVIDIA GPU available?")?;
-        
-        println!("   Device: {}", device.name());
-        println!("   Compute Capability: {:?}", device.compute_capability());
-        
+
+        info!(
+            device = %device.name(),
+            compute_capability = ?device.compute_capability(),
+            "CUDA device detected"
+        );
+
         // Create stream for async operations
         let stream = device.fork_default_stream()
             .context("Failed to create CUDA stream")?;
-        
+
         // Load and compile kernels
-        println!("   Compiling CUDA kernels...");
+        debug!("Compiling CUDA kernels");
         let (m31_add, m31_sub, m31_mul) = Self::load_m31_kernels(&device)?;
         let circle_fft = Self::load_fft_kernel(&device)?;
-        
-        println!("✅ CUDA backend initialized successfully");
-        
+        let (blake2s_batch, blake2s_merkle) = Self::load_blake2s_kernels(&device)?;
+
+        info!("CUDA backend initialized successfully");
+
         Ok(CudaBackend {
             device,
             stream,
@@ -91,6 +111,8 @@ impl GpuBackend for CudaBackend {
             m31_sub_kernel: m31_sub,
             m31_mul_kernel: m31_mul,
             circle_fft_kernel: circle_fft,
+            blake2s_batch_kernel: blake2s_batch,
+            blake2s_merkle_kernel: blake2s_merkle,
         })
     }
     
@@ -251,13 +273,75 @@ impl GpuBackend for CudaBackend {
     
     fn blake2s_batch(
         &self,
-        _inputs: &GpuBuffer,
-        _outputs: &mut GpuBuffer,
-        _num_hashes: usize,
-        _input_size: usize,
+        inputs: &GpuBuffer,
+        outputs: &mut GpuBuffer,
+        num_hashes: usize,
+        input_size: usize,
     ) -> Result<()> {
-        // TODO: Implement Blake2s kernel
-        Err(anyhow!("Blake2s kernel not yet implemented"))
+        // Validate input size (must fit in a single Blake2s block)
+        if input_size > 64 {
+            return Err(anyhow!("Blake2s input size must be <= 64 bytes, got {}", input_size));
+        }
+
+        let block_size = 256;
+        let grid_size = (num_hashes + block_size - 1) / block_size;
+
+        let cfg = LaunchConfig {
+            grid_dim: (grid_size as u32, 1, 1),
+            block_dim: (block_size as u32, 1, 1),
+            shared_mem_bytes: 0,
+        };
+
+        unsafe {
+            self.blake2s_batch_kernel.launch(
+                cfg,
+                &self.stream,
+                (inputs.ptr, outputs.ptr, num_hashes as i32, input_size as i32),
+            ).context("Failed to launch blake2s_batch kernel")?;
+        }
+
+        self.stream.synchronize()
+            .context("Failed to synchronize stream")?;
+
+        Ok(())
+    }
+
+    /// Compute one layer of a Merkle tree using Blake2s
+    ///
+    /// Takes pairs of 32-byte nodes and hashes them together.
+    /// Output[i] = Blake2s(Input[2*i] || Input[2*i + 1])
+    fn blake2s_merkle_layer(
+        &self,
+        inputs: &GpuBuffer,
+        outputs: &mut GpuBuffer,
+        num_nodes: usize,
+    ) -> Result<()> {
+        if num_nodes % 2 != 0 {
+            return Err(anyhow!("Number of Merkle nodes must be even, got {}", num_nodes));
+        }
+
+        let num_pairs = num_nodes / 2;
+        let block_size = 256;
+        let grid_size = (num_pairs + block_size - 1) / block_size;
+
+        let cfg = LaunchConfig {
+            grid_dim: (grid_size as u32, 1, 1),
+            block_dim: (block_size as u32, 1, 1),
+            shared_mem_bytes: 0,
+        };
+
+        unsafe {
+            self.blake2s_merkle_kernel.launch(
+                cfg,
+                &self.stream,
+                (inputs.ptr, outputs.ptr, num_nodes as i32),
+            ).context("Failed to launch blake2s_merkle_layer kernel")?;
+        }
+
+        self.stream.synchronize()
+            .context("Failed to synchronize stream")?;
+
+        Ok(())
     }
     
     fn device_name(&self) -> String {

@@ -3,7 +3,7 @@
 //! Implements Kafka consumer and producer for job intake, worker communication,
 //! and result distribution in the Bitsage Network coordinator.
 
-use anyhow::Result;
+use anyhow::{Result, Context};
 use rdkafka::{
     config::ClientConfig,
     consumer::{Consumer, StreamConsumer},
@@ -457,27 +457,247 @@ impl KafkaCoordinator {
         Ok(())
     }
 
-        async fn start_consumer_loop(&self) -> Result<()> {
+    async fn start_consumer_loop(&self) -> Result<()> {
         if self.consumer.is_none() {
             return Err(anyhow::anyhow!("Consumer not initialized"));
         }
-        
-        // TODO: Implement proper consumer loop
-        // This is a placeholder implementation to resolve lifetime issues
-        // In a real implementation, we would need to restructure to avoid
-        // borrowing from &self while moving into tokio::spawn
-        
-        info!("Consumer loop started (placeholder implementation)");
+
+        // Clone all needed references for the spawned task
+        let running = Arc::clone(&self.running);
+        let config = self.config.clone();
+        let event_sender = self.event_sender.clone();
+        let dead_letter_queue = Arc::clone(&self.dead_letter_queue);
+        let message_counters = Arc::clone(&self.message_counters);
+        let job_queue = Arc::clone(&self.job_queue);
+
+        tokio::spawn(async move {
+            info!("Consumer loop started");
+
+            // Create consumer inside the spawned task to avoid lifetime issues
+            let mut consumer_config = ClientConfig::new();
+            consumer_config
+                .set("bootstrap.servers", &config.bootstrap_servers)
+                .set("group.id", &config.consumer_group_id)
+                .set("auto.commit.interval.ms", &config.auto_commit_interval_ms.to_string())
+                .set("session.timeout.ms", &config.session_timeout_ms.to_string())
+                .set("max.poll.interval.ms", &config.max_poll_interval_ms.to_string())
+                .set("enable.auto.commit", &config.enable_auto_commit.to_string())
+                .set("auto.offset.reset", "earliest");
+
+            let consumer: StreamConsumer = match consumer_config.create() {
+                Ok(c) => c,
+                Err(e) => {
+                    error!("Failed to create consumer in loop: {}", e);
+                    return;
+                }
+            };
+
+            // Subscribe to topics
+            let topics = vec![
+                config.job_intake_topic.as_str(),
+                config.worker_communication_topic.as_str(),
+                config.health_metrics_topic.as_str(),
+            ];
+
+            if let Err(e) = consumer.subscribe(&topics) {
+                error!("Failed to subscribe to topics: {}", e);
+                return;
+            }
+
+            let consumer_timeout = Duration::from_millis(config.consumer_timeout_ms);
+            let mut consecutive_errors = 0u32;
+            const MAX_CONSECUTIVE_ERRORS: u32 = 10;
+
+            loop {
+                // Check if we should stop
+                if !*running.read().await {
+                    info!("Consumer loop stopping");
+                    break;
+                }
+
+                // Poll for messages with timeout
+                match tokio::time::timeout(consumer_timeout, async {
+                    use futures::StreamExt;
+
+                    let mut stream = consumer.stream();
+                    stream.next().await
+                }).await {
+                    Ok(Some(Ok(borrowed_msg))) => {
+                        consecutive_errors = 0;
+
+                        let topic = borrowed_msg.topic().to_string();
+                        let payload = borrowed_msg.payload().map(|p| p.to_vec());
+                        let partition = borrowed_msg.partition();
+                        let offset = borrowed_msg.offset();
+
+                        if let Some(payload_data) = payload {
+                            // Process based on topic
+                            let process_result = Self::process_message_data(
+                                &topic,
+                                &payload_data,
+                                &event_sender,
+                                &config,
+                                &job_queue,
+                            ).await;
+
+                            match process_result {
+                                Ok(()) => {
+                                    // Increment success counter
+                                    let mut counters = message_counters.write().await;
+                                    *counters.entry("messages_received".to_string()).or_insert(0) += 1;
+                                    debug!("Processed message from topic {} partition {} offset {}",
+                                           topic, partition, offset);
+                                }
+                                Err(e) => {
+                                    warn!("Failed to process message from {}: {}", topic, e);
+
+                                    // Add to dead letter queue
+                                    let entry = DeadLetterEntry {
+                                        message_id: Uuid::new_v4().to_string(),
+                                        topic: topic.clone(),
+                                        partition,
+                                        offset,
+                                        error: e.to_string(),
+                                        message_data: payload_data,
+                                        timestamp: chrono::Utc::now().timestamp() as u64,
+                                        retry_count: 0,
+                                    };
+                                    dead_letter_queue.write().await.push(entry);
+
+                                    // Increment failure counter
+                                    let mut counters = message_counters.write().await;
+                                    *counters.entry("messages_failed".to_string()).or_insert(0) += 1;
+                                }
+                            }
+                        }
+                    }
+                    Ok(Some(Err(e))) => {
+                        consecutive_errors += 1;
+                        warn!("Error receiving Kafka message: {} (consecutive: {})", e, consecutive_errors);
+
+                        if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
+                            error!("Too many consecutive errors, pausing consumer loop");
+                            sleep(Duration::from_secs(5)).await;
+                            consecutive_errors = 0;
+                        }
+                    }
+                    Ok(None) => {
+                        // Stream ended, this shouldn't happen normally
+                        debug!("Consumer stream ended, continuing...");
+                    }
+                    Err(_) => {
+                        // Timeout - this is normal, just continue polling
+                    }
+                }
+            }
+
+            info!("Consumer loop exited");
+        });
+
         Ok(())
     }
 
     /// Start producer message sending loop
     async fn start_producer_loop(&self) -> Result<()> {
-        // TODO: Implement producer message queue processing
+        // Clone all needed references for the spawned task
+        let running = Arc::clone(&self.running);
+        let config = self.config.clone();
+        let job_queue = Arc::clone(&self.job_queue);
+        let message_counters = Arc::clone(&self.message_counters);
+        let dead_letter_queue = Arc::clone(&self.dead_letter_queue);
+
         tokio::spawn(async move {
+            info!("Producer loop started");
+
+            // Create producer inside the spawned task
+            let mut producer_config = ClientConfig::new();
+            producer_config
+                .set("bootstrap.servers", &config.bootstrap_servers)
+                .set("message.timeout.ms", "30000")
+                .set("request.timeout.ms", "5000")
+                .set("retry.backoff.ms", "100")
+                .set("max.in.flight.requests.per.connection", "5")
+                .set("acks", "all")
+                .set("retries", "3");
+
+            let producer: FutureProducer = match producer_config.create() {
+                Ok(p) => p,
+                Err(e) => {
+                    error!("Failed to create producer in loop: {}", e);
+                    return;
+                }
+            };
+
+            let batch_interval = Duration::from_millis(50);
+            let max_batch_size = config.max_poll_records as usize;
+
             loop {
-                sleep(Duration::from_millis(100)).await;
+                // Check if we should stop
+                if !*running.read().await {
+                    info!("Producer loop stopping");
+                    break;
+                }
+
+                // Collect batch of jobs to send
+                let jobs_to_send: Vec<JobIntakeMessage> = {
+                    let mut queue = job_queue.write().await;
+                    let batch_size = std::cmp::min(queue.len(), max_batch_size);
+                    queue.drain(..batch_size).collect()
+                };
+
+                if jobs_to_send.is_empty() {
+                    // No jobs to send, wait before checking again
+                    sleep(batch_interval).await;
+                    continue;
+                }
+
+                // Send all jobs in the batch
+                for job_message in jobs_to_send {
+                    let payload = match serde_json::to_vec(&job_message) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            error!("Failed to serialize job message: {}", e);
+                            continue;
+                        }
+                    };
+
+                    let job_id_str = job_message.job_id.to_string();
+                    let record = FutureRecord::to(&config.job_intake_topic)
+                        .payload(&payload)
+                        .key(&job_id_str);
+
+                    match producer.send(record, Duration::from_secs(10)).await {
+                        Ok((partition, offset)) => {
+                            debug!("Sent job {} to partition {} offset {}",
+                                   job_message.job_id, partition, offset);
+
+                            let mut counters = message_counters.write().await;
+                            *counters.entry("messages_sent".to_string()).or_insert(0) += 1;
+                        }
+                        Err((e, _)) => {
+                            error!("Failed to send job message: {}", e);
+
+                            // Add to dead letter queue for retry
+                            let entry = DeadLetterEntry {
+                                message_id: Uuid::new_v4().to_string(),
+                                topic: config.job_intake_topic.clone(),
+                                partition: 0,
+                                offset: 0,
+                                error: e.to_string(),
+                                message_data: payload,
+                                timestamp: chrono::Utc::now().timestamp() as u64,
+                                retry_count: 0,
+                            };
+                            dead_letter_queue.write().await.push(entry);
+
+                            let mut counters = message_counters.write().await;
+                            *counters.entry("messages_failed".to_string()).or_insert(0) += 1;
+                        }
+                    }
+                }
             }
+
+            info!("Producer loop exited");
         });
 
         Ok(())
@@ -487,32 +707,173 @@ impl KafkaCoordinator {
     async fn start_dead_letter_processing(&self) -> Result<()> {
         let dead_letter_queue = Arc::clone(&self.dead_letter_queue);
         let config = self.config.clone();
+        let running = Arc::clone(&self.running);
+        let message_counters = Arc::clone(&self.message_counters);
 
         tokio::spawn(async move {
+            info!("Dead letter queue processor started");
+
+            // Create a producer for retrying messages
+            let mut producer_config = ClientConfig::new();
+            producer_config
+                .set("bootstrap.servers", &config.bootstrap_servers)
+                .set("message.timeout.ms", "30000")
+                .set("request.timeout.ms", "10000")
+                .set("retries", "1");
+
+            let producer: Option<FutureProducer> = match producer_config.create() {
+                Ok(p) => Some(p),
+                Err(e) => {
+                    warn!("Failed to create producer for DLQ retries: {}", e);
+                    None
+                }
+            };
+
             let mut interval = tokio::time::interval(Duration::from_secs(60));
-            
+            const MAX_RETRIES: u32 = 3;
+            const RETRY_BACKOFF_SECS: u64 = 30;
+
             loop {
                 interval.tick().await;
-                
-                // Process dead letter queue entries
-                let mut queue = dead_letter_queue.write().await;
-                let mut to_remove = Vec::new();
-                
-                for (i, entry) in queue.iter_mut().enumerate() {
-                    if entry.retry_count < 3 {
-                        // TODO: Implement retry logic
-                        entry.retry_count += 1;
+
+                // Check if we should stop
+                if !*running.read().await {
+                    info!("Dead letter queue processor stopping");
+                    break;
+                }
+
+                // Get current queue entries
+                let entries_to_process: Vec<DeadLetterEntry> = {
+                    let queue = dead_letter_queue.read().await;
+                    queue.clone()
+                };
+
+                if entries_to_process.is_empty() {
+                    continue;
+                }
+
+                debug!("Processing {} dead letter queue entries", entries_to_process.len());
+
+                let mut successful_indices = Vec::new();
+                let mut permanent_failures = Vec::new();
+
+                for (i, entry) in entries_to_process.iter().enumerate() {
+                    // Check if entry has exceeded max retries
+                    if entry.retry_count >= MAX_RETRIES {
+                        warn!("Message {} exceeded max retries ({}), marking as permanent failure",
+                              entry.message_id, MAX_RETRIES);
+                        permanent_failures.push(i);
+                        continue;
+                    }
+
+                    // Check if enough time has passed for retry (exponential backoff)
+                    let backoff_secs = RETRY_BACKOFF_SECS * (1 << entry.retry_count);
+                    let current_time = chrono::Utc::now().timestamp() as u64;
+                    if current_time < entry.timestamp + backoff_secs {
+                        debug!("Skipping retry for {} - backoff not elapsed", entry.message_id);
+                        continue;
+                    }
+
+                    // Attempt retry if we have a producer
+                    if let Some(ref producer) = producer {
+                        let record = FutureRecord::to(&entry.topic)
+                            .payload(&entry.message_data)
+                            .key(&entry.message_id);
+
+                        match producer.send(record, Duration::from_secs(10)).await {
+                            Ok((partition, offset)) => {
+                                info!("Successfully retried message {} to partition {} offset {}",
+                                      entry.message_id, partition, offset);
+                                successful_indices.push(i);
+
+                                let mut counters = message_counters.write().await;
+                                *counters.entry("dlq_retries_successful".to_string()).or_insert(0) += 1;
+                            }
+                            Err((e, _)) => {
+                                warn!("Retry failed for message {}: {}", entry.message_id, e);
+
+                                // Update retry count
+                                let mut queue = dead_letter_queue.write().await;
+                                if let Some(queue_entry) = queue.get_mut(i) {
+                                    queue_entry.retry_count += 1;
+                                    queue_entry.error = format!("Retry {} failed: {}", queue_entry.retry_count, e);
+                                    queue_entry.timestamp = current_time;
+                                }
+
+                                let mut counters = message_counters.write().await;
+                                *counters.entry("dlq_retries_failed".to_string()).or_insert(0) += 1;
+                            }
+                        }
                     } else {
-                        to_remove.push(i);
+                        // No producer available, just increment retry count
+                        let mut queue = dead_letter_queue.write().await;
+                        if let Some(queue_entry) = queue.get_mut(i) {
+                            queue_entry.retry_count += 1;
+                        }
                     }
                 }
-                
-                // Remove processed entries
-                for &index in to_remove.iter().rev() {
-                    queue.remove(index);
+
+                // Remove successful and permanently failed entries
+                {
+                    let mut queue = dead_letter_queue.write().await;
+                    let mut indices_to_remove: Vec<usize> = successful_indices
+                        .into_iter()
+                        .chain(permanent_failures)
+                        .collect();
+                    indices_to_remove.sort_unstable();
+                    indices_to_remove.dedup();
+
+                    // Remove in reverse order to preserve indices
+                    for &index in indices_to_remove.iter().rev() {
+                        if index < queue.len() {
+                            let removed = queue.remove(index);
+                            if removed.retry_count >= MAX_RETRIES {
+                                error!("Permanently failed message {}: {} (original error: {})",
+                                       removed.message_id, removed.topic, removed.error);
+                            }
+                        }
+                    }
                 }
             }
+
+            info!("Dead letter queue processor exited");
         });
+
+        Ok(())
+    }
+
+    /// Process message data from consumer (helper for spawned task)
+    async fn process_message_data(
+        topic: &str,
+        payload: &[u8],
+        event_sender: &mpsc::UnboundedSender<KafkaEvent>,
+        config: &KafkaConfig,
+        job_queue: &Arc<RwLock<Vec<JobIntakeMessage>>>,
+    ) -> Result<()> {
+        if topic == config.job_intake_topic {
+            let job_message: JobIntakeMessage = serde_json::from_slice(payload)
+                .context("Failed to deserialize job intake message")?;
+
+            // Add to local job queue for processing
+            job_queue.write().await.push(job_message.clone());
+
+            // Send event for coordinator handling
+            event_sender.send(KafkaEvent::JobReceived(job_message))
+                .map_err(|e| anyhow::anyhow!("Failed to send job received event: {}", e))?;
+        } else if topic == config.worker_communication_topic {
+            let worker_message: WorkerCommunicationMessage = serde_json::from_slice(payload)
+                .context("Failed to deserialize worker communication message")?;
+            Self::handle_worker_message(worker_message, event_sender).await?;
+        } else if topic == config.health_metrics_topic {
+            let health_message: HealthMetricsMessage = serde_json::from_slice(payload)
+                .context("Failed to deserialize health metrics message")?;
+            event_sender.send(KafkaEvent::HealthMetricsUpdated(
+                health_message.worker_id,
+                health_message.metrics,
+            )).map_err(|e| anyhow::anyhow!("Failed to send health metrics event: {}", e))?;
+        } else {
+            warn!("Unknown Kafka topic: {}", topic);
+        }
 
         Ok(())
     }
@@ -595,9 +956,15 @@ impl KafkaCoordinator {
         Ok(())
     }
 
+    /// Get producer reference, returning error if not initialized
+    fn get_producer(&self) -> Result<&FutureProducer> {
+        self.producer.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Kafka producer not initialized. Call start() first."))
+    }
+
     /// Send job intake message
     pub async fn send_job_intake(&self, job_message: JobIntakeMessage) -> Result<()> {
-        let producer = self.producer.as_ref().unwrap();
+        let producer = self.get_producer()?;
         let config = self.config.clone();
         
         let payload = serde_json::to_vec(&job_message)?;
@@ -622,7 +989,7 @@ impl KafkaCoordinator {
 
     /// Send worker communication message
     pub async fn send_worker_communication(&self, message: WorkerCommunicationMessage) -> Result<()> {
-        let producer = self.producer.as_ref().unwrap();
+        let producer = self.get_producer()?;
         let config = self.config.clone();
         
         let payload = serde_json::to_vec(&message)?;
@@ -655,7 +1022,7 @@ impl KafkaCoordinator {
 
     /// Send result distribution message
     pub async fn send_result_distribution(&self, result_message: ResultDistributionMessage) -> Result<()> {
-        let producer = self.producer.as_ref().unwrap();
+        let producer = self.get_producer()?;
         let config = self.config.clone();
         
         let payload = serde_json::to_vec(&result_message)?;
@@ -680,7 +1047,7 @@ impl KafkaCoordinator {
 
     /// Send health metrics message
     pub async fn send_health_metrics(&self, health_message: HealthMetricsMessage) -> Result<()> {
-        let producer = self.producer.as_ref().unwrap();
+        let producer = self.get_producer()?;
         let config = self.config.clone();
         
         let payload = serde_json::to_vec(&health_message)?;
@@ -740,23 +1107,94 @@ impl KafkaCoordinator {
         self.job_queue.read().await.len()
     }
 
-    /// Get event receiver
-    pub async fn event_receiver(&self) -> mpsc::UnboundedReceiver<KafkaEvent> {
-        self.event_receiver.write().await.take().unwrap()
+    /// Take the event receiver.
+    ///
+    /// This can only be called once - subsequent calls will return `None`.
+    pub async fn take_event_receiver(&self) -> Option<mpsc::UnboundedReceiver<KafkaEvent>> {
+        self.event_receiver.write().await.take()
+    }
+
+    /// Check if the event receiver is still available.
+    pub async fn has_event_receiver(&self) -> bool {
+        self.event_receiver.read().await.is_some()
+    }
+
+    /// Queue a job for sending via the producer loop
+    pub async fn queue_job(&self, job_message: JobIntakeMessage) {
+        self.job_queue.write().await.push(job_message);
+    }
+
+    /// Queue multiple jobs for sending
+    pub async fn queue_jobs(&self, jobs: Vec<JobIntakeMessage>) {
+        self.job_queue.write().await.extend(jobs);
+    }
+
+    /// Get comprehensive Kafka statistics
+    pub async fn get_kafka_stats(&self) -> KafkaStats {
+        let counters = self.message_counters.read().await;
+        let dlq_size = self.dead_letter_queue.read().await.len();
+        let job_queue_size = self.job_queue.read().await.len();
+
+        let messages_sent = counters.get("messages_sent").copied().unwrap_or(0);
+        let messages_received = counters.get("messages_received").copied().unwrap_or(0);
+        let messages_failed = counters.get("messages_failed").copied().unwrap_or(0);
+
+        let total_messages = messages_sent + messages_received + messages_failed;
+        let error_rate = if total_messages > 0 {
+            messages_failed as f64 / total_messages as f64
+        } else {
+            0.0
+        };
+
+        KafkaStats {
+            messages_sent,
+            messages_received,
+            messages_failed,
+            dead_letter_queue_size: dlq_size,
+            job_queue_size,
+            consumer_lag: 0, // Would need actual Kafka client access for this
+            producer_queue_size: job_queue_size,
+            connection_status: if *self.running.read().await {
+                "connected".to_string()
+            } else {
+                "disconnected".to_string()
+            },
+            last_message_timestamp: counters.get("last_timestamp").copied().unwrap_or(0),
+            average_message_size_bytes: 0, // Would need message tracking for this
+            error_rate,
+            throughput_messages_per_sec: 0.0, // Would need time tracking for this
+        }
+    }
+
+    /// Get dead letter queue entries for inspection
+    pub async fn get_dead_letter_entries(&self) -> Vec<DeadLetterEntry> {
+        self.dead_letter_queue.read().await.clone()
+    }
+
+    /// Clear all successfully processed dead letter entries
+    pub async fn clear_processed_dead_letters(&self) {
+        // Only keeps entries that still need processing (retry_count < 3)
+        let mut queue = self.dead_letter_queue.write().await;
+        queue.retain(|entry| entry.retry_count < 3);
     }
 
     /// Health check
     pub async fn health_check(&self) -> Result<()> {
-        // Check if consumer and producer are initialized
-        if self.consumer.is_none() || self.producer.is_none() {
-            return Err(anyhow::anyhow!("Kafka clients not initialized"));
+        // Check if running
+        if !*self.running.read().await {
+            return Err(anyhow::anyhow!("Kafka coordinator not running"));
         }
         Ok(())
     }
 
     /// Check if connected
     pub async fn is_connected(&self) -> bool {
-        self.consumer.is_some() && self.producer.is_some()
+        *self.running.read().await
+    }
+
+    /// Check if running
+    pub async fn is_running(&self) -> bool {
+        *self.running.read().await
     }
 }
 
@@ -801,5 +1239,182 @@ mod tests {
 
         assert_eq!(job_message.priority, JobPriority::Normal);
         assert_eq!(job_message.max_retries, 3);
+    }
+
+    #[tokio::test]
+    async fn test_kafka_coordinator_creation() {
+        let config = KafkaConfig::default();
+        let coordinator = KafkaCoordinator::new(config);
+
+        // Should start with empty queues
+        assert_eq!(coordinator.get_job_queue_size().await, 0);
+        assert_eq!(coordinator.get_dead_letter_queue_size().await, 0);
+        assert!(!coordinator.is_running().await);
+    }
+
+    #[tokio::test]
+    async fn test_job_queueing() {
+        let config = KafkaConfig::default();
+        let coordinator = KafkaCoordinator::new(config);
+
+        // Create test job
+        let job_message = JobIntakeMessage {
+            job_id: JobId::new(),
+            job_request: JobRequest {
+                job_type: JobType::AIInference {
+                    model_type: "test".to_string(),
+                    input_data: "test".to_string(),
+                    batch_size: 1,
+                    parameters: HashMap::new(),
+                },
+                priority: 5,
+                max_cost: 1000,
+                deadline: None,
+                client_address: "test".to_string(),
+                callback_url: None,
+                data: vec![],
+                max_duration_secs: 3600,
+            },
+            client_id: "test".to_string(),
+            callback_url: None,
+            priority: JobPriority::Normal,
+            max_retries: 3,
+            created_at: chrono::Utc::now().timestamp() as u64,
+        };
+
+        // Queue the job
+        coordinator.queue_job(job_message).await;
+        assert_eq!(coordinator.get_job_queue_size().await, 1);
+
+        // Queue multiple jobs
+        let jobs: Vec<JobIntakeMessage> = (0..5).map(|_| {
+            JobIntakeMessage {
+                job_id: JobId::new(),
+                job_request: JobRequest {
+                    job_type: JobType::AIInference {
+                        model_type: "test".to_string(),
+                        input_data: "test".to_string(),
+                        batch_size: 1,
+                        parameters: HashMap::new(),
+                    },
+                    priority: 5,
+                    max_cost: 1000,
+                    deadline: None,
+                    client_address: "test".to_string(),
+                    callback_url: None,
+                    data: vec![],
+                    max_duration_secs: 3600,
+                },
+                client_id: "test".to_string(),
+                callback_url: None,
+                priority: JobPriority::Normal,
+                max_retries: 3,
+                created_at: chrono::Utc::now().timestamp() as u64,
+            }
+        }).collect();
+
+        coordinator.queue_jobs(jobs).await;
+        assert_eq!(coordinator.get_job_queue_size().await, 6);
+    }
+
+    #[tokio::test]
+    async fn test_kafka_stats() {
+        let config = KafkaConfig::default();
+        let coordinator = KafkaCoordinator::new(config);
+
+        let stats = coordinator.get_kafka_stats().await;
+        assert_eq!(stats.messages_sent, 0);
+        assert_eq!(stats.messages_received, 0);
+        assert_eq!(stats.messages_failed, 0);
+        assert_eq!(stats.dead_letter_queue_size, 0);
+        assert_eq!(stats.job_queue_size, 0);
+        assert_eq!(stats.connection_status, "disconnected");
+        assert_eq!(stats.error_rate, 0.0);
+    }
+
+    #[tokio::test]
+    async fn test_dead_letter_entry() {
+        let entry = DeadLetterEntry {
+            message_id: "test-123".to_string(),
+            topic: "test.topic".to_string(),
+            partition: 0,
+            offset: 100,
+            error: "test error".to_string(),
+            message_data: vec![1, 2, 3],
+            timestamp: chrono::Utc::now().timestamp() as u64,
+            retry_count: 0,
+        };
+
+        assert_eq!(entry.message_id, "test-123");
+        assert_eq!(entry.retry_count, 0);
+        assert_eq!(entry.topic, "test.topic");
+    }
+
+    #[tokio::test]
+    async fn test_worker_communication_message_variants() {
+        let worker_id = WorkerId::new();
+
+        // Test WorkerRegistration
+        let registration = WorkerCommunicationMessage::WorkerRegistration {
+            worker_id: worker_id.clone(),
+            capabilities: WorkerCapabilities {
+                gpu_memory_gb: 16,
+                cpu_cores: 8,
+                ram_gb: 32,
+                supported_job_types: vec!["ai".to_string()],
+                ai_frameworks: vec!["pytorch".to_string()],
+                specialized_hardware: vec![],
+                max_parallel_tasks: 4,
+                network_bandwidth_mbps: 1000,
+                storage_gb: 500,
+                supports_fp16: true,
+                supports_int8: true,
+                cuda_compute_capability: Some("8.0".to_string()),
+            },
+            location: WorkerLocation {
+                region: "us-west-2".to_string(),
+                country: "US".to_string(),
+                latitude: 37.7749,
+                longitude: -122.4194,
+                timezone: "PST".to_string(),
+                network_latency_ms: 10,
+            },
+            health_metrics: None,
+            timestamp: chrono::Utc::now().timestamp() as u64,
+        };
+
+        // Verify serialization works
+        let json = serde_json::to_string(&registration).unwrap();
+        assert!(json.contains("WorkerRegistration"));
+
+        // Test WorkerHeartbeat
+        let heartbeat = WorkerCommunicationMessage::WorkerHeartbeat {
+            worker_id: worker_id.clone(),
+            current_load: 0.5,
+            health_metrics: None,
+            timestamp: chrono::Utc::now().timestamp() as u64,
+        };
+
+        let json = serde_json::to_string(&heartbeat).unwrap();
+        assert!(json.contains("WorkerHeartbeat"));
+
+        // Test JobFailure
+        let failure = WorkerCommunicationMessage::JobFailure {
+            job_id: JobId::new(),
+            worker_id,
+            error_message: "Test failure".to_string(),
+            retry_count: 1,
+            timestamp: chrono::Utc::now().timestamp() as u64,
+        };
+
+        let json = serde_json::to_string(&failure).unwrap();
+        assert!(json.contains("JobFailure"));
+    }
+
+    #[tokio::test]
+    async fn test_job_priority_ordering() {
+        assert!(JobPriority::Critical > JobPriority::High);
+        assert!(JobPriority::High > JobPriority::Normal);
+        assert!(JobPriority::Normal > JobPriority::Low);
     }
 } 

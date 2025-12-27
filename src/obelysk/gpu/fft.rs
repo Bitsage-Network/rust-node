@@ -16,6 +16,7 @@
 
 use anyhow::{Result, Context, anyhow};
 use std::collections::HashMap;
+use tracing::info;
 
 #[cfg(feature = "cuda")]
 use cudarc::driver::*;
@@ -208,19 +209,23 @@ impl GpuFft {
     
     /// Print performance statistics
     pub fn print_stats(&self) {
-        println!("\n📊 GPU FFT Statistics:");
-        println!("   Forward FFT calls: {}", self.stats.forward_fft_calls);
-        println!("   Inverse FFT calls: {}", self.stats.inverse_fft_calls);
-        println!("   GPU calls: {} ({:.1}%)", 
-            self.stats.gpu_fft_calls,
-            if self.stats.forward_fft_calls + self.stats.inverse_fft_calls > 0 {
-                (self.stats.gpu_fft_calls as f64 / 
-                 (self.stats.forward_fft_calls + self.stats.inverse_fft_calls) as f64) * 100.0
-            } else { 0.0 }
+        let gpu_pct = if self.stats.forward_fft_calls + self.stats.inverse_fft_calls > 0 {
+            (self.stats.gpu_fft_calls as f64 /
+             (self.stats.forward_fft_calls + self.stats.inverse_fft_calls) as f64) * 100.0
+        } else {
+            0.0
+        };
+
+        info!(
+            forward_fft_calls = self.stats.forward_fft_calls,
+            inverse_fft_calls = self.stats.inverse_fft_calls,
+            gpu_calls = self.stats.gpu_fft_calls,
+            gpu_pct = gpu_pct,
+            cpu_fallbacks = self.stats.cpu_fallback_calls,
+            total_elements = self.stats.total_elements_processed,
+            gpu_time_ms = self.stats.total_gpu_time_ms,
+            "GPU FFT statistics"
         );
-        println!("   CPU fallbacks: {}", self.stats.cpu_fallback_calls);
-        println!("   Total elements: {}", self.stats.total_elements_processed);
-        println!("   GPU time: {}ms", self.stats.total_gpu_time_ms);
     }
 }
 
@@ -245,7 +250,7 @@ impl GpuFft {
     }
     
     pub fn print_stats(&self) {
-        println!("GPU FFT not available (compile with --features cuda)");
+        info!("GPU FFT not available (compile with --features cuda)");
     }
 }
 

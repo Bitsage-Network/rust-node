@@ -87,36 +87,42 @@ pub struct SessionKey {
     created_at: u64,
 }
 
+/// Get current Unix timestamp, with fallback for clock issues
+fn current_timestamp() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or_else(|e| {
+            // System clock is before Unix epoch - shouldn't happen but handle gracefully
+            warn!("System clock error: {}. Using fallback timestamp.", e);
+            0
+        })
+}
+
 impl SessionKey {
     /// Generate a new session key
     pub fn generate() -> Self {
         use rand::RngCore;
         let mut key = [0u8; 32];
         rand::rngs::OsRng.fill_bytes(&mut key);
-        
+
         Self {
             key,
             session_id: uuid::Uuid::new_v4().to_string(),
-            created_at: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
+            created_at: current_timestamp(),
         }
     }
-    
+
     /// Get session ID
     pub fn session_id(&self) -> &str {
         &self.session_id
     }
-    
+
     /// Check if session is expired
     pub fn is_expired(&self, timeout_secs: u64) -> bool {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        
-        now - self.created_at > timeout_secs
+        let now = current_timestamp();
+        // Use saturating_sub to handle clock going backward
+        now.saturating_sub(self.created_at) > timeout_secs
     }
 }
 

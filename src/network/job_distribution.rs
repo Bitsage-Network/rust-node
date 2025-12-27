@@ -21,6 +21,10 @@ use crate::network::p2p::{NetworkClient, P2PMessage};
 use crate::network::health_reputation::{
     HealthReputationSystem, HealthReputationConfig, HealthMetrics, PenaltyType
 };
+use crate::network::encrypted_jobs::{
+    EncryptedJobManager, EncryptedJobConfig, EncryptedJobAnnouncement,
+    EncryptedWorkerBid, EncryptedJobResult,
+};
 use crate::types::{JobId, WorkerId};
 
 /// Job distribution configuration
@@ -143,6 +147,15 @@ pub enum JobDistributionState {
     Timeout,
 }
 
+/// Blockchain polling statistics
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlockchainPollStats {
+    pub last_processed_block: u64,
+    pub jobs_discovered_from_blockchain: usize,
+    pub last_poll_timestamp: u64,
+    pub poll_interval_secs: u64,
+}
+
 /// Main job distribution coordinator
 pub struct JobDistributor {
     config: JobDistributionConfig,
@@ -150,17 +163,24 @@ pub struct JobDistributor {
     job_manager: Arc<JobManagerContract>,
     p2p_network: Arc<NetworkClient>,
     health_reputation_system: Arc<HealthReputationSystem>,
-    
+
+    // Privacy-preserving job distribution
+    encrypted_job_manager: Arc<RwLock<EncryptedJobManager>>,
+
     // State management
     jobs: Arc<RwLock<HashMap<JobId, DistributedJob>>>,
-    
+
     // Communication channels
     event_sender: mpsc::UnboundedSender<JobDistributionEvent>,
     event_receiver: Arc<RwLock<Option<mpsc::UnboundedReceiver<JobDistributionEvent>>>>,
-    
+
     // Internal state
     running: Arc<RwLock<bool>>,
     last_blockchain_poll: Arc<RwLock<u64>>,
+    /// Last processed blockchain block number for event polling
+    last_processed_block: Arc<RwLock<u64>>,
+    /// Jobs discovered from blockchain (by event data to avoid duplicates)
+    known_blockchain_jobs: Arc<RwLock<std::collections::HashSet<String>>>,
 }
 
 impl JobDistributor {
@@ -172,21 +192,28 @@ impl JobDistributor {
         p2p_network: Arc<NetworkClient>,
     ) -> Self {
         let (event_sender, event_receiver) = mpsc::unbounded_channel();
-        
+
         // Create health reputation system
         let health_reputation_system = Arc::new(HealthReputationSystem::new(config.health_reputation_config.clone()));
-        
+
+        // Create encrypted job manager for privacy-preserving distribution
+        let encrypted_job_config = EncryptedJobConfig::default();
+        let encrypted_job_manager = Arc::new(RwLock::new(EncryptedJobManager::new(encrypted_job_config)));
+
         Self {
             config,
             blockchain_client,
             job_manager,
             p2p_network,
             health_reputation_system,
+            encrypted_job_manager,
             jobs: Arc::new(RwLock::new(HashMap::new())),
             event_sender,
             event_receiver: Arc::new(RwLock::new(Some(event_receiver))),
             running: Arc::new(RwLock::new(false)),
             last_blockchain_poll: Arc::new(RwLock::new(0)),
+            last_processed_block: Arc::new(RwLock::new(0)),
+            known_blockchain_jobs: Arc::new(RwLock::new(std::collections::HashSet::new())),
         }
     }
 
@@ -233,11 +260,14 @@ impl JobDistributor {
             job_manager: self.job_manager.clone(),
             p2p_network: self.p2p_network.clone(),
             health_reputation_system: self.health_reputation_system.clone(),
+            encrypted_job_manager: self.encrypted_job_manager.clone(),
             jobs: self.jobs.clone(),
             event_sender: self.event_sender.clone(),
             event_receiver: self.event_receiver.clone(),
             running: self.running.clone(),
             last_blockchain_poll: self.last_blockchain_poll.clone(),
+            last_processed_block: self.last_processed_block.clone(),
+            known_blockchain_jobs: self.known_blockchain_jobs.clone(),
         }
     }
 
@@ -308,11 +338,201 @@ impl JobDistributor {
     }
 
     /// Poll blockchain for new jobs
+    ///
+    /// This method queries the blockchain for JobSubmitted events since the last
+    /// processed block. For each new job found, it creates a job announcement
+    /// and broadcasts it to the P2P network for bidding.
     async fn poll_blockchain_jobs(&self) -> Result<()> {
-        // TODO: Implement actual blockchain polling
-        // For now, this is a placeholder
-        debug!("Polling blockchain for new jobs");
+        use crate::blockchain::types::selectors;
+
+        // Get current block number
+        let current_block = self.blockchain_client.get_block_number().await
+            .context("Failed to get current block number")?;
+
+        // Get last processed block (start from current - 100 blocks on first run)
+        let last_block = {
+            let last = *self.last_processed_block.read().await;
+            if last == 0 {
+                // First run - look back 100 blocks for any pending jobs
+                current_block.saturating_sub(100)
+            } else {
+                last
+            }
+        };
+
+        // Don't process if no new blocks
+        if current_block <= last_block {
+            debug!("No new blocks to process (current: {}, last: {})", current_block, last_block);
+            return Ok(());
+        }
+
+        debug!(
+            "Polling blockchain for jobs from block {} to {}",
+            last_block + 1,
+            current_block
+        );
+
+        // Get JobSubmitted events from the contract
+        let contract_address = self.job_manager.contract_address();
+        let events = self.blockchain_client
+            .get_events_by_key(
+                contract_address,
+                *selectors::EVENT_JOB_SUBMITTED,
+                last_block + 1,
+                Some(current_block),
+            )
+            .await
+            .context("Failed to get JobSubmitted events")?;
+
+        let new_jobs_count = events.len();
+        if new_jobs_count > 0 {
+            info!("Found {} new job submissions on blockchain", new_jobs_count);
+        }
+
+        // Process each job submission event
+        for event in events {
+            if let Err(e) = self.process_job_submitted_event(event).await {
+                warn!("Failed to process job submission event: {}", e);
+                // Continue processing other events
+            }
+        }
+
+        // Update last processed block
+        *self.last_processed_block.write().await = current_block;
+
         Ok(())
+    }
+
+    /// Process a JobSubmitted event from the blockchain
+    async fn process_job_submitted_event(
+        &self,
+        event: starknet::core::types::EmittedEvent,
+    ) -> Result<()> {
+        // Generate a unique key for this event to avoid duplicates
+        let event_key = format!(
+            "{}:{}:{}",
+            event.block_number,
+            event.transaction_hash,
+            event.data.len()
+        );
+
+        // Check if we've already processed this event
+        {
+            let known_jobs = self.known_blockchain_jobs.read().await;
+            if known_jobs.contains(&event_key) {
+                debug!("Skipping already processed job event: {}", event_key);
+                return Ok(());
+            }
+        }
+
+        // Parse event data
+        // Event format: JobSubmitted(job_id, client, job_type, max_reward, deadline)
+        if event.data.len() < 5 {
+            warn!("Invalid JobSubmitted event: expected at least 5 data elements, got {}", event.data.len());
+            return Err(anyhow::anyhow!("Invalid event data length"));
+        }
+
+        // Extract job ID from event data (first field)
+        let job_id_field = event.data[0];
+        let job_id_bytes = job_id_field.to_bytes_be();
+        // Use the last 16 bytes as the UUID
+        let mut uuid_bytes = [0u8; 16];
+        uuid_bytes.copy_from_slice(&job_id_bytes[16..32]);
+        let job_id = JobId::from(uuid::Uuid::from_bytes(uuid_bytes));
+
+        // Check if we already have this job
+        {
+            let jobs = self.jobs.read().await;
+            if jobs.contains_key(&job_id) {
+                debug!("Job {} already exists, skipping", job_id);
+                return Ok(());
+            }
+        }
+
+        info!("Discovered new job from blockchain: {}", job_id);
+
+        // Get full job details from the contract
+        let job_details = self.job_manager.get_job(job_id)
+            .await
+            .context("Failed to get job details from contract")?;
+
+        let details = match job_details {
+            Some(d) => d,
+            None => {
+                warn!("Job {} not found in contract storage", job_id);
+                return Err(anyhow::anyhow!("Job not found"));
+            }
+        };
+
+        // Construct JobSpec from JobDetails
+        // Note: Some fields are not available in JobDetails and use defaults
+        let job_spec = crate::blockchain::types::JobSpec {
+            job_type: details.job_type,
+            model_id: crate::blockchain::types::ModelId::new(starknet::core::types::FieldElement::ZERO),
+            input_data_hash: starknet::core::types::FieldElement::ZERO,
+            expected_output_format: starknet::core::types::FieldElement::ZERO,
+            verification_method: crate::blockchain::types::VerificationMethod::None,
+            max_reward: details.payment_amount,
+            sla_deadline: details.created_at + 3600, // Default 1 hour deadline
+            compute_requirements: Vec::new(),
+            metadata: Vec::new(),
+        };
+
+        // Create job announcement
+        let announcement = JobAnnouncement {
+            job_id,
+            job_spec: job_spec.clone(),
+            max_reward: job_spec.max_reward,
+            deadline: job_spec.sla_deadline,
+            required_capabilities: WorkerCapabilities {
+                gpu_memory: 0,
+                cpu_cores: 0,
+                ram: 0,
+                storage: 0,
+                bandwidth: 0,
+                capability_flags: 0,
+                gpu_model: starknet::core::types::FieldElement::ZERO,
+                cpu_model: starknet::core::types::FieldElement::ZERO,
+            },
+            announcement_id: uuid::Uuid::new_v4().to_string(),
+            announced_at: chrono::Utc::now().timestamp() as u64,
+        };
+
+        // Mark as known
+        self.known_blockchain_jobs.write().await.insert(event_key);
+
+        // Broadcast the job announcement via P2P
+        let p2p_message = P2PMessage::JobAnnouncement {
+            job_id,
+            spec: job_spec,
+            max_reward: announcement.max_reward,
+            deadline: announcement.deadline,
+        };
+
+        if let Err(e) = self.p2p_network.broadcast_message(p2p_message, "bitsage-jobs").await {
+            warn!("Failed to broadcast job announcement for {}: {}", job_id, e);
+        }
+
+        // Send internal event
+        self.event_sender.send(JobDistributionEvent::JobAnnounced(announcement))
+            .context("Failed to send job announced event")?;
+
+        info!("Job {} announced from blockchain", job_id);
+        Ok(())
+    }
+
+    /// Get blockchain polling statistics
+    pub async fn get_blockchain_poll_stats(&self) -> BlockchainPollStats {
+        let last_block = *self.last_processed_block.read().await;
+        let known_jobs = self.known_blockchain_jobs.read().await.len();
+        let last_poll = *self.last_blockchain_poll.read().await;
+
+        BlockchainPollStats {
+            last_processed_block: last_block,
+            jobs_discovered_from_blockchain: known_jobs,
+            last_poll_timestamp: last_poll,
+            poll_interval_secs: self.config.blockchain_poll_interval_secs,
+        }
     }
 
     /// Handle job distribution events
@@ -695,6 +915,193 @@ impl JobDistributor {
     /// Get health reputation system reference
     pub fn health_reputation_system(&self) -> Arc<HealthReputationSystem> {
         self.health_reputation_system.clone()
+    }
+
+    // =========================================================================
+    // ENCRYPTED JOB DISTRIBUTION (Privacy-Preserving)
+    // =========================================================================
+
+    /// Announce a job with encryption (privacy-preserving mode)
+    /// Only workers with matching capabilities can decrypt and bid
+    pub async fn announce_encrypted_job(
+        &self,
+        job_spec: JobSpec,
+        max_reward: u128,
+        deadline_secs: u64,
+        target_worker_pubkeys: Vec<crate::network::encrypted_jobs::X25519PublicKey>,
+        required_capabilities: WorkerCapabilities,
+    ) -> Result<Vec<String>> {
+        info!("Creating encrypted job announcement");
+
+        // Convert job spec to DecryptedJobSpec
+        let decrypted_spec = crate::network::encrypted_jobs::DecryptedJobSpec {
+            job_id: JobId::new(),
+            job_type: format!("{:?}", job_spec.job_type),
+            computation_id: format!("{:#x}", job_spec.model_id.0),
+            input_data: crate::network::encrypted_jobs::JobInputData::Reference {
+                uri: format!("hash://{:#x}", job_spec.input_data_hash),
+                decryption_key: Vec::new(),
+                size_bytes: 0,
+            },
+            max_reward,
+            deadline_secs,
+            require_tee: false,
+            metadata: HashMap::new(),
+        };
+
+        // Generate capability filter hash
+        let capability_filter = self.hash_capabilities(&required_capabilities);
+        let expiry_block = chrono::Utc::now().timestamp() as u64 + deadline_secs;
+
+        // Create encrypted announcements for each target worker
+        let encrypted_announcements = {
+            let manager = self.encrypted_job_manager.read().await;
+            manager.create_encrypted_announcement(
+                &decrypted_spec,
+                &target_worker_pubkeys,
+                capability_filter,
+                expiry_block,
+            )?
+        };
+
+        let mut announcement_ids = Vec::new();
+
+        // Broadcast each announcement via P2P network
+        for announcement in encrypted_announcements {
+            announcement_ids.push(announcement.announcement_id.clone());
+            let message = P2PMessage::EncryptedAnnouncement(announcement);
+            self.p2p_network.broadcast_message(message, "encrypted_jobs").await?;
+        }
+
+        info!("Encrypted job announced to {} workers", announcement_ids.len());
+        Ok(announcement_ids)
+    }
+
+    /// Process received encrypted job announcement
+    /// Attempts decryption - if successful, the job is for us
+    pub async fn process_encrypted_announcement(
+        &self,
+        announcement: EncryptedJobAnnouncement,
+    ) -> Result<Option<crate::network::encrypted_jobs::DecryptedJobSpec>> {
+        let manager = self.encrypted_job_manager.read().await;
+
+        // Try to decrypt - returns None if not for us
+        match manager.try_decrypt_announcement(&announcement) {
+            Ok(spec) => {
+                info!("Successfully decrypted job: {}", spec.job_id);
+                Ok(Some(spec))
+            }
+            Err(_) => {
+                // Not for us - this is normal, not an error
+                debug!("Announcement {} not for us", announcement.announcement_id);
+                Ok(None)
+            }
+        }
+    }
+
+    /// Submit encrypted bid for a job
+    pub async fn submit_encrypted_bid(
+        &self,
+        announcement: &EncryptedJobAnnouncement,
+        bid_amount: u128,
+        estimated_time_secs: u64,
+        _worker_id: WorkerId,
+    ) -> Result<()> {
+        info!("Submitting encrypted bid for job {}", announcement.announcement_id);
+
+        // Create bid details
+        let manager = self.encrypted_job_manager.read().await;
+        let bid_details = crate::network::encrypted_jobs::DecryptedBidDetails {
+            worker_pubkey: manager.public_key().clone(),
+            bid_amount,
+            estimated_time_secs,
+            tee_attestation: None,
+        };
+
+        let encrypted_bid = manager.create_encrypted_bid(
+            announcement,
+            &bid_details,
+            Vec::new(), // capability_proof
+        )?;
+
+        // Broadcast encrypted bid
+        let message = P2PMessage::EncryptedBid(encrypted_bid);
+        self.p2p_network.broadcast_message(message, "encrypted_jobs").await?;
+
+        info!("Encrypted bid submitted for {}", announcement.announcement_id);
+        Ok(())
+    }
+
+    /// Submit encrypted job result
+    pub async fn submit_encrypted_result(
+        &self,
+        job_id: JobId,
+        result_data: Vec<u8>,
+        success: bool,
+        execution_time_ms: u64,
+        client_pubkey: &crate::network::encrypted_jobs::X25519PublicKey,
+    ) -> Result<()> {
+        info!("Submitting encrypted result for job {}", job_id);
+
+        let result = crate::network::encrypted_jobs::DecryptedJobResult {
+            success,
+            result_data,
+            execution_time_ms,
+            tee_attestation: None,
+            stwo_proof: None,
+        };
+
+        let encrypted_result = {
+            let manager = self.encrypted_job_manager.read().await;
+            manager.create_encrypted_result(job_id.clone(), &result, client_pubkey)?
+        };
+
+        // Broadcast encrypted result
+        let message = P2PMessage::EncryptedResult(encrypted_result);
+        self.p2p_network.broadcast_message(message, "encrypted_jobs").await?;
+
+        info!("Encrypted result submitted for job {}", job_id);
+        Ok(())
+    }
+
+    /// Decrypt a received job result (as the client who created the job)
+    pub async fn decrypt_job_result(
+        &self,
+        encrypted_result: &EncryptedJobResult,
+    ) -> Result<crate::network::encrypted_jobs::DecryptedJobResult> {
+        let manager = self.encrypted_job_manager.read().await;
+        manager.decrypt_result(encrypted_result)
+    }
+
+    /// Register worker's public key for encrypted communications
+    pub async fn register_encryption_key(
+        &self,
+        worker_id: WorkerId,
+        public_key: crate::network::encrypted_jobs::X25519PublicKey,
+    ) -> Result<()> {
+        let manager = self.encrypted_job_manager.read().await;
+        manager.register_worker_key(worker_id.clone(), public_key).await;
+        info!("Registered encryption key for worker {}", worker_id);
+        Ok(())
+    }
+
+    /// Get the encrypted job manager (for advanced operations)
+    pub fn encrypted_job_manager(&self) -> Arc<RwLock<EncryptedJobManager>> {
+        self.encrypted_job_manager.clone()
+    }
+
+    /// Hash worker capabilities for capability filtering
+    fn hash_capabilities(&self, capabilities: &WorkerCapabilities) -> [u8; 32] {
+        use sha3::{Sha3_256, Digest};
+        let mut hasher = Sha3_256::new();
+        hasher.update(&capabilities.gpu_memory.to_le_bytes());
+        hasher.update(&capabilities.cpu_cores.to_le_bytes());
+        hasher.update(&capabilities.ram.to_le_bytes());
+        hasher.update(&capabilities.capability_flags.to_le_bytes());
+        let result = hasher.finalize();
+        let mut hash = [0u8; 32];
+        hash.copy_from_slice(&result);
+        hash
     }
 }
 

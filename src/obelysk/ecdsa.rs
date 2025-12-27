@@ -315,6 +315,23 @@ impl U256 {
             M31::new(self.limbs[7]),
         ]
     }
+
+    /// Convert from M31 limbs back to U256
+    /// Note: There may be loss of upper bit since M31 only holds 31 bits
+    pub fn from_m31_limbs(limbs: &[M31; 8]) -> Self {
+        U256 {
+            limbs: [
+                limbs[0].value(),
+                limbs[1].value(),
+                limbs[2].value(),
+                limbs[3].value(),
+                limbs[4].value(),
+                limbs[5].value(),
+                limbs[6].value(),
+                limbs[7].value(),
+            ],
+        }
+    }
 }
 
 // =============================================================================
@@ -476,6 +493,18 @@ impl P256Point {
         P256Point::new(x3, y3)
     }
     
+    /// Point negation: -P = (x, -y) = (x, p - y)
+    pub fn negate(&self) -> Self {
+        if self.infinity {
+            return Self::INFINITY;
+        }
+
+        let p = U256::from_limbs(P256_PRIME);
+        let neg_y = p.sub_mod(&self.y, &p);
+
+        P256Point::new(self.x, neg_y)
+    }
+
     /// Scalar multiplication: k * self (double-and-add)
     pub fn scalar_mul(&self, k: &U256) -> Self {
         if k.is_zero() || self.infinity {
@@ -561,7 +590,15 @@ impl ECDSASignature {
         let s = U256::from_be_bytes(bytes[32..64].try_into().unwrap());
         ECDSASignature { r, s }
     }
-    
+
+    /// Convert to concatenated format (64 bytes: r || s)
+    pub fn to_bytes(&self) -> [u8; 64] {
+        let mut bytes = [0u8; 64];
+        bytes[0..32].copy_from_slice(&self.r.to_be_bytes());
+        bytes[32..64].copy_from_slice(&self.s.to_be_bytes());
+        bytes
+    }
+
     fn bytes_to_u256(bytes: &[u8]) -> Option<U256> {
         // Skip leading zeros
         let trimmed: Vec<u8> = bytes.iter()
@@ -814,8 +851,169 @@ mod tests {
         let g = P256Point::generator();
         let zero = U256::ZERO;
         let result = g.scalar_mul(&zero);
-        
+
         assert!(result.infinity);
+    }
+
+    #[test]
+    fn test_u256_modular_inverse() {
+        // Test modular inverse: 3^(-1) mod 7 = 5 (since 3 * 5 = 15 = 2*7 + 1)
+        let three = U256::from_limbs([3, 0, 0, 0, 0, 0, 0, 0]);
+        let seven = U256::from_limbs([7, 0, 0, 0, 0, 0, 0, 0]);
+
+        let inv = three.inv_mod(&seven);
+        assert!(inv.is_some());
+
+        let inv = inv.unwrap();
+        let product = three.mul_mod(&inv, &seven);
+        assert_eq!(product, U256::ONE);
+    }
+
+    #[test]
+    fn test_u256_mul_mod() {
+        // Test modular multiplication: 5 * 7 mod 17 = 35 mod 17 = 1
+        let five = U256::from_limbs([5, 0, 0, 0, 0, 0, 0, 0]);
+        let seven = U256::from_limbs([7, 0, 0, 0, 0, 0, 0, 0]);
+        let seventeen = U256::from_limbs([17, 0, 0, 0, 0, 0, 0, 0]);
+
+        let result = five.mul_mod(&seven, &seventeen);
+        assert_eq!(result, U256::ONE);
+    }
+
+    #[test]
+    fn test_ecdsa_signature_roundtrip() {
+        // Create a signature and test serialization/deserialization
+        let r_bytes: [u8; 32] = [
+            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+            0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
+            0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18,
+            0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f, 0x20,
+        ];
+        let s_bytes: [u8; 32] = [
+            0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28,
+            0x29, 0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f, 0x30,
+            0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38,
+            0x39, 0x3a, 0x3b, 0x3c, 0x3d, 0x3e, 0x3f, 0x40,
+        ];
+
+        let mut sig_bytes = [0u8; 64];
+        sig_bytes[..32].copy_from_slice(&r_bytes);
+        sig_bytes[32..].copy_from_slice(&s_bytes);
+
+        let sig = ECDSASignature::from_bytes(&sig_bytes);
+        let roundtrip = sig.to_bytes();
+
+        assert_eq!(sig_bytes, roundtrip);
+    }
+
+    #[test]
+    fn test_point_from_uncompressed() {
+        // Test parsing uncompressed point format (04 || x || y)
+        let g = P256Point::generator();
+        let mut uncompressed = [0u8; 65];
+        uncompressed[0] = 0x04;
+        uncompressed[1..33].copy_from_slice(&g.x.to_be_bytes());
+        uncompressed[33..65].copy_from_slice(&g.y.to_be_bytes());
+
+        let parsed = P256Point::from_uncompressed(&uncompressed);
+        assert!(parsed.is_some());
+        assert_eq!(parsed.unwrap(), g);
+    }
+
+    #[test]
+    fn test_order_times_generator_is_infinity() {
+        // n * G = O (point at infinity)
+        // This tests that our curve implementation is consistent
+        let g = P256Point::generator();
+        let n = U256::from_limbs(P256_ORDER);
+
+        let result = g.scalar_mul(&n);
+        assert!(result.infinity);
+    }
+
+    #[test]
+    fn test_signature_validity_checks() {
+        // Test that signature validation rejects invalid signatures
+        let public_key = P256Point::generator();
+        let message_hash = [0u8; 32];
+
+        // Zero r should be rejected
+        let sig_zero_r = ECDSASignature {
+            r: U256::ZERO,
+            s: U256::ONE,
+        };
+        assert!(!ECDSAVerifier::verify(&public_key, &message_hash, &sig_zero_r));
+
+        // Zero s should be rejected
+        let sig_zero_s = ECDSASignature {
+            r: U256::ONE,
+            s: U256::ZERO,
+        };
+        assert!(!ECDSAVerifier::verify(&public_key, &message_hash, &sig_zero_s));
+    }
+
+    #[test]
+    fn test_point_negation() {
+        let g = P256Point::generator();
+        let neg_g = g.negate();
+
+        // g + (-g) should give point at infinity
+        let result = g.add(&neg_g);
+        assert!(result.infinity);
+    }
+
+    #[test]
+    fn test_double_and_add_equivalence() {
+        // 3G = G + G + G = 2G + G
+        let g = P256Point::generator();
+
+        let three = U256::from_limbs([3, 0, 0, 0, 0, 0, 0, 0]);
+        let three_g_scalar = g.scalar_mul(&three);
+
+        let two_g = g.double();
+        let three_g_add = two_g.add(&g);
+
+        assert_eq!(three_g_scalar, three_g_add);
+    }
+
+    #[test]
+    fn test_m31_limb_conversion() {
+        // Test U256 to M31 limbs conversion roundtrip
+        // Use values that are within M31 range (< 2^31 - 1 = 2147483647)
+        // to avoid modular reduction issues
+        let original = U256::from_limbs([
+            0x12345678, // 305419896 - in range
+            0x23456789, // 591751049 - in range
+            0x01234567, // 19088743 - in range
+            0x0CDEF012, // 216330258 - in range
+            0x3456789A, // 878082202 - in range
+            0x0DEF0123, // 233570595 - in range
+            0x456789AB, // 1164413355 - in range
+            0x1EF01234, // 519045684 - in range
+        ]);
+
+        let m31_limbs = original.to_m31_limbs();
+        let reconstructed = U256::from_m31_limbs(&m31_limbs);
+
+        // Values within M31 range should roundtrip exactly
+        assert_eq!(original, reconstructed);
+    }
+
+    #[test]
+    fn test_ecdsa_circuit_constraints_creation() {
+        // Test that we can create circuit constraints without panicking
+        let public_key = P256Point::generator();
+        let message_hash = [0x42u8; 32];
+        let signature = ECDSASignature {
+            r: U256::from_limbs([1, 2, 3, 4, 5, 6, 7, 8]),
+            s: U256::from_limbs([8, 7, 6, 5, 4, 3, 2, 1]),
+        };
+
+        let constraints = ECDSACircuitConstraints::new(&public_key, &message_hash, &signature);
+
+        // Verify that constraint values are populated
+        assert!(constraints.r_limbs.iter().any(|&x| x.value() != 0));
+        assert!(constraints.z_limbs.iter().any(|&x| x.value() != 0));
     }
 }
 

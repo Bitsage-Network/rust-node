@@ -13,15 +13,15 @@ use tokio::signal;
 
 use bitsage_node::{
     coordinator::{
-        job_processor::{JobProcessor, JobProcessorConfig},
-        config::CoordinatorConfig,
+        job_processor::JobProcessor,
+        config::{CoordinatorConfig, JobProcessorConfig, load_config},
     },
     api::{
         create_monitoring_router, MonitoringApiState,
         create_submission_router, SubmissionApiState,
     },
     storage::Database,
-    blockchain::contracts::JobManagerContract,
+    blockchain::{client::StarknetClient, contracts::JobManagerContract},
 };
 
 #[derive(Parser)]
@@ -57,38 +57,35 @@ async fn main() -> Result<()> {
     
     info!("🚀 Starting BitSage Coordinator...");
     info!("📋 Config file: {}", cli.config);
-    
+
     // Load configuration
-    let config = CoordinatorConfig::from_file(&cli.config)?;
+    let config = load_config(&cli.config)?;
     info!("✅ Configuration loaded");
-    
+
     // Initialize database
-    let database = Arc::new(Database::new(&config.database.url).await?);
-    info!("✅ Database connected: {}", config.database.url);
-    
-    // Initialize blockchain contract
+    let database = Arc::new(Database::new(&config.database_url).await?);
+    info!("✅ Database connected: {}", config.database_url);
+
+    // Initialize blockchain client
+    let starknet_client = Arc::new(StarknetClient::new(config.blockchain.rpc_url.clone())?);
+    starknet_client.connect().await?;
+
+    // Initialize job manager contract
     let job_manager = Arc::new(
-        JobManagerContract::new(
-            &config.blockchain.rpc_url,
+        JobManagerContract::new_from_address(
+            starknet_client.clone(),
             &config.blockchain.job_manager_address,
-        ).await?
+        )?
     );
     info!("✅ Connected to JobManager contract: {}", config.blockchain.job_manager_address);
-    
-    // Initialize job processor
-    let processor_config = JobProcessorConfig {
-        max_concurrent_jobs: 100,
-        job_timeout_secs: 3600,
-        result_retention_secs: 86400 * 7, // 7 days
-        retry_config: Default::default(),
-    };
-    
+
+    // Use the job processor config from the loaded config
     let job_processor = Arc::new(
         JobProcessor::new(
+            config.job_processor.clone(),
             database.clone(),
             job_manager.clone(),
-            processor_config,
-        ).await?
+        )
     );
     info!("✅ Job processor initialized");
     

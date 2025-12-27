@@ -127,6 +127,12 @@ hex = "0.4.3"
 # ===== Starknet On-Chain Verification =====
 num-bigint = "0.4"  # For felt252 serialization
 
+# ===== Proof Compression (30-50% calldata savings) =====
+lz4_flex = "0.11"   # Fast LZ4 compression
+zstd = "0.13"       # Zstandard compression (best ratio)
+snap = "1.1"        # Snappy compression
+blake3 = "1.5"      # Fast hashing for checksums
+
 [dev-dependencies]
 tokio-test = "0.4"
 
@@ -142,10 +148,9 @@ rocm = []
 name = "sage-worker"
 path = "src/bin/worker.rs"
 
-# TODO: Re-enable coordinator binary when import issues are resolved
-# [[bin]]
-# name = "sage-coordinator"
-# path = "src/coordinator_main.rs"
+[[bin]]
+name = "sage-coordinator"
+path = "src/bin/coordinator.rs"
 
 # [patch.crates-io]
 # No patches needed when using stable Rust

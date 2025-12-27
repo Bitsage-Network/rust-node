@@ -1,7 +1,7 @@
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use sha2::{Sha256, Digest};
+use tracing::{info, debug};
 use crate::security::tee::{TEEContext, AttestationQuote};
-use uuid::Uuid;
 
 /// Executor for running generic AI/ML models and Containers inside a TEE
 pub struct SecureModelExecutor {
@@ -24,28 +24,28 @@ impl SecureModelExecutor {
     /// 4. Capture stdout/outputs and hash them.
     /// 5. Generate a quote binding the result hash to the code identity.
     pub async fn execute_model_job(
-        &self, 
-        model_uri: &str, 
+        &self,
+        model_uri: &str,
         input_data: &str
     ) -> Result<(String, AttestationQuote)> {
-        println!("🛡️ SecureModelExecutor: Preparing execution environment...");
-        
+        info!(model_uri = %model_uri, "Preparing TEE execution environment");
+
         // 1. Simulate Model Verification (e.g., checking signature of the model weights)
-        println!("   > Verifying Model Integrity from: {}", model_uri);
+        debug!(model_uri = %model_uri, "Verifying model integrity");
         let model_hash = Sha256::digest(model_uri.as_bytes()); // Simulating model content hash
-        
+
         // 2. Simulate Input Data Verification
-        println!("   > Ingesting Secure Input Data...");
+        debug!(input_len = input_data.len(), "Ingesting secure input data");
         let input_hash = Sha256::digest(input_data.as_bytes());
 
         // 3. Simulate Execution (The "Black Box" inside TEE)
         // For MVP, we just produce a mock result based on inputs
         let mock_output = format!(
-            "Generated output for model {} with input length {}", 
-            model_uri, 
+            "Generated output for model {} with input length {}",
+            model_uri,
             input_data.len()
         );
-        
+
         // 4. Calculate Result Hash
         // This is what gets committed to the blockchain
         let mut result_hasher = Sha256::new();
@@ -57,7 +57,7 @@ impl SecureModelExecutor {
         // 5. Generate Hardware Attestation Quote
         // This proves to the world that THIS specific result came from THIS hardware
         // running THIS code (hash of model + inputs).
-        println!("   > Generating TEE Attestation Quote...");
+        debug!("Generating TEE attestation quote");
         let quote = self.tee_context.generate_quote(&execution_hash)?;
 
         Ok((mock_output, quote))

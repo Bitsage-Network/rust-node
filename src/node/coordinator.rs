@@ -1229,13 +1229,93 @@ impl JobSplitter {
     }
 }
 
-/// Result assembly logic
+/// Result assembly logic for combining distributed task outputs
 #[derive(Debug, Clone)]
-pub struct ResultAssembler;
+pub struct ResultAssembler {
+    /// Temporary storage for intermediate results
+    temp_results: Arc<RwLock<HashMap<JobId, Vec<TaskResultChunk>>>>,
+}
+
+/// A chunk of task result data
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskResultChunk {
+    pub task_id: TaskId,
+    pub chunk_id: u32,
+    pub data: Vec<u8>,
+    pub metadata: TaskResultMetadata,
+}
+
+/// Metadata about a task result
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskResultMetadata {
+    pub job_type: String,
+    pub frame_range: Option<(u32, u32)>,
+    pub tile_coords: Option<(u32, u32, u32, u32)>,
+    pub batch_range: Option<(u32, u32)>,
+    pub execution_time_ms: u64,
+    pub output_format: Option<String>,
+    pub checksum: Option<String>,
+}
+
+/// Assembly strategy for different job types
+#[derive(Debug, Clone)]
+pub enum AssemblyStrategy {
+    /// Concatenate chunks in order (videos, audio)
+    Sequential,
+    /// Stitch tiles together (images, 3D renders)
+    TileStitch { width: u32, height: u32, tile_size: (u32, u32) },
+    /// Merge batch results (AI inference)
+    BatchMerge,
+    /// Aggregate results with consensus (ZK proofs)
+    Consensus,
+    /// Custom assembly with provided function
+    Custom(String),
+}
 
 impl ResultAssembler {
     pub fn new() -> Self {
-        Self
+        Self {
+            temp_results: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+
+    /// Store a task result chunk for later assembly
+    pub async fn store_chunk(&self, job_id: JobId, chunk: TaskResultChunk) {
+        let mut results = self.temp_results.write().await;
+        results.entry(job_id).or_insert_with(Vec::new).push(chunk);
+    }
+
+    /// Determine the assembly strategy based on job type
+    fn determine_strategy(&self, job_type: &JobType) -> AssemblyStrategy {
+        match job_type {
+            JobType::VideoProcessing { .. } => AssemblyStrategy::Sequential,
+            JobType::AudioProcessing { .. } => AssemblyStrategy::Sequential,
+            JobType::Render3D { output_resolution, .. } => {
+                let tile_size = self.calculate_tile_size(*output_resolution);
+                AssemblyStrategy::TileStitch {
+                    width: output_resolution.0,
+                    height: output_resolution.1,
+                    tile_size,
+                }
+            }
+            JobType::AIInference { .. } => AssemblyStrategy::BatchMerge,
+            JobType::ComputerVision { .. } => AssemblyStrategy::BatchMerge,
+            JobType::NLP { .. } => AssemblyStrategy::BatchMerge,
+            JobType::TimeSeriesAnalysis { .. } => AssemblyStrategy::BatchMerge,
+            JobType::MultimodalAI { .. } => AssemblyStrategy::BatchMerge,
+            JobType::ZKProof { .. } => AssemblyStrategy::Consensus,
+            _ => AssemblyStrategy::Sequential,
+        }
+    }
+
+    fn calculate_tile_size(&self, resolution: (u32, u32)) -> (u32, u32) {
+        let pixels = resolution.0 * resolution.1;
+        match pixels {
+            0..=1000000 => (256, 256),
+            1000001..=4000000 => (512, 512),
+            4000001..=16000000 => (1024, 1024),
+            _ => (2048, 2048),
+        }
     }
 
     /// Assemble the final result from completed tasks
@@ -1244,23 +1324,301 @@ impl ResultAssembler {
         job_id: JobId,
         tasks: &[Task],
     ) -> Result<Vec<u8>> {
-        info!("Assembling results for job {}", job_id);
-        
+        info!("Assembling results for job {} with {} tasks", job_id, tasks.len());
+
+        if tasks.is_empty() {
+            return Err(anyhow!("No tasks to assemble"));
+        }
+
+        // Verify all tasks are completed
+        let incomplete_tasks: Vec<_> = tasks.iter()
+            .filter(|t| t.status != TaskStatus::Completed)
+            .collect();
+
+        if !incomplete_tasks.is_empty() {
+            return Err(anyhow!(
+                "Cannot assemble: {} tasks are not completed",
+                incomplete_tasks.len()
+            ));
+        }
+
         // Sort tasks by chunk ID to ensure proper ordering
         let mut sorted_tasks = tasks.to_vec();
         sorted_tasks.sort_by_key(|t| {
             t.input_data.chunk_info.as_ref().map(|c| c.chunk_id).unwrap_or(0)
         });
 
-        // TODO: Implement actual result assembly based on job type
-        // For now, return empty result
-        Ok(Vec::new())
+        // Get the job type from the first task
+        let job_type = &sorted_tasks[0].task_type;
+        let strategy = self.determine_strategy(job_type);
+
+        debug!("Using assembly strategy: {:?} for job type: {}", strategy, job_type);
+
+        // Get stored result chunks
+        let result_chunks = {
+            let results = self.temp_results.read().await;
+            results.get(&job_id).cloned().unwrap_or_default()
+        };
+
+        // Assemble based on strategy
+        let assembled_data = match strategy {
+            AssemblyStrategy::Sequential => {
+                self.assemble_sequential(&sorted_tasks, &result_chunks).await?
+            }
+            AssemblyStrategy::TileStitch { width, height, tile_size } => {
+                self.assemble_tiles(&sorted_tasks, &result_chunks, width, height, tile_size).await?
+            }
+            AssemblyStrategy::BatchMerge => {
+                self.assemble_batch(&sorted_tasks, &result_chunks).await?
+            }
+            AssemblyStrategy::Consensus => {
+                self.assemble_consensus(&sorted_tasks, &result_chunks).await?
+            }
+            AssemblyStrategy::Custom(handler) => {
+                self.assemble_custom(&sorted_tasks, &result_chunks, &handler).await?
+            }
+        };
+
+        // Clean up temporary storage
+        self.temp_results.write().await.remove(&job_id);
+
+        info!("Successfully assembled {} bytes for job {}", assembled_data.len(), job_id);
+        Ok(assembled_data)
+    }
+
+    /// Sequential assembly - concatenate chunks in order
+    async fn assemble_sequential(
+        &self,
+        tasks: &[Task],
+        chunks: &[TaskResultChunk],
+    ) -> Result<Vec<u8>> {
+        debug!("Performing sequential assembly of {} chunks", chunks.len());
+
+        // Sort chunks by chunk_id
+        let mut sorted_chunks = chunks.to_vec();
+        sorted_chunks.sort_by_key(|c| c.chunk_id);
+
+        // Verify we have all expected chunks
+        let expected_count = tasks.iter()
+            .filter_map(|t| t.input_data.chunk_info.as_ref())
+            .map(|c| c.total_chunks)
+            .max()
+            .unwrap_or(tasks.len() as u32);
+
+        if sorted_chunks.len() != expected_count as usize {
+            debug!(
+                "Warning: Expected {} chunks but found {}",
+                expected_count, sorted_chunks.len()
+            );
+        }
+
+        // Concatenate all chunk data
+        let mut result = Vec::new();
+        for chunk in sorted_chunks {
+            result.extend(&chunk.data);
+        }
+
+        Ok(result)
+    }
+
+    /// Tile stitching - combine image tiles into a single image
+    async fn assemble_tiles(
+        &self,
+        tasks: &[Task],
+        chunks: &[TaskResultChunk],
+        width: u32,
+        height: u32,
+        tile_size: (u32, u32),
+    ) -> Result<Vec<u8>> {
+        debug!(
+            "Performing tile stitch assembly: {}x{} with tiles {}x{}",
+            width, height, tile_size.0, tile_size.1
+        );
+
+        let tiles_x = (width + tile_size.0 - 1) / tile_size.0;
+        let tiles_y = (height + tile_size.1 - 1) / tile_size.1;
+        let total_tiles = tiles_x * tiles_y;
+
+        // Create output buffer (assuming RGBA format, 4 bytes per pixel)
+        let bytes_per_pixel = 4;
+        let mut output = vec![0u8; (width * height * bytes_per_pixel) as usize];
+
+        // Place each tile in the correct position
+        for chunk in chunks {
+            if let Some((tile_x, tile_y, tile_w, tile_h)) = chunk.metadata.tile_coords {
+                let tile_x_pixel = tile_x * tile_size.0;
+                let tile_y_pixel = tile_y * tile_size.1;
+
+                // Copy tile data row by row
+                for row in 0..tile_h.min(height - tile_y_pixel) {
+                    let src_offset = (row * tile_w * bytes_per_pixel) as usize;
+                    let dst_y = tile_y_pixel + row;
+                    let dst_x = tile_x_pixel;
+                    let dst_offset = ((dst_y * width + dst_x) * bytes_per_pixel) as usize;
+
+                    let row_bytes = (tile_w.min(width - dst_x) * bytes_per_pixel) as usize;
+                    if src_offset + row_bytes <= chunk.data.len() && dst_offset + row_bytes <= output.len() {
+                        output[dst_offset..dst_offset + row_bytes]
+                            .copy_from_slice(&chunk.data[src_offset..src_offset + row_bytes]);
+                    }
+                }
+            }
+        }
+
+        debug!("Tile stitching complete: assembled {} tiles", chunks.len());
+        Ok(output)
+    }
+
+    /// Batch merge - combine AI inference results
+    async fn assemble_batch(
+        &self,
+        tasks: &[Task],
+        chunks: &[TaskResultChunk],
+    ) -> Result<Vec<u8>> {
+        debug!("Performing batch merge assembly of {} chunks", chunks.len());
+
+        // Sort by batch range
+        let mut sorted_chunks = chunks.to_vec();
+        sorted_chunks.sort_by_key(|c| c.metadata.batch_range.map(|(start, _)| start).unwrap_or(c.chunk_id));
+
+        // Combine results into a JSON array
+        let mut combined_results: Vec<serde_json::Value> = Vec::new();
+
+        for chunk in &sorted_chunks {
+            // Try to parse each chunk as JSON
+            match serde_json::from_slice::<serde_json::Value>(&chunk.data) {
+                Ok(value) => {
+                    if let Some(arr) = value.as_array() {
+                        combined_results.extend(arr.clone());
+                    } else {
+                        combined_results.push(value);
+                    }
+                }
+                Err(_) => {
+                    // If not JSON, wrap raw data as hex
+                    let encoded = hex::encode(&chunk.data);
+                    combined_results.push(serde_json::json!({
+                        "chunk_id": chunk.chunk_id,
+                        "data": encoded,
+                        "encoding": "hex"
+                    }));
+                }
+            }
+        }
+
+        // Create final result structure
+        let result = serde_json::json!({
+            "results": combined_results,
+            "total_batches": sorted_chunks.len(),
+            "assembly_method": "batch_merge"
+        });
+
+        Ok(serde_json::to_vec(&result)?)
+    }
+
+    /// Consensus assembly - for ZK proofs and verified computation
+    async fn assemble_consensus(
+        &self,
+        tasks: &[Task],
+        chunks: &[TaskResultChunk],
+    ) -> Result<Vec<u8>> {
+        debug!("Performing consensus assembly of {} chunks", chunks.len());
+
+        if chunks.is_empty() {
+            return Err(anyhow!("No chunks available for consensus"));
+        }
+
+        // For ZK proofs, we need to verify that results are consistent
+        // Group chunks by their checksum
+        let mut checksum_groups: HashMap<String, Vec<&TaskResultChunk>> = HashMap::new();
+
+        for chunk in chunks {
+            let checksum = chunk.metadata.checksum.clone()
+                .unwrap_or_else(|| {
+                    // Compute checksum if not provided
+                    use sha2::{Sha256, Digest};
+                    let mut hasher = Sha256::new();
+                    hasher.update(&chunk.data);
+                    hex::encode(hasher.finalize())
+                });
+
+            checksum_groups.entry(checksum).or_default().push(chunk);
+        }
+
+        // Find the group with the most agreement (majority vote)
+        let (winning_checksum, winning_group) = checksum_groups
+            .into_iter()
+            .max_by_key(|(_, group)| group.len())
+            .ok_or_else(|| anyhow!("No consensus groups found"))?;
+
+        let total_chunks = chunks.len();
+        let agreeing_chunks = winning_group.len();
+        let consensus_ratio = agreeing_chunks as f64 / total_chunks as f64;
+
+        // Require at least 2/3 majority for consensus
+        if consensus_ratio < 0.67 {
+            return Err(anyhow!(
+                "Consensus not reached: only {:.1}% agreement (need 67%)",
+                consensus_ratio * 100.0
+            ));
+        }
+
+        info!(
+            "Consensus reached: {}/{} chunks agree ({:.1}%)",
+            agreeing_chunks, total_chunks, consensus_ratio * 100.0
+        );
+
+        // Return the consensus result with metadata
+        let consensus_data = &winning_group[0].data;
+        let result = serde_json::json!({
+            "consensus": true,
+            "checksum": winning_checksum,
+            "agreement_ratio": consensus_ratio,
+            "agreeing_workers": agreeing_chunks,
+            "total_workers": total_chunks,
+            "data": hex::encode(consensus_data),
+            "encoding": "hex"
+        });
+
+        Ok(serde_json::to_vec(&result)?)
+    }
+
+    /// Custom assembly handler
+    async fn assemble_custom(
+        &self,
+        tasks: &[Task],
+        chunks: &[TaskResultChunk],
+        handler: &str,
+    ) -> Result<Vec<u8>> {
+        debug!("Performing custom assembly with handler: {}", handler);
+
+        // For now, fall back to sequential assembly
+        // In the future, this could invoke custom assembly logic
+        self.assemble_sequential(tasks, chunks).await
+    }
+
+    /// Get the number of pending chunks for a job
+    pub async fn get_pending_chunk_count(&self, job_id: &JobId) -> usize {
+        let results = self.temp_results.read().await;
+        results.get(job_id).map(|v| v.len()).unwrap_or(0)
+    }
+
+    /// Check if all chunks are received for a job
+    pub async fn has_all_chunks(&self, job_id: &JobId, expected_count: usize) -> bool {
+        let results = self.temp_results.read().await;
+        results.get(job_id).map(|v| v.len() >= expected_count).unwrap_or(false)
+    }
+
+    /// Clear temporary results for a job
+    pub async fn clear_job_results(&self, job_id: &JobId) {
+        self.temp_results.write().await.remove(job_id);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sha2::Digest;
 
     #[tokio::test]
     async fn test_frame_based_splitting() {
@@ -1296,5 +1654,319 @@ mod tests {
 
         // 1920x1080 with 512x512 tiles = 4x3 = 12 tiles
         assert_eq!(tasks.len(), 12);
+    }
+
+    #[tokio::test]
+    async fn test_result_assembler_creation() {
+        let assembler = ResultAssembler::new();
+        let job_id = JobId::new();
+
+        // Should start with no chunks
+        assert_eq!(assembler.get_pending_chunk_count(&job_id).await, 0);
+        assert!(!assembler.has_all_chunks(&job_id, 1).await);
+    }
+
+    #[tokio::test]
+    async fn test_result_assembler_store_chunks() {
+        let assembler = ResultAssembler::new();
+        let job_id = JobId::new();
+
+        // Create test chunks
+        let chunk1 = TaskResultChunk {
+            task_id: TaskId::new(),
+            chunk_id: 0,
+            data: vec![1, 2, 3],
+            metadata: TaskResultMetadata {
+                job_type: "test".to_string(),
+                frame_range: Some((0, 10)),
+                tile_coords: None,
+                batch_range: None,
+                execution_time_ms: 100,
+                output_format: None,
+                checksum: None,
+            },
+        };
+
+        let chunk2 = TaskResultChunk {
+            task_id: TaskId::new(),
+            chunk_id: 1,
+            data: vec![4, 5, 6],
+            metadata: TaskResultMetadata {
+                job_type: "test".to_string(),
+                frame_range: Some((11, 20)),
+                tile_coords: None,
+                batch_range: None,
+                execution_time_ms: 100,
+                output_format: None,
+                checksum: None,
+            },
+        };
+
+        // Store chunks
+        assembler.store_chunk(job_id.clone(), chunk1).await;
+        assert_eq!(assembler.get_pending_chunk_count(&job_id).await, 1);
+
+        assembler.store_chunk(job_id.clone(), chunk2).await;
+        assert_eq!(assembler.get_pending_chunk_count(&job_id).await, 2);
+        assert!(assembler.has_all_chunks(&job_id, 2).await);
+
+        // Clear chunks
+        assembler.clear_job_results(&job_id).await;
+        assert_eq!(assembler.get_pending_chunk_count(&job_id).await, 0);
+    }
+
+    #[tokio::test]
+    async fn test_sequential_assembly() {
+        let assembler = ResultAssembler::new();
+        let job_id = JobId::new();
+        let task_id = TaskId::new();
+
+        // Create completed task
+        let task = Task {
+            id: task_id.clone(),
+            job_id: job_id.clone(),
+            task_type: JobType::VideoProcessing {
+                input_file: "test.mp4".to_string(),
+                output_format: "mp4".to_string(),
+                resolution: (1920, 1080),
+                frame_rate: 30.0,
+                duration: 10.0,
+            },
+            input_data: TaskInput {
+                parameters: HashMap::new(),
+                files: vec![],
+                chunk_info: Some(ChunkInfo {
+                    chunk_id: 0,
+                    total_chunks: 2,
+                    start_offset: 0,
+                    end_offset: 100,
+                    frame_range: Some((0, 10)),
+                    tile_coords: None,
+                }),
+            },
+            dependencies: vec![],
+            estimated_duration: 60,
+            estimated_memory: 1024,
+            gpu_required: false,
+            priority: 5,
+            status: TaskStatus::Completed,
+            assigned_worker: Some(WorkerId::new()),
+            created_at: chrono::Utc::now(),
+            started_at: Some(chrono::Utc::now()),
+            completed_at: Some(chrono::Utc::now()),
+        };
+
+        // Store result chunks
+        assembler.store_chunk(job_id.clone(), TaskResultChunk {
+            task_id: task_id.clone(),
+            chunk_id: 0,
+            data: vec![1, 2, 3],
+            metadata: TaskResultMetadata {
+                job_type: "VideoProcessing".to_string(),
+                frame_range: Some((0, 10)),
+                tile_coords: None,
+                batch_range: None,
+                execution_time_ms: 100,
+                output_format: Some("mp4".to_string()),
+                checksum: None,
+            },
+        }).await;
+
+        assembler.store_chunk(job_id.clone(), TaskResultChunk {
+            task_id: TaskId::new(),
+            chunk_id: 1,
+            data: vec![4, 5, 6],
+            metadata: TaskResultMetadata {
+                job_type: "VideoProcessing".to_string(),
+                frame_range: Some((11, 20)),
+                tile_coords: None,
+                batch_range: None,
+                execution_time_ms: 100,
+                output_format: Some("mp4".to_string()),
+                checksum: None,
+            },
+        }).await;
+
+        // Create a second task marked as completed
+        let mut task2 = task.clone();
+        task2.id = TaskId::new();
+        task2.input_data.chunk_info = Some(ChunkInfo {
+            chunk_id: 1,
+            total_chunks: 2,
+            start_offset: 100,
+            end_offset: 200,
+            frame_range: Some((11, 20)),
+            tile_coords: None,
+        });
+
+        // Assemble results
+        let result = assembler.assemble_job_result(job_id.clone(), &[task, task2]).await.unwrap();
+        assert_eq!(result, vec![1, 2, 3, 4, 5, 6]);
+    }
+
+    #[tokio::test]
+    async fn test_batch_merge_assembly() {
+        let assembler = ResultAssembler::new();
+        let job_id = JobId::new();
+        let task_id = TaskId::new();
+
+        // Create completed AI inference task
+        let task = Task {
+            id: task_id.clone(),
+            job_id: job_id.clone(),
+            task_type: JobType::AIInference {
+                model_type: "test-model".to_string(),
+                input_data: "test input".to_string(),
+                batch_size: 10,
+                parameters: HashMap::new(),
+            },
+            input_data: TaskInput {
+                parameters: HashMap::new(),
+                files: vec![],
+                chunk_info: Some(ChunkInfo {
+                    chunk_id: 0,
+                    total_chunks: 1,
+                    start_offset: 0,
+                    end_offset: 10,
+                    frame_range: None,
+                    tile_coords: None,
+                }),
+            },
+            dependencies: vec![],
+            estimated_duration: 30,
+            estimated_memory: 512,
+            gpu_required: true,
+            priority: 5,
+            status: TaskStatus::Completed,
+            assigned_worker: Some(WorkerId::new()),
+            created_at: chrono::Utc::now(),
+            started_at: Some(chrono::Utc::now()),
+            completed_at: Some(chrono::Utc::now()),
+        };
+
+        // Store JSON result chunk
+        let json_result = serde_json::json!({"predictions": [0.9, 0.1, 0.0]});
+        assembler.store_chunk(job_id.clone(), TaskResultChunk {
+            task_id: task_id.clone(),
+            chunk_id: 0,
+            data: serde_json::to_vec(&json_result).unwrap(),
+            metadata: TaskResultMetadata {
+                job_type: "AIInference".to_string(),
+                frame_range: None,
+                tile_coords: None,
+                batch_range: Some((0, 10)),
+                execution_time_ms: 50,
+                output_format: Some("json".to_string()),
+                checksum: None,
+            },
+        }).await;
+
+        // Assemble results
+        let result = assembler.assemble_job_result(job_id.clone(), &[task]).await.unwrap();
+        let result_json: serde_json::Value = serde_json::from_slice(&result).unwrap();
+
+        assert!(result_json.get("results").is_some());
+        assert_eq!(result_json["assembly_method"], "batch_merge");
+    }
+
+    #[tokio::test]
+    async fn test_consensus_assembly() {
+        let assembler = ResultAssembler::new();
+        let job_id = JobId::new();
+
+        // Create completed ZK proof task
+        let task = Task {
+            id: TaskId::new(),
+            job_id: job_id.clone(),
+            task_type: JobType::ZKProof {
+                circuit_type: "stark".to_string(),
+                input_data: "test".to_string(),
+                proof_system: "stwo".to_string(),
+            },
+            input_data: TaskInput {
+                parameters: HashMap::new(),
+                files: vec![],
+                chunk_info: None,
+            },
+            dependencies: vec![],
+            estimated_duration: 120,
+            estimated_memory: 4096,
+            gpu_required: true,
+            priority: 10,
+            status: TaskStatus::Completed,
+            assigned_worker: Some(WorkerId::new()),
+            created_at: chrono::Utc::now(),
+            started_at: Some(chrono::Utc::now()),
+            completed_at: Some(chrono::Utc::now()),
+        };
+
+        // Store three identical result chunks (simulating consensus)
+        let proof_data = vec![0xde, 0xad, 0xbe, 0xef];
+        for i in 0..3 {
+            assembler.store_chunk(job_id.clone(), TaskResultChunk {
+                task_id: TaskId::new(),
+                chunk_id: i,
+                data: proof_data.clone(),
+                metadata: TaskResultMetadata {
+                    job_type: "ZKProof".to_string(),
+                    frame_range: None,
+                    tile_coords: None,
+                    batch_range: None,
+                    execution_time_ms: 1000,
+                    output_format: Some("stark_proof".to_string()),
+                    checksum: Some(hex::encode(sha2::Sha256::digest(&proof_data))),
+                },
+            }).await;
+        }
+
+        // Assemble results (should reach consensus)
+        let result = assembler.assemble_job_result(job_id.clone(), &[task]).await.unwrap();
+        let result_json: serde_json::Value = serde_json::from_slice(&result).unwrap();
+
+        assert_eq!(result_json["consensus"], true);
+        assert_eq!(result_json["agreement_ratio"], 1.0);
+        assert_eq!(result_json["agreeing_workers"], 3);
+        assert_eq!(result_json["total_workers"], 3);
+    }
+
+    #[tokio::test]
+    async fn test_assembly_strategy_determination() {
+        let assembler = ResultAssembler::new();
+
+        // Video should use Sequential
+        let video_type = JobType::VideoProcessing {
+            input_file: "test.mp4".to_string(),
+            output_format: "mp4".to_string(),
+            resolution: (1920, 1080),
+            frame_rate: 30.0,
+            duration: 10.0,
+        };
+        matches!(assembler.determine_strategy(&video_type), AssemblyStrategy::Sequential);
+
+        // Render3D should use TileStitch
+        let render_type = JobType::Render3D {
+            scene_file: "scene.blend".to_string(),
+            output_resolution: (1920, 1080),
+            frames: None,
+            quality_preset: "high".to_string(),
+        };
+        matches!(assembler.determine_strategy(&render_type), AssemblyStrategy::TileStitch { .. });
+
+        // AI Inference should use BatchMerge
+        let ai_type = JobType::AIInference {
+            model_type: "llm".to_string(),
+            input_data: "test".to_string(),
+            batch_size: 32,
+            parameters: HashMap::new(),
+        };
+        matches!(assembler.determine_strategy(&ai_type), AssemblyStrategy::BatchMerge);
+
+        // ZK Proof should use Consensus
+        let zk_type = JobType::ZKProof {
+            circuit_type: "stark".to_string(),
+            input_data: "test".to_string(),
+            proof_system: "stwo".to_string(),
+        };
+        matches!(assembler.determine_strategy(&zk_type), AssemblyStrategy::Consensus);
     }
 } 

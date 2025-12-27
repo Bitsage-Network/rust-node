@@ -7,6 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use tracing::info;
 
 /// GPU architecture generation
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -1031,46 +1032,33 @@ impl GpuDatabase {
 
     /// Print a formatted comparison table
     pub fn print_comparison_table(&self) {
-        println!("\n{:=<120}", "");
-        println!("{:^120}", "GPU PRICING COMPARISON TABLE");
-        println!("{:=<120}", "");
-        println!(
-            "{:<20} {:>8} {:>12} {:>12} {:>12} {:>12} {:>12}",
-            "Model", "VRAM", "BW (GB/s)", "1x $/hr", "4x $/hr", "8x $/hr", "$/TB/s"
-        );
-        println!("{:-<120}", "");
-
         let mut gpus: Vec<_> = self.gpus.values().collect();
         gpus.sort_by(|a, b| {
             b.spec.bandwidth_gb_s.cmp(&a.spec.bandwidth_gb_s)
         });
 
+        info!("GPU pricing comparison - {} models available", gpus.len());
+
         for gpu in gpus {
             let price_1 = gpu.cheapest_price(1)
-                .map(|p| format!("${:.2}", p.price_per_hour))
-                .unwrap_or("-".to_string());
-            let price_4 = gpu.cheapest_price(4)
-                .map(|p| format!("${:.2}", p.price_per_hour))
-                .unwrap_or("-".to_string());
+                .map(|p| p.price_per_hour)
+                .unwrap_or(0.0);
             let price_8 = gpu.cheapest_price(8)
-                .map(|p| format!("${:.2}", p.price_per_hour))
-                .unwrap_or("-".to_string());
+                .map(|p| p.price_per_hour)
+                .unwrap_or(0.0);
             let efficiency = gpu.bandwidth_efficiency(1)
-                .map(|e| format!("${:.3}", e))
-                .unwrap_or("-".to_string());
+                .unwrap_or(0.0);
 
-            println!(
-                "{:<20} {:>6}GB {:>10} {:>12} {:>12} {:>12} {:>12}",
-                gpu.spec.model,
-                gpu.spec.vram_gb,
-                gpu.spec.bandwidth_gb_s,
-                price_1,
-                price_4,
-                price_8,
-                efficiency,
+            info!(
+                model = %gpu.spec.model,
+                vram_gb = gpu.spec.vram_gb,
+                bandwidth_gb_s = gpu.spec.bandwidth_gb_s,
+                price_1x = price_1,
+                price_8x = price_8,
+                efficiency = efficiency,
+                "GPU pricing"
             );
         }
-        println!("{:=<120}", "");
     }
 }
 

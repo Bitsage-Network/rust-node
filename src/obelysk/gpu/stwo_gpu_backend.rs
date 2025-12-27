@@ -12,10 +12,10 @@
 //
 // Target: A100/H100 GPUs via Brev
 
-use anyhow::{Result, Context};
-use std::sync::{Arc, Mutex};
+use anyhow::Result;
 use std::collections::{HashMap, VecDeque};
 use std::time::{Instant, Duration};
+use tracing::{info, debug};
 
 use super::{GpuBackend, GpuBackendType, GpuBuffer};
 use crate::obelysk::field::M31;
@@ -603,38 +603,38 @@ impl GpuAcceleratedProver {
         let pool_stats = self.memory_pool.stats();
         let (used, max) = self.memory_pool.usage();
 
-        println!("\n📊 GPU Prover Statistics:");
-        println!("   FFT Calls: {} total ({} GPU, {} CPU)",
-            stats.fft_calls, stats.fft_gpu_calls, stats.fft_cpu_calls);
+        let gpu_pct = if stats.fft_calls > 0 {
+            (stats.fft_gpu_calls as f64 / stats.fft_calls as f64) * 100.0
+        } else {
+            0.0
+        };
 
-        if stats.fft_calls > 0 {
-            let gpu_pct = (stats.fft_gpu_calls as f64 / stats.fft_calls as f64) * 100.0;
-            println!("   GPU Utilization: {:.1}%", gpu_pct);
-        }
+        let cache_hit_rate = if pool_stats.cache_hits + pool_stats.cache_misses > 0 {
+            (pool_stats.cache_hits as f64 /
+                (pool_stats.cache_hits + pool_stats.cache_misses) as f64) * 100.0
+        } else {
+            0.0
+        };
 
-        println!("   Total FFT Time: {}ms", stats.total_fft_time_ms);
-        if stats.total_gpu_fft_time_ms > 0 {
-            println!("   GPU FFT Time: {}ms", stats.total_gpu_fft_time_ms);
-        }
-
-        println!("\n🧊 Memory Pool Statistics:");
-        println!("   Pool Size: {:.1} MB / {:.1} MB ({:.1}%)",
-            used as f64 / 1_000_000.0,
-            max as f64 / 1_000_000.0,
-            (used as f64 / max as f64) * 100.0
+        info!(
+            fft_total = stats.fft_calls,
+            fft_gpu = stats.fft_gpu_calls,
+            fft_cpu = stats.fft_cpu_calls,
+            gpu_utilization_pct = gpu_pct,
+            total_fft_time_ms = stats.total_fft_time_ms,
+            gpu_fft_time_ms = stats.total_gpu_fft_time_ms,
+            "GPU prover statistics"
         );
-        println!("   Cache Hits: {} ({:.1}% hit rate)",
-            pool_stats.cache_hits,
-            if pool_stats.cache_hits + pool_stats.cache_misses > 0 {
-                (pool_stats.cache_hits as f64 /
-                    (pool_stats.cache_hits + pool_stats.cache_misses) as f64) * 100.0
-            } else {
-                0.0
-            }
-        );
-        println!("   Reused: {:.1} MB, Evictions: {}",
-            pool_stats.total_bytes_reused as f64 / 1_000_000.0,
-            pool_stats.evictions
+
+        info!(
+            pool_used_mb = used as f64 / 1_000_000.0,
+            pool_max_mb = max as f64 / 1_000_000.0,
+            pool_usage_pct = (used as f64 / max as f64) * 100.0,
+            cache_hits = pool_stats.cache_hits,
+            cache_hit_rate_pct = cache_hit_rate,
+            bytes_reused_mb = pool_stats.total_bytes_reused as f64 / 1_000_000.0,
+            evictions = pool_stats.evictions,
+            "Memory pool statistics"
         );
     }
 }

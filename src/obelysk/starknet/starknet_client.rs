@@ -4,6 +4,10 @@
 //! and interacting with the on-chain verifier contract.
 
 use super::proof_serializer::{CairoSerializedProof, Felt252};
+use super::proof_compression::{
+    ProofCompressor, CompressedProof, CompressionLevel, CompressionStats,
+    OnChainCompressedProof,
+};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
@@ -98,6 +102,21 @@ pub enum SubmissionStatus {
     Reverted { reason: String },
 }
 
+/// Compression estimate for gas savings analysis
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CompressionEstimate {
+    /// Original size in bytes
+    pub original_size: usize,
+    /// Compressed size in bytes
+    pub compressed_size: usize,
+    /// Compression ratio (original / compressed)
+    pub compression_ratio: f64,
+    /// Savings percentage
+    pub savings_percent: f64,
+    /// Estimated gas saved
+    pub estimated_gas_saved: u64,
+}
+
 /// Result of proof verification
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct VerificationResult {
@@ -168,6 +187,105 @@ impl StarknetClient {
             status: SubmissionStatus::Pending,
             gas_used: None,
             actual_fee: Some(estimated_fee),
+        })
+    }
+
+    /// Submit a compressed proof for on-chain verification
+    ///
+    /// Uses LZ4 compression to reduce calldata by 30-50%, significantly
+    /// reducing gas costs for proof submission.
+    ///
+    /// Returns both the submission result and compression statistics.
+    pub async fn submit_compressed_proof(
+        &self,
+        proof: &CairoSerializedProof,
+        compression_level: CompressionLevel,
+    ) -> Result<(SubmissionResult, CompressionStats), StarknetError> {
+        // Compress the proof
+        let mut compressor = ProofCompressor::new(compression_level);
+        let compressed = compressor.compress_proof(proof)
+            .map_err(|e| StarknetError::CompressionError(e.to_string()))?;
+
+        // Convert to on-chain format
+        let on_chain = OnChainCompressedProof::from_compressed(&compressed)
+            .map_err(|e| StarknetError::CompressionError(e.to_string()))?;
+
+        // Build calldata for compressed verification
+        let calldata = self.build_compressed_verify_calldata(&on_chain)?;
+
+        // Estimate fee
+        let estimated_fee = self.estimate_fee(&calldata).await?;
+
+        // Log compression savings
+        let savings = compressed.savings_percent();
+        tracing::info!(
+            "Proof compressed: {}% savings ({} -> {} bytes)",
+            savings as u32,
+            compressed.original_size,
+            compressed.compressed_size
+        );
+
+        // Check if fee is acceptable
+        if estimated_fee > self.config.max_fee {
+            return Err(StarknetError::FeeTooHigh {
+                estimated: estimated_fee,
+                max: self.config.max_fee,
+            });
+        }
+
+        // Submit transaction
+        let tx_hash = self.invoke_contract(&calldata, estimated_fee).await?;
+
+        let result = SubmissionResult {
+            transaction_hash: tx_hash,
+            block_number: None,
+            status: SubmissionStatus::Pending,
+            gas_used: None,
+            actual_fee: Some(estimated_fee),
+        };
+
+        Ok((result, compressor.stats().clone()))
+    }
+
+    /// Build calldata for compressed proof verification
+    fn build_compressed_verify_calldata(
+        &self,
+        proof: &OnChainCompressedProof,
+    ) -> Result<Vec<Felt252>, StarknetError> {
+        // Calldata format for compressed verification:
+        // [scheme, original_count, checksum, compressed_length, compressed_data...]
+        let mut calldata = Vec::with_capacity(proof.compressed_felts.len() + 4);
+
+        calldata.push(Felt252::from_u32(proof.scheme as u32));
+        calldata.push(Felt252::from_u64(proof.original_felt_count as u64));
+        calldata.push(proof.checksum);
+        calldata.push(Felt252::from_u64(proof.compressed_felts.len() as u64));
+        calldata.extend_from_slice(&proof.compressed_felts);
+
+        Ok(calldata)
+    }
+
+    /// Estimate gas savings from compression
+    pub fn estimate_compression_savings(
+        &self,
+        proof: &CairoSerializedProof,
+    ) -> Result<CompressionEstimate, StarknetError> {
+        let mut compressor = ProofCompressor::new(CompressionLevel::Fast);
+        let compressed = compressor.compress_proof(proof)
+            .map_err(|e| StarknetError::CompressionError(e.to_string()))?;
+
+        // Gas per calldata byte (approximate: 16 for non-zero, 4 for zero)
+        const AVG_GAS_PER_BYTE: u64 = 12;
+
+        let original_calldata_gas = (proof.data.len() * 32) as u64 * AVG_GAS_PER_BYTE;
+        let compressed_calldata_gas = compressed.compressed_size as u64 * AVG_GAS_PER_BYTE;
+
+        Ok(CompressionEstimate {
+            original_size: proof.data.len() * 32,
+            compressed_size: compressed.compressed_size,
+            compression_ratio: compressed.compression_ratio(),
+            savings_percent: compressed.savings_percent(),
+            estimated_gas_saved: original_calldata_gas.saturating_sub(compressed_calldata_gas),
         })
     }
 
@@ -459,6 +577,9 @@ pub enum StarknetError {
     #[error("Fee too high: estimated {estimated}, max {max}")]
     FeeTooHigh { estimated: u64, max: u64 },
 
+    #[error("Compression error: {0}")]
+    CompressionError(String),
+
     #[error("Transaction failed: {hash} - {reason}")]
     TransactionFailed { hash: Felt252, reason: String },
 
@@ -529,6 +650,258 @@ fn starknet_keccak(data: &[u8]) -> Felt252 {
     bytes[0] &= 0x03;
 
     Felt252(bytes)
+}
+
+// =============================================================================
+// FRI Verification Interface
+// =============================================================================
+
+/// FRI configuration for verification
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FriConfig {
+    /// Log2 of the blowup factor
+    pub log_blowup_factor: u32,
+    /// Log2 of the last layer size
+    pub log_last_layer_size: u32,
+    /// Number of queries
+    pub n_queries: u32,
+    /// Security bits from proof-of-work
+    pub pow_bits: u32,
+}
+
+impl Default for FriConfig {
+    fn default() -> Self {
+        Self {
+            log_blowup_factor: 4,
+            log_last_layer_size: 5,
+            n_queries: 30,
+            pow_bits: 26,
+        }
+    }
+}
+
+/// FRI layer commitment
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FriLayerCommitment {
+    /// Merkle root of this layer
+    pub commitment: Felt252,
+    /// Folding alpha (random challenge)
+    pub alpha: Felt252,
+    /// Log2 size of domain
+    pub log_size: u32,
+}
+
+/// FRI verification request
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FriVerificationRequest {
+    /// FRI configuration
+    pub config: FriConfig,
+    /// Initial trace commitment
+    pub initial_commitment: Felt252,
+    /// Layer commitments
+    pub layer_commitments: Vec<FriLayerCommitment>,
+    /// Query indices
+    pub query_indices: Vec<u32>,
+    /// Query values (f(x), f(-x) pairs)
+    pub query_values: Vec<(Felt252, Felt252)>,
+    /// Merkle authentication paths
+    pub merkle_paths: Vec<Vec<Felt252>>,
+    /// Final polynomial coefficients
+    pub final_poly_coeffs: Vec<Felt252>,
+    /// Channel seed for Fiat-Shamir
+    pub channel_seed: Felt252,
+}
+
+/// Result of FRI verification
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FriVerificationResult {
+    /// Whether the proof is valid
+    pub is_valid: bool,
+    /// Error code if verification failed
+    pub error_code: u32,
+    /// Number of layers verified
+    pub verified_layers: u32,
+    /// Number of queries verified
+    pub verified_queries: u32,
+}
+
+impl StarknetClient {
+    /// Verify a FRI proof on-chain using the Cairo FRI verifier
+    ///
+    /// This calls the `verify_fri_proof` function in the deployed
+    /// fri_verifier.cairo contract.
+    pub async fn verify_fri_proof(
+        &self,
+        request: &FriVerificationRequest,
+    ) -> Result<FriVerificationResult, StarknetError> {
+        // Build calldata for FRI verification
+        let calldata = self.build_fri_verify_calldata(request)?;
+
+        // Make a view call (no gas cost)
+        let result = self.call_contract("verify_fri_proof", &calldata).await?;
+
+        // Parse the result
+        // Result format: [is_valid, error_code, verified_layers, verified_queries]
+        if result.len() < 4 {
+            return Err(StarknetError::InvalidResponse(
+                "FRI verification returned insufficient data".to_string()
+            ));
+        }
+
+        let is_valid = result[0] != Felt252::ZERO;
+        let error_code: u32 = felt_to_u32(&result[1]).unwrap_or(0);
+        let verified_layers: u32 = felt_to_u32(&result[2]).unwrap_or(0);
+        let verified_queries: u32 = felt_to_u32(&result[3]).unwrap_or(0);
+
+        Ok(FriVerificationResult {
+            is_valid,
+            error_code,
+            verified_layers,
+            verified_queries,
+        })
+    }
+
+    /// Submit a FRI proof for on-chain verification (with transaction)
+    ///
+    /// This creates a transaction that calls `verify_fri_proof` and
+    /// stores the verification result on-chain.
+    pub async fn submit_fri_proof(
+        &self,
+        request: &FriVerificationRequest,
+    ) -> Result<SubmissionResult, StarknetError> {
+        let calldata = self.build_fri_verify_calldata(request)?;
+
+        // Estimate fee
+        let estimated_fee = self.estimate_fee(&calldata).await?;
+
+        // Check if fee is acceptable
+        if estimated_fee > self.config.max_fee {
+            return Err(StarknetError::FeeTooHigh {
+                estimated: estimated_fee,
+                max: self.config.max_fee,
+            });
+        }
+
+        // Submit transaction
+        let tx_hash = self.invoke_contract(&calldata, estimated_fee).await?;
+
+        Ok(SubmissionResult {
+            transaction_hash: tx_hash,
+            block_number: None,
+            status: SubmissionStatus::Pending,
+            gas_used: None,
+            actual_fee: Some(estimated_fee),
+        })
+    }
+
+    /// Verify a Merkle path on-chain
+    ///
+    /// Useful for verifying individual query decommitments.
+    pub async fn verify_merkle_path(
+        &self,
+        leaf_hash: Felt252,
+        index: u32,
+        path: &[Felt252],
+        root: Felt252,
+    ) -> Result<bool, StarknetError> {
+        let mut calldata = Vec::with_capacity(path.len() + 4);
+        calldata.push(leaf_hash);
+        calldata.push(Felt252::from_u32(index));
+        calldata.push(Felt252::from_u64(path.len() as u64));
+        calldata.extend_from_slice(path);
+        calldata.push(root);
+
+        let result = self.call_contract("verify_merkle_path", &calldata).await?;
+
+        Ok(result.first().map(|f| *f != Felt252::ZERO).unwrap_or(false))
+    }
+
+    /// Build calldata for FRI verification
+    fn build_fri_verify_calldata(
+        &self,
+        request: &FriVerificationRequest,
+    ) -> Result<Vec<Felt252>, StarknetError> {
+        let mut calldata = Vec::new();
+
+        // FRI config (4 elements)
+        calldata.push(Felt252::from_u32(request.config.log_blowup_factor));
+        calldata.push(Felt252::from_u32(request.config.log_last_layer_size));
+        calldata.push(Felt252::from_u32(request.config.n_queries));
+        calldata.push(Felt252::from_u32(request.config.pow_bits));
+
+        // Initial commitment
+        calldata.push(request.initial_commitment);
+
+        // Layer commitments: [count, (commitment, alpha, log_size)...]
+        calldata.push(Felt252::from_u64(request.layer_commitments.len() as u64));
+        for layer in &request.layer_commitments {
+            calldata.push(layer.commitment);
+            calldata.push(layer.alpha);
+            calldata.push(Felt252::from_u32(layer.log_size));
+        }
+
+        // Query responses: [count, (index, values_count, values..., path_count, path...)...]
+        calldata.push(Felt252::from_u64(request.query_indices.len() as u64));
+        for i in 0..request.query_indices.len() {
+            calldata.push(Felt252::from_u32(request.query_indices[i]));
+
+            // Query values (f(x), f(-x))
+            if i < request.query_values.len() {
+                calldata.push(Felt252::from_u32(2)); // 2 values per query
+                calldata.push(request.query_values[i].0);
+                calldata.push(request.query_values[i].1);
+            } else {
+                calldata.push(Felt252::from_u32(0));
+            }
+
+            // Merkle path
+            if i < request.merkle_paths.len() {
+                let path = &request.merkle_paths[i];
+                calldata.push(Felt252::from_u64(path.len() as u64));
+                calldata.extend_from_slice(path);
+            } else {
+                calldata.push(Felt252::from_u32(0));
+            }
+        }
+
+        // Final polynomial coefficients
+        calldata.push(Felt252::from_u64(request.final_poly_coeffs.len() as u64));
+        calldata.extend_from_slice(&request.final_poly_coeffs);
+
+        // Channel seed
+        calldata.push(request.channel_seed);
+
+        Ok(calldata)
+    }
+
+    /// Estimate gas for FRI verification
+    pub fn estimate_fri_verification_gas(&self, request: &FriVerificationRequest) -> u64 {
+        // Base cost for FRI verification
+        let base_cost: u64 = 50_000;
+
+        // Per-layer cost (hash operations, field arithmetic)
+        let layer_cost = request.layer_commitments.len() as u64 * 5_000;
+
+        // Per-query cost (Merkle path verification, folding)
+        let query_cost = request.query_indices.len() as u64 * 8_000;
+
+        // Merkle path cost (per hash in paths)
+        let path_cost: u64 = request.merkle_paths.iter()
+            .map(|p| p.len() as u64 * 500)
+            .sum();
+
+        // Final polynomial evaluation cost
+        let poly_cost = request.final_poly_coeffs.len() as u64 * 1_000;
+
+        base_cost + layer_cost + query_cost + path_cost + poly_cost
+    }
+}
+
+/// Convert Felt252 to u32
+fn felt_to_u32(felt: &Felt252) -> Option<u32> {
+    // Take lowest 4 bytes
+    let bytes = &felt.0[28..32];
+    Some(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
 }
 
 #[cfg(test)]

@@ -185,7 +185,7 @@ async fn detect_capabilities(config: &CapabilitiesConfig) -> Result<WorkerCapabi
         "cpuonly" | "cpu_only" => TeeType::CpuOnly,
         "full" => TeeType::Full,
         _ => {
-            eprintln!("⚠️  Unknown TEE type '{}', defaulting to None", config.tee_type);
+            tracing::warn!(tee_type = %config.tee_type, "Unknown TEE type, defaulting to None");
             TeeType::None
         }
     };

@@ -23,6 +23,10 @@ use tracing::{debug, error, info, warn};
 
 use crate::types::{JobId, WorkerId, NetworkAddress};
 use crate::blockchain::types::WorkerCapabilities;
+use crate::network::encrypted_jobs::{
+    EncryptedJobAnnouncement, EncryptedWorkerBid, EncryptedJobResult,
+    X25519PublicKey,
+};
 
 /// P2P network configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -124,6 +128,41 @@ pub enum P2PMessage {
         worker_id: WorkerId,
         timestamp: chrono::DateTime<chrono::Utc>,
         load: f32,
+    },
+
+    // =========================================================================
+    // ENCRYPTED JOB MESSAGES (Privacy-Preserving)
+    // =========================================================================
+
+    /// Encrypted job announcement - only eligible workers can decrypt
+    EncryptedAnnouncement(EncryptedJobAnnouncement),
+
+    /// Encrypted bid from a worker
+    EncryptedBid(EncryptedWorkerBid),
+
+    /// Encrypted job result
+    EncryptedResult(EncryptedJobResult),
+
+    /// Worker public key advertisement for encrypted communications
+    WorkerKeyAdvertisement {
+        worker_id: WorkerId,
+        public_key: X25519PublicKey,
+        capabilities_hash: [u8; 32],
+        timestamp: u64,
+        signature: Vec<u8>,
+    },
+
+    /// Request for worker's public key
+    WorkerKeyRequest {
+        requester_id: WorkerId,
+        target_worker_id: WorkerId,
+    },
+
+    /// Response with worker's public key
+    WorkerKeyResponse {
+        worker_id: WorkerId,
+        public_key: X25519PublicKey,
+        capabilities_hash: [u8; 32],
     },
 }
 

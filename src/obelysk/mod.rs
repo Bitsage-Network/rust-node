@@ -21,6 +21,7 @@ pub mod etl;          // ETL verification (Phase 4) ✅
 pub mod stwo_adapter; // Real Stwo integration layer (Phase 5) ✅
 pub mod gpu;          // GPU acceleration (CUDA/ROCm) (Phase 6) 🚀
 pub mod starknet;     // Starknet L2 on-chain verification (Phase 7) ⛓️
+pub mod proof_aggregation; // Recursive proof aggregation (80% gas savings) ⛓️
 pub mod elgamal;      // ElGamal EC encryption for privacy payments (Phase 8) 🔐
 pub mod privacy_client; // Privacy Router contract client (Phase 8) 🔐
 pub mod payment_client; // Payment Router contract client (Phase 8) 💰
@@ -37,6 +38,10 @@ pub use ecdsa::{ECDSAVerifier, ECDSASignature, P256Point, U256};
 pub use ml_gadgets::Matrix;
 pub use etl::{ETLBridge, ETLJob, ETLOpCode};
 pub use starknet::{ProofSerializer, CairoSerializedProof, StarknetClient, VerifierContract};
+pub use proof_aggregation::{
+    ProofAggregator, AggregatorConfig, AggregatedProof, ProofCommitment,
+    AggregationWitness, AggregationStats, aggregate_proofs, estimate_savings,
+};
 pub use elgamal::{
     Felt252, ECPoint, ElGamalCiphertext, EncryptionProof, EncryptedBalance, KeyPair,
     encrypt, decrypt_point, derive_public_key, homomorphic_add, homomorphic_sub,

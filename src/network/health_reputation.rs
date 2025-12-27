@@ -9,8 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
-use tokio::time::{sleep, Duration};
-use tracing::{info, warn, error};
+use tracing::{info, warn};
 
 use crate::types::WorkerId;
 use crate::blockchain::types::WorkerCapabilities;
@@ -23,6 +22,41 @@ pub struct HealthReputationConfig {
     pub history_window_size: usize,
     pub penalty_decay_factor: f64,
     pub min_reputation_threshold: f64,
+    /// Decay configuration
+    pub decay_config: ReputationDecayConfig,
+}
+
+/// Configuration for reputation decay system
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReputationDecayConfig {
+    /// Hours of inactivity before decay starts
+    pub inactivity_threshold_hours: u64,
+    /// Decay rate per day (0.0-1.0, where 0.01 = 1% per day)
+    pub daily_decay_rate: f64,
+    /// Minimum reputation after decay (floor)
+    pub decay_floor: f64,
+    /// Maximum reputation recovery per job
+    pub max_recovery_per_job: f64,
+    /// Enable exponential decay (vs linear)
+    pub use_exponential_decay: bool,
+    /// Grace period for new workers (hours without decay)
+    pub new_worker_grace_period_hours: u64,
+    /// Penalty decay rate (how fast old penalties stop affecting score)
+    pub penalty_decay_rate: f64,
+}
+
+impl Default for ReputationDecayConfig {
+    fn default() -> Self {
+        Self {
+            inactivity_threshold_hours: 24,       // Start decay after 24h inactive
+            daily_decay_rate: 0.02,               // 2% decay per day
+            decay_floor: 0.3,                     // Never decay below 30%
+            max_recovery_per_job: 0.05,           // Max 5% recovery per successful job
+            use_exponential_decay: true,          // Smoother decay curve
+            new_worker_grace_period_hours: 168,   // 7 days grace for new workers
+            penalty_decay_rate: 0.1,              // 10% penalty forgiveness per day
+        }
+    }
 }
 
 impl Default for HealthReputationConfig {
@@ -33,6 +67,7 @@ impl Default for HealthReputationConfig {
             history_window_size: 100,
             penalty_decay_factor: 0.95,
             min_reputation_threshold: 0.5,
+            decay_config: ReputationDecayConfig::default(),
         }
     }
 }
@@ -368,7 +403,249 @@ impl HealthReputationSystem {
     }
 
     pub async fn periodic_maintenance(&self) -> Result<()> {
-        // TODO: Implement decay logic and cleanup
+        self.apply_reputation_decay().await?;
+        self.apply_penalty_decay().await?;
+        self.cleanup_old_records().await?;
+        self.check_ban_expiry().await?;
         Ok(())
+    }
+
+    /// Apply reputation decay to inactive workers
+    pub async fn apply_reputation_decay(&self) -> Result<()> {
+        let now = chrono::Utc::now();
+        let decay_config = &self.config.decay_config;
+        let mut reputations = self.worker_reputations.write().await;
+
+        for (worker_id, rep) in reputations.iter_mut() {
+            // Skip banned workers
+            if rep.is_banned {
+                continue;
+            }
+
+            // Check grace period for new workers
+            let registration_age = now.signed_duration_since(rep.last_decay_calculation);
+            if registration_age.num_hours() < decay_config.new_worker_grace_period_hours as i64
+               && rep.jobs_completed < 10 {
+                continue;
+            }
+
+            // Calculate hours since last activity
+            let hours_inactive = now.signed_duration_since(rep.last_seen).num_hours() as u64;
+
+            // Only decay if inactive beyond threshold
+            if hours_inactive <= decay_config.inactivity_threshold_hours {
+                // Worker is active, reset decay start
+                rep.reputation_decay_start = None;
+                continue;
+            }
+
+            // Start decay tracking if not already
+            if rep.reputation_decay_start.is_none() {
+                rep.reputation_decay_start = Some(now.timestamp() as u64);
+            }
+
+            // Calculate decay amount
+            let decay_hours = hours_inactive - decay_config.inactivity_threshold_hours;
+            let decay_days = decay_hours as f64 / 24.0;
+
+            let decay_amount = if decay_config.use_exponential_decay {
+                // Exponential decay: score * (1 - rate)^days
+                let decay_factor = (1.0 - decay_config.daily_decay_rate).powf(decay_days);
+                rep.reputation_score * (1.0 - decay_factor)
+            } else {
+                // Linear decay: rate * days
+                decay_config.daily_decay_rate * decay_days
+            };
+
+            // Apply decay with floor
+            let new_score = (rep.reputation_score - decay_amount).max(decay_config.decay_floor);
+
+            if new_score != rep.reputation_score {
+                info!(
+                    "Reputation decay applied to worker {}: {:.3} -> {:.3} (inactive {} hours)",
+                    worker_id, rep.reputation_score, new_score, hours_inactive
+                );
+                rep.reputation_score = new_score;
+                rep.last_decay_calculation = now;
+
+                let _ = self.event_sender.send(
+                    HealthEvent::ReputationUpdated(worker_id.clone(), new_score)
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Apply decay to penalties (forgiveness over time)
+    pub async fn apply_penalty_decay(&self) -> Result<()> {
+        let now = chrono::Utc::now().timestamp() as u64;
+        let decay_rate = self.config.decay_config.penalty_decay_rate;
+        let mut reputations = self.worker_reputations.write().await;
+
+        for rep in reputations.values_mut() {
+            // Skip if no penalties
+            if rep.penalty_history.is_empty() {
+                continue;
+            }
+
+            // Calculate penalty score reduction
+            let mut total_decayed_penalty: f64 = 0.0;
+
+            for penalty in rep.penalty_history.iter_mut() {
+                let days_old = (now - penalty.timestamp) as f64 / 86400.0;
+                let decay_factor = decay_rate * days_old;
+                let decayed_amount = penalty.penalty_score * decay_factor.min(1.0);
+                total_decayed_penalty += decayed_amount;
+            }
+
+            // Apply partial recovery from penalty decay
+            if total_decayed_penalty > 0.0 {
+                let recovery = (total_decayed_penalty * 0.1).min(0.02); // Max 2% recovery
+                rep.reputation_score = (rep.reputation_score + recovery).min(1.0);
+            }
+
+            // Remove very old penalties (>30 days)
+            let cutoff = now - (30 * 86400);
+            while let Some(oldest) = rep.penalty_history.back() {
+                if oldest.timestamp < cutoff {
+                    rep.penalty_history.pop_back();
+                } else {
+                    break;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Cleanup old records and optimize memory
+    async fn cleanup_old_records(&self) -> Result<()> {
+        let cutoff = chrono::Utc::now() - chrono::Duration::days(90);
+        let mut reputations = self.worker_reputations.write().await;
+
+        // Remove workers not seen in 90 days with no activity
+        reputations.retain(|_, rep| {
+            rep.last_seen > cutoff || rep.jobs_completed > 0 || rep.is_banned
+        });
+
+        Ok(())
+    }
+
+    /// Check and lift expired bans
+    async fn check_ban_expiry(&self) -> Result<()> {
+        let now = chrono::Utc::now().timestamp() as u64;
+        let mut reputations = self.worker_reputations.write().await;
+
+        for (worker_id, rep) in reputations.iter_mut() {
+            if rep.is_banned {
+                if let Some(expiry) = rep.ban_expiry {
+                    if now >= expiry {
+                        rep.is_banned = false;
+                        rep.ban_reason = None;
+                        rep.ban_expiry = None;
+                        // Start fresh with low reputation
+                        rep.reputation_score = self.config.decay_config.decay_floor;
+
+                        info!("Worker {} ban expired, reputation reset to {}",
+                              worker_id, rep.reputation_score);
+                        let _ = self.event_sender.send(
+                            HealthEvent::WorkerUnbanned(worker_id.clone())
+                        );
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Calculate effective reputation with decay applied
+    pub async fn get_effective_reputation(&self, worker_id: &WorkerId) -> f64 {
+        let reputations = self.worker_reputations.read().await;
+
+        if let Some(rep) = reputations.get(worker_id) {
+            if rep.is_banned {
+                return 0.0;
+            }
+
+            let now = chrono::Utc::now();
+            let hours_inactive = now.signed_duration_since(rep.last_seen).num_hours() as u64;
+            let decay_config = &self.config.decay_config;
+
+            // Real-time decay calculation
+            if hours_inactive > decay_config.inactivity_threshold_hours {
+                let decay_hours = hours_inactive - decay_config.inactivity_threshold_hours;
+                let decay_days = decay_hours as f64 / 24.0;
+
+                let decay_factor = if decay_config.use_exponential_decay {
+                    (1.0 - decay_config.daily_decay_rate).powf(decay_days)
+                } else {
+                    1.0 - (decay_config.daily_decay_rate * decay_days)
+                };
+
+                return (rep.reputation_score * decay_factor).max(decay_config.decay_floor);
+            }
+
+            rep.reputation_score
+        } else {
+            0.0
+        }
+    }
+
+    /// Boost reputation for successful job (with cap)
+    pub async fn boost_reputation(&self, worker_id: WorkerId, boost_amount: f64) -> Result<()> {
+        let max_recovery = self.config.decay_config.max_recovery_per_job;
+        let capped_boost = boost_amount.min(max_recovery);
+
+        let mut reputations = self.worker_reputations.write().await;
+
+        if let Some(rep) = reputations.get_mut(&worker_id) {
+            let old_score = rep.reputation_score;
+            rep.reputation_score = (rep.reputation_score + capped_boost).min(1.0);
+
+            // Reset decay timer on activity
+            rep.last_seen = chrono::Utc::now();
+            rep.reputation_decay_start = None;
+
+            info!(
+                "Reputation boost for worker {}: {:.3} -> {:.3}",
+                worker_id, old_score, rep.reputation_score
+            );
+
+            let _ = self.event_sender.send(
+                HealthEvent::ReputationUpdated(worker_id, rep.reputation_score)
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Get workers ranked by effective reputation
+    pub async fn get_workers_ranked(&self, limit: usize) -> Vec<(WorkerId, f64)> {
+        let reputations = self.worker_reputations.read().await;
+        let now = chrono::Utc::now();
+        let decay_config = &self.config.decay_config;
+
+        let mut ranked: Vec<(WorkerId, f64)> = reputations.iter()
+            .filter(|(_, rep)| !rep.is_banned)
+            .map(|(id, rep)| {
+                let hours_inactive = now.signed_duration_since(rep.last_seen).num_hours() as u64;
+
+                let effective_score = if hours_inactive > decay_config.inactivity_threshold_hours {
+                    let decay_days = (hours_inactive - decay_config.inactivity_threshold_hours) as f64 / 24.0;
+                    let decay_factor = (1.0 - decay_config.daily_decay_rate).powf(decay_days);
+                    (rep.reputation_score * decay_factor).max(decay_config.decay_floor)
+                } else {
+                    rep.reputation_score
+                };
+
+                (id.clone(), effective_score)
+            })
+            .collect();
+
+        ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        ranked.truncate(limit);
+        ranked
     }
 }

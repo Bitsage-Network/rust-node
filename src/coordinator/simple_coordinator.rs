@@ -1,20 +1,39 @@
-// TODO: Re-enable imports when types are available
-// use crate::{
-//     types::{JobId, WorkerId, NodeId},
-//     node::coordinator::{JobRequest, JobType, JobStatus, WorkerInfo, WorkerCapabilities},
-//     blockchain::{StarknetClient, JobManagerContract},
-// };
+//! # DEPRECATED: Simple Coordinator
+//!
+//! **WARNING**: This module is deprecated and should not be used in new code.
+//! Use `EnhancedCoordinator` from `coordinator/mod.rs` instead.
+//!
+//! This module contains placeholder stub types that shadow the real types.
+//! It exists only for backwards compatibility and will be removed in a future version.
+//!
+//! ## Migration Guide
+//!
+//! Replace:
+//! ```ignore
+//! use crate::coordinator::simple_coordinator::SimpleCoordinator;
+//! ```
+//!
+//! With:
+//! ```ignore
+//! use crate::coordinator::EnhancedCoordinator;
+//! ```
+
+#![deprecated(since = "0.2.0", note = "Use EnhancedCoordinator instead")]
+
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{info, debug};
+use tracing::{info, debug, warn};
 use uuid::Uuid;
 
-// Placeholder types until the real types are implemented
+// DEPRECATED: Placeholder types - use crate::types instead
+#[deprecated(note = "Use crate::types::JobId instead")]
 pub type JobId = String;
+#[deprecated(note = "Use crate::types::WorkerId instead")]
 pub type WorkerId = String;
+#[deprecated(note = "Use crate::types::NodeId instead")]
 pub type NodeId = String;
 
 #[derive(Debug, Clone)]
@@ -112,7 +131,12 @@ pub struct JobInfo {
     pub result: Option<Vec<u8>>,
 }
 
-/// Simplified coordinator service
+/// DEPRECATED: Simplified coordinator service
+///
+/// **Use `EnhancedCoordinator` instead.**
+///
+/// This coordinator uses placeholder types and doesn't connect to real services.
+#[deprecated(since = "0.2.0", note = "Use EnhancedCoordinator from coordinator/mod.rs instead")]
 pub struct SimpleCoordinator {
     config: SimpleCoordinatorConfig,
     state: Arc<RwLock<SimpleCoordinatorState>>,
@@ -120,8 +144,14 @@ pub struct SimpleCoordinator {
     job_manager_contract: Arc<JobManagerContract>,
 }
 
+#[allow(deprecated)]
 impl SimpleCoordinator {
     pub fn new(config: SimpleCoordinatorConfig) -> Result<Self> {
+        warn!(
+            "SimpleCoordinator is DEPRECATED. Please migrate to EnhancedCoordinator. \
+             See coordinator/simple_coordinator.rs for migration guide."
+        );
+
         let starknet_client = Arc::new(StarknetClient::new(config.blockchain_rpc_url.clone())?);
         let job_manager_contract = Arc::new(JobManagerContract::new_from_address(
             starknet_client.clone(),

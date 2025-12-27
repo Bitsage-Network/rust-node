@@ -258,6 +258,9 @@ impl BlockchainIntegration {
     }
 
     /// Start transaction monitoring
+    ///
+    /// This monitors pending transactions by querying their receipts from the blockchain.
+    /// When a transaction is confirmed, it updates the status and emits an event.
     async fn start_transaction_monitoring(&self) -> Result<()> {
         let pending_transactions = Arc::clone(&self.pending_transactions);
         let confirmed_transactions = Arc::clone(&self.confirmed_transactions);
@@ -265,40 +268,99 @@ impl BlockchainIntegration {
         let starknet_client = self.starknet_client.clone();
 
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(10));
-            
+            let mut interval = tokio::time::interval(Duration::from_secs(5));
+
             loop {
                 interval.tick().await;
-                
-                // Check pending transactions
-                let mut pending = pending_transactions.write().await;
-                let mut to_remove = Vec::new();
-                
-                for (hash, transaction) in pending.iter_mut() {
-                    // TODO: Implement proper transaction receipt checking
-                    // For now, just mark as confirmed after a delay
-                    if chrono::Utc::now().timestamp() as u64 - transaction.timestamp > 30 {
-                        transaction.status = TransactionStatus::Confirmed;
-                        transaction.block_number = Some(0); // TODO: Get actual block number
-                        transaction.gas_used = Some(0); // TODO: Get actual gas used
-                        
-                        // Move to confirmed transactions
-                        confirmed_transactions.write().await.insert(hash.clone(), transaction.clone());
-                        to_remove.push(hash.clone());
-                        
-                        // Send confirmation event
-                        if let Err(e) = event_sender.send(BlockchainEvent::TransactionConfirmed(
-                            hash.clone(),
-                            0, // TODO: Get actual block number
-                        )) {
-                            error!("Failed to send transaction confirmation event: {}", e);
+
+                // Get list of pending transactions to check
+                let pending_hashes: Vec<(String, TransactionInfo)> = {
+                    let pending = pending_transactions.read().await;
+                    pending.iter().map(|(h, t)| (h.clone(), t.clone())).collect()
+                };
+
+                if pending_hashes.is_empty() {
+                    continue;
+                }
+
+                debug!("Checking {} pending transactions", pending_hashes.len());
+
+                for (hash, mut transaction) in pending_hashes {
+                    // Parse the transaction hash as FieldElement
+                    let tx_hash = match starknet::core::types::FieldElement::from_hex_be(&hash) {
+                        Ok(h) => h,
+                        Err(e) => {
+                            error!("Invalid transaction hash {}: {}", hash, e);
+                            continue;
+                        }
+                    };
+
+                    // Check transaction status
+                    match starknet_client.is_transaction_finalized(tx_hash).await {
+                        Ok(status) => {
+                            if status.is_finalized {
+                                let block_num = status.block_number.unwrap_or(0);
+
+                                if status.is_successful {
+                                    info!("Transaction {} confirmed in block {}", hash, block_num);
+                                    transaction.status = TransactionStatus::Confirmed;
+                                    transaction.block_number = Some(block_num);
+
+                                    // Move to confirmed
+                                    confirmed_transactions.write().await.insert(hash.clone(), transaction.clone());
+                                    pending_transactions.write().await.remove(&hash);
+
+                                    // Emit event
+                                    if let Err(e) = event_sender.send(BlockchainEvent::TransactionConfirmed(
+                                        hash.clone(),
+                                        block_num,
+                                    )) {
+                                        error!("Failed to send transaction confirmation event: {}", e);
+                                    }
+                                } else {
+                                    // Transaction reverted
+                                    let error_msg = status.error_message.unwrap_or_else(|| "Transaction reverted".to_string());
+                                    error!("Transaction {} reverted: {}", hash, error_msg);
+
+                                    transaction.status = TransactionStatus::Reverted;
+                                    transaction.error_message = Some(error_msg.clone());
+                                    transaction.block_number = Some(block_num);
+
+                                    // Move to confirmed (with failed status)
+                                    confirmed_transactions.write().await.insert(hash.clone(), transaction.clone());
+                                    pending_transactions.write().await.remove(&hash);
+
+                                    // Emit event
+                                    if let Err(e) = event_sender.send(BlockchainEvent::TransactionFailed(
+                                        hash.clone(),
+                                        error_msg,
+                                    )) {
+                                        error!("Failed to send transaction failed event: {}", e);
+                                    }
+                                }
+                            }
+                            // If not finalized, keep in pending
+                        }
+                        Err(e) => {
+                            // Check if transaction has been pending too long (timeout after 10 minutes)
+                            let now = chrono::Utc::now().timestamp() as u64;
+                            if now - transaction.timestamp > 600 {
+                                error!("Transaction {} timed out after 10 minutes", hash);
+                                transaction.status = TransactionStatus::Failed;
+                                transaction.error_message = Some(format!("Transaction timeout: {}", e));
+
+                                confirmed_transactions.write().await.insert(hash.clone(), transaction.clone());
+                                pending_transactions.write().await.remove(&hash);
+
+                                if let Err(e) = event_sender.send(BlockchainEvent::TransactionFailed(
+                                    hash.clone(),
+                                    "Transaction timeout".to_string(),
+                                )) {
+                                    error!("Failed to send transaction failed event: {}", e);
+                                }
+                            }
                         }
                     }
-                }
-                
-                // Remove processed transactions
-                for hash in to_remove {
-                    pending.remove(&hash);
                 }
             }
         });
@@ -307,25 +369,173 @@ impl BlockchainIntegration {
     }
 
     /// Start event monitoring
+    ///
+    /// Monitors contract events like JobCompleted, JobFailed, RewardsDistributed, etc.
+    /// This is used for tracking on-chain activity and updating local state accordingly.
     async fn start_event_monitoring(&self) -> Result<()> {
         let config = self.config.clone();
         let contract_events = Arc::clone(&self.contract_events);
         let event_sender = self.event_sender.clone();
         let job_manager_contract = self.job_manager_contract.clone();
+        let starknet_client = self.starknet_client.clone();
+
+        // Track last processed block for event monitoring
+        let last_event_block = Arc::new(RwLock::new(0u64));
 
         tokio::spawn(async move {
             if !config.monitoring.enable_event_monitoring {
+                info!("Contract event monitoring disabled by config");
                 return;
             }
-            
-            let mut interval = tokio::time::interval(Duration::from_secs(30));
-            
+
+            let mut interval = tokio::time::interval(Duration::from_secs(15));
+
             loop {
                 interval.tick().await;
-                
-                // TODO: Implement contract event monitoring
-                // This would poll for events from the job manager contract
-                debug!("Monitoring contract events...");
+
+                // Get current block
+                let current_block = match starknet_client.get_block_number().await {
+                    Ok(block) => block,
+                    Err(e) => {
+                        debug!("Failed to get current block for event monitoring: {}", e);
+                        continue;
+                    }
+                };
+
+                // Get last processed block
+                let from_block = {
+                    let last = *last_event_block.read().await;
+                    if last == 0 {
+                        // First run - start from current block (don't replay history)
+                        current_block.saturating_sub(10)
+                    } else {
+                        last + 1
+                    }
+                };
+
+                if from_block >= current_block {
+                    continue;
+                }
+
+                debug!("Monitoring contract events from block {} to {}", from_block, current_block);
+
+                let contract_address = job_manager_contract.contract_address();
+
+                // Monitor multiple event types
+                let event_types = vec![
+                    ("JobCompleted", *crate::blockchain::types::selectors::EVENT_JOB_COMPLETED),
+                    ("JobFailed", *crate::blockchain::types::selectors::EVENT_JOB_FAILED),
+                    ("RewardsDistributed", *crate::blockchain::types::selectors::EVENT_REWARDS_DISTRIBUTED),
+                    ("JobAssigned", *crate::blockchain::types::selectors::EVENT_JOB_ASSIGNED),
+                ];
+
+                for (event_name, event_selector) in event_types {
+                    match starknet_client.get_events_by_key(
+                        contract_address,
+                        event_selector,
+                        from_block,
+                        Some(current_block),
+                    ).await {
+                        Ok(events) => {
+                            for event in events {
+                                let contract_event = ContractEvent {
+                                    event_type: event_name.to_string(),
+                                    contract_address: format!("{:#x}", contract_address),
+                                    block_number: event.block_number,
+                                    transaction_hash: format!("{:#x}", event.transaction_hash),
+                                    event_data: serde_json::json!({
+                                        "keys": event.keys.iter().map(|k| format!("{:#x}", k)).collect::<Vec<_>>(),
+                                        "data": event.data.iter().map(|d| format!("{:#x}", d)).collect::<Vec<_>>(),
+                                    }),
+                                    timestamp: chrono::Utc::now().timestamp() as u64,
+                                };
+
+                                // Store the event
+                                contract_events.write().await.push(contract_event.clone());
+
+                                // Emit the event to listeners
+                                if let Err(e) = event_sender.send(BlockchainEvent::ContractEventReceived(
+                                    event_name.to_string(),
+                                    contract_event.event_data.clone(),
+                                )) {
+                                    error!("Failed to send contract event: {}", e);
+                                }
+
+                                // Process specific event types
+                                match event_name {
+                                    "JobCompleted" => {
+                                        if !event.data.is_empty() {
+                                            // First data element is typically job_id
+                                            let job_id_bytes = event.data[0].to_bytes_be();
+                                            let mut uuid_bytes = [0u8; 16];
+                                            uuid_bytes.copy_from_slice(&job_id_bytes[16..32]);
+                                            let job_id = crate::types::JobId::from(uuid::Uuid::from_bytes(uuid_bytes));
+
+                                            info!("Received JobCompleted event for job {}", job_id);
+                                            if let Err(e) = event_sender.send(BlockchainEvent::JobCompleted(
+                                                job_id,
+                                                format!("{:#x}", event.transaction_hash),
+                                            )) {
+                                                error!("Failed to send job completed event: {}", e);
+                                            }
+                                        }
+                                    }
+                                    "JobFailed" => {
+                                        if !event.data.is_empty() {
+                                            let job_id_bytes = event.data[0].to_bytes_be();
+                                            let mut uuid_bytes = [0u8; 16];
+                                            uuid_bytes.copy_from_slice(&job_id_bytes[16..32]);
+                                            let job_id = crate::types::JobId::from(uuid::Uuid::from_bytes(uuid_bytes));
+
+                                            let error_msg = if event.data.len() > 1 {
+                                                format!("Error code: {:#x}", event.data[1])
+                                            } else {
+                                                "Unknown error".to_string()
+                                            };
+
+                                            info!("Received JobFailed event for job {}: {}", job_id, error_msg);
+                                            if let Err(e) = event_sender.send(BlockchainEvent::JobFailed(
+                                                job_id,
+                                                error_msg,
+                                            )) {
+                                                error!("Failed to send job failed event: {}", e);
+                                            }
+                                        }
+                                    }
+                                    "RewardsDistributed" => {
+                                        if event.data.len() >= 2 {
+                                            let job_id_bytes = event.data[0].to_bytes_be();
+                                            let mut uuid_bytes = [0u8; 16];
+                                            uuid_bytes.copy_from_slice(&job_id_bytes[16..32]);
+                                            let job_id = crate::types::JobId::from(uuid::Uuid::from_bytes(uuid_bytes));
+
+                                            // Get amount from second data element
+                                            let amount_bytes = event.data[1].to_bytes_be();
+                                            let amount = u128::from_be_bytes(amount_bytes[16..32].try_into().unwrap_or([0; 16]));
+
+                                            info!("Rewards distributed for job {}: {} tokens", job_id, amount);
+                                            if let Err(e) = event_sender.send(BlockchainEvent::PaymentDistributed(
+                                                job_id,
+                                                amount,
+                                            )) {
+                                                error!("Failed to send payment distributed event: {}", e);
+                                            }
+                                        }
+                                    }
+                                    _ => {
+                                        debug!("Received {} event", event_name);
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            debug!("Failed to get {} events: {}", event_name, e);
+                        }
+                    }
+                }
+
+                // Update last processed block
+                *last_event_block.write().await = current_block;
             }
         });
 
@@ -555,12 +765,27 @@ impl BlockchainIntegration {
 
     /// Get blockchain statistics
     pub async fn get_blockchain_stats(&self) -> BlockchainStats {
+        // Get last block number from cached value
+        let last_block = *self.last_block_number.read().await;
+
+        // Count pending and confirmed transactions
+        let pending_count = self.pending_transactions.read().await.len() as u64;
+        let confirmed_count = self.confirmed_transactions.read().await.len() as u64;
+
+        // Determine network status from connection status
+        let is_connected = *self.connection_status.read().await;
+        let network_status = if is_connected {
+            "connected".to_string()
+        } else {
+            "disconnected".to_string()
+        };
+
         BlockchainStats {
-            total_transactions: 0, // TODO: Get from blockchain
-            pending_transactions: 0, // TODO: Get from blockchain
-            last_block_number: 0, // TODO: Get from blockchain
-            gas_price: 0, // TODO: Get from blockchain
-            network_status: "connected".to_string(), // TODO: Get from blockchain
+            total_transactions: confirmed_count + pending_count,
+            pending_transactions: pending_count,
+            last_block_number: last_block,
+            gas_price: 0, // Gas price estimation would require additional RPC call
+            network_status,
         }
     }
 
@@ -589,9 +814,16 @@ impl BlockchainIntegration {
         *self.last_block_number.read().await
     }
 
-    /// Get event receiver
-    pub async fn event_receiver(&self) -> mpsc::UnboundedReceiver<BlockchainEvent> {
-        self.event_receiver.write().await.take().unwrap()
+    /// Take the event receiver.
+    ///
+    /// This can only be called once - subsequent calls will return `None`.
+    pub async fn take_event_receiver(&self) -> Option<mpsc::UnboundedReceiver<BlockchainEvent>> {
+        self.event_receiver.write().await.take()
+    }
+
+    /// Check if the event receiver is still available.
+    pub async fn has_event_receiver(&self) -> bool {
+        self.event_receiver.read().await.is_some()
     }
 }
 

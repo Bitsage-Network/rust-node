@@ -4,14 +4,17 @@
 
 use anyhow::{Result, Context};
 use starknet::{
-    core::types::{BlockId, BlockTag, FieldElement, FunctionCall, MaybePendingBlockWithTxHashes, MaybePendingTransactionReceipt},
+    core::types::{
+        BlockId, BlockTag, FieldElement, FunctionCall, MaybePendingBlockWithTxHashes,
+        MaybePendingTransactionReceipt, EventFilter, EmittedEvent,
+    },
     providers::{jsonrpc::HttpTransport, JsonRpcClient, Provider},
     accounts::{SingleOwnerAccount, ExecutionEncoding},
     signers::{LocalWallet, SigningKey},
     accounts::Account,
 };
 use std::sync::Arc;
-use tracing::{info, debug, error};
+use tracing::{info, debug, warn, error};
 use url::Url;
 
 /// Starknet blockchain client
@@ -221,14 +224,14 @@ impl StarknetClient {
     /// Health check - verify connection and get basic info
     pub async fn health_check(&self) -> Result<HealthStatus> {
         let start_time = std::time::Instant::now();
-        
+
         // Test basic connectivity
         let block_number = self.get_block_number().await?;
         let block_timestamp = self.get_block_timestamp().await?;
         let chain_id = self.provider.chain_id().await?;
-        
+
         let response_time = start_time.elapsed();
-        
+
         Ok(HealthStatus {
             connected: true,
             block_number,
@@ -237,6 +240,196 @@ impl StarknetClient {
             response_time_ms: response_time.as_millis() as u64,
         })
     }
+
+    /// Get events from a contract within a block range
+    ///
+    /// This is used for monitoring contract activity like job submissions,
+    /// assignments, and completions.
+    pub async fn get_events(
+        &self,
+        contract_address: FieldElement,
+        keys: Option<Vec<Vec<FieldElement>>>,
+        from_block: Option<u64>,
+        to_block: Option<u64>,
+        continuation_token: Option<String>,
+        chunk_size: u64,
+    ) -> Result<EventsPage> {
+        let from_block_id = from_block
+            .map(BlockId::Number)
+            .unwrap_or(BlockId::Tag(BlockTag::Latest));
+        let to_block_id = to_block
+            .map(BlockId::Number)
+            .unwrap_or(BlockId::Tag(BlockTag::Latest));
+
+        let filter = EventFilter {
+            from_block: Some(from_block_id),
+            to_block: Some(to_block_id),
+            address: Some(contract_address),
+            keys,
+        };
+
+        let events_page = self.provider
+            .get_events(filter, continuation_token, chunk_size)
+            .await
+            .context("Failed to get events from contract")?;
+
+        Ok(EventsPage {
+            events: events_page.events,
+            continuation_token: events_page.continuation_token,
+        })
+    }
+
+    /// Get events for a specific event type from a contract
+    ///
+    /// The event_key is the selector for the event (e.g., JobSubmitted, JobAssigned)
+    pub async fn get_events_by_key(
+        &self,
+        contract_address: FieldElement,
+        event_key: FieldElement,
+        from_block: u64,
+        to_block: Option<u64>,
+    ) -> Result<Vec<EmittedEvent>> {
+        let mut all_events = Vec::new();
+        let mut continuation_token: Option<String> = None;
+
+        loop {
+            let page = self.get_events(
+                contract_address,
+                Some(vec![vec![event_key]]),
+                Some(from_block),
+                to_block,
+                continuation_token.clone(),
+                100, // Chunk size
+            ).await?;
+
+            all_events.extend(page.events);
+
+            match page.continuation_token {
+                Some(token) => continuation_token = Some(token),
+                None => break,
+            }
+        }
+
+        debug!("Retrieved {} events for key {:#x}", all_events.len(), event_key);
+        Ok(all_events)
+    }
+
+    /// Check if a transaction is finalized (confirmed on-chain)
+    pub async fn is_transaction_finalized(&self, tx_hash: FieldElement) -> Result<TransactionStatus> {
+        match self.get_transaction_receipt(tx_hash).await {
+            Ok(receipt) => {
+                match receipt {
+                    MaybePendingTransactionReceipt::Receipt(r) => {
+                        // Extract execution status from the receipt
+                        let execution_status = match &r {
+                            starknet::core::types::TransactionReceipt::Invoke(inv) => {
+                                inv.execution_result.clone()
+                            }
+                            starknet::core::types::TransactionReceipt::Declare(decl) => {
+                                decl.execution_result.clone()
+                            }
+                            starknet::core::types::TransactionReceipt::Deploy(dep) => {
+                                dep.execution_result.clone()
+                            }
+                            starknet::core::types::TransactionReceipt::DeployAccount(da) => {
+                                da.execution_result.clone()
+                            }
+                            starknet::core::types::TransactionReceipt::L1Handler(l1) => {
+                                l1.execution_result.clone()
+                            }
+                        };
+
+                        let block_number = match &r {
+                            starknet::core::types::TransactionReceipt::Invoke(inv) => inv.block_number,
+                            starknet::core::types::TransactionReceipt::Declare(decl) => decl.block_number,
+                            starknet::core::types::TransactionReceipt::Deploy(dep) => dep.block_number,
+                            starknet::core::types::TransactionReceipt::DeployAccount(da) => da.block_number,
+                            starknet::core::types::TransactionReceipt::L1Handler(l1) => l1.block_number,
+                        };
+
+                        let is_successful = matches!(
+                            execution_status,
+                            starknet::core::types::ExecutionResult::Succeeded
+                        );
+
+                        Ok(TransactionStatus {
+                            is_finalized: true,
+                            is_successful,
+                            block_number: Some(block_number),
+                            error_message: if !is_successful {
+                                Some("Transaction reverted".to_string())
+                            } else {
+                                None
+                            },
+                        })
+                    }
+                    MaybePendingTransactionReceipt::PendingReceipt(_) => {
+                        Ok(TransactionStatus {
+                            is_finalized: false,
+                            is_successful: false,
+                            block_number: None,
+                            error_message: None,
+                        })
+                    }
+                }
+            }
+            Err(e) => {
+                warn!("Failed to get transaction receipt for {:#x}: {}", tx_hash, e);
+                Ok(TransactionStatus {
+                    is_finalized: false,
+                    is_successful: false,
+                    block_number: None,
+                    error_message: Some(e.to_string()),
+                })
+            }
+        }
+    }
+
+    /// Wait for a transaction to be finalized with timeout
+    pub async fn wait_for_transaction(
+        &self,
+        tx_hash: FieldElement,
+        timeout_secs: u64,
+        poll_interval_secs: u64,
+    ) -> Result<TransactionStatus> {
+        let start = std::time::Instant::now();
+        let timeout = std::time::Duration::from_secs(timeout_secs);
+        let poll_interval = std::time::Duration::from_secs(poll_interval_secs);
+
+        loop {
+            let status = self.is_transaction_finalized(tx_hash).await?;
+
+            if status.is_finalized {
+                return Ok(status);
+            }
+
+            if start.elapsed() > timeout {
+                return Err(anyhow::anyhow!(
+                    "Transaction {:#x} not finalized after {} seconds",
+                    tx_hash,
+                    timeout_secs
+                ));
+            }
+
+            tokio::time::sleep(poll_interval).await;
+        }
+    }
+}
+
+/// Page of events returned from event query
+#[derive(Debug, Clone)]
+pub struct EventsPage {
+    pub events: Vec<EmittedEvent>,
+    pub continuation_token: Option<String>,
+}
+
+/// Transaction finalization status
+#[derive(Debug, Clone)]
+pub struct TransactionStatus {
+    pub is_finalized: bool,
+    pub is_successful: bool,
+    pub block_number: Option<u64>,
+    pub error_message: Option<String>,
 }
 
 /// Health status information

@@ -358,9 +358,9 @@ pub struct WorkerProfile {
 pub mod selectors {
     use starknet::core::types::FieldElement;
     use starknet::core::utils::get_selector_from_name;
-    
+
     lazy_static::lazy_static! {
-        // Job Manager contract selectors
+        // Job Manager contract selectors (functions)
         pub static ref SUBMIT_AI_JOB: FieldElement = get_selector_from_name("submit_ai_job").unwrap();
         pub static ref SUBMIT_PROVE_JOB: FieldElement = get_selector_from_name("submit_prove_job").unwrap();
         pub static ref ASSIGN_JOB_TO_WORKER: FieldElement = get_selector_from_name("assign_job_to_worker").unwrap();
@@ -369,13 +369,27 @@ pub mod selectors {
         pub static ref GET_JOB_DETAILS: FieldElement = get_selector_from_name("get_job_details").unwrap();
         pub static ref GET_JOB_STATE: FieldElement = get_selector_from_name("get_job_state").unwrap();
         pub static ref GET_WORKER_STATS: FieldElement = get_selector_from_name("get_worker_stats").unwrap();
-        
-        // CDC Pool contract selectors
+        pub static ref GET_PENDING_JOBS_COUNT: FieldElement = get_selector_from_name("get_pending_jobs_count").unwrap();
+        pub static ref GET_JOB_BY_INDEX: FieldElement = get_selector_from_name("get_job_by_index").unwrap();
+
+        // CDC Pool contract selectors (functions)
         pub static ref REGISTER_WORKER: FieldElement = get_selector_from_name("register_worker").unwrap();
         pub static ref STAKE_TOKENS: FieldElement = get_selector_from_name("stake_tokens").unwrap();
         pub static ref UNSTAKE_TOKENS: FieldElement = get_selector_from_name("unstake_tokens").unwrap();
         pub static ref GET_WORKER_PROFILE: FieldElement = get_selector_from_name("get_worker_profile").unwrap();
         pub static ref UPDATE_WORKER_STATUS: FieldElement = get_selector_from_name("update_worker_status").unwrap();
+
+        // Event selectors (for filtering contract events)
+        pub static ref EVENT_JOB_SUBMITTED: FieldElement = get_selector_from_name("JobSubmitted").unwrap();
+        pub static ref EVENT_JOB_ASSIGNED: FieldElement = get_selector_from_name("JobAssigned").unwrap();
+        pub static ref EVENT_JOB_COMPLETED: FieldElement = get_selector_from_name("JobCompleted").unwrap();
+        pub static ref EVENT_JOB_FAILED: FieldElement = get_selector_from_name("JobFailed").unwrap();
+        pub static ref EVENT_JOB_CANCELLED: FieldElement = get_selector_from_name("JobCancelled").unwrap();
+        pub static ref EVENT_WORKER_REGISTERED: FieldElement = get_selector_from_name("WorkerRegistered").unwrap();
+        pub static ref EVENT_WORKER_UPDATED: FieldElement = get_selector_from_name("WorkerUpdated").unwrap();
+        pub static ref EVENT_REWARDS_DISTRIBUTED: FieldElement = get_selector_from_name("RewardsDistributed").unwrap();
+        pub static ref EVENT_STAKE_DEPOSITED: FieldElement = get_selector_from_name("StakeDeposited").unwrap();
+        pub static ref EVENT_STAKE_WITHDRAWN: FieldElement = get_selector_from_name("StakeWithdrawn").unwrap();
     }
 }
 

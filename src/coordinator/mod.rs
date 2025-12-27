@@ -229,42 +229,78 @@ impl EnhancedCoordinator {
 
     /// Start event processing loop
     async fn start_event_processing(&self) -> Result<()> {
-        let mut kafka_events = self.kafka_coordinator.event_receiver().await;
-        let mut network_events = self.network_coordinator.event_receiver().await;
-        let mut job_events = self.job_processor.event_receiver().await;
-        let mut worker_events = self.worker_manager.event_receiver().await;
-        
+        // Take event receivers - these can only be taken once
+        let mut kafka_events = self.kafka_coordinator.take_event_receiver().await
+            .ok_or_else(|| anyhow::anyhow!("Kafka event receiver already taken"))?;
+        let mut network_events = self.network_coordinator.take_event_receiver().await
+            .ok_or_else(|| anyhow::anyhow!("Network event receiver already taken"))?;
+        let mut job_events = self.job_processor.take_event_receiver().await
+            .ok_or_else(|| anyhow::anyhow!("Job event receiver already taken"))?;
+        let mut worker_events = self.worker_manager.take_event_receiver().await
+            .ok_or_else(|| anyhow::anyhow!("Worker event receiver already taken"))?;
+
+        // Clone components for use in spawned task
+        let job_processor = self.job_processor.clone();
+        let worker_manager = self.worker_manager.clone();
+        let blockchain_integration = self.blockchain_integration.clone();
+        let database = self.database.clone();
+        let running = self.running.clone();
+
         tokio::spawn(async move {
             loop {
+                // Check if we should stop
+                if !*running.read().await {
+                    info!("Event processing loop stopping");
+                    break;
+                }
+
                 tokio::select! {
                     // Process Kafka events
                     Some(event) = kafka_events.recv() => {
-                        if let Err(e) = Self::handle_kafka_event(event).await {
+                        if let Err(e) = handle_kafka_event_impl(
+                            event,
+                            &job_processor,
+                            &worker_manager,
+                            &blockchain_integration,
+                            &database,
+                        ).await {
                             error!("Failed to handle Kafka event: {}", e);
                         }
                     }
-                    
+
                     // Process network events
                     Some(event) = network_events.recv() => {
-                        if let Err(e) = Self::handle_network_event(event).await {
+                        if let Err(e) = handle_network_event_impl(
+                            event,
+                            &job_processor,
+                            &worker_manager,
+                        ).await {
                             error!("Failed to handle network event: {}", e);
                         }
                     }
-                    
+
                     // Process job events
                     Some(event) = job_events.recv() => {
-                        if let Err(e) = Self::handle_job_event(event).await {
+                        if let Err(e) = handle_job_event_impl(
+                            event,
+                            &worker_manager,
+                            &blockchain_integration,
+                        ).await {
                             error!("Failed to handle job event: {}", e);
                         }
                     }
-                    
+
                     // Process worker events
                     Some(event) = worker_events.recv() => {
-                        if let Err(e) = Self::handle_worker_event(event).await {
+                        if let Err(e) = handle_worker_event_impl(
+                            event,
+                            &job_processor,
+                            &database,
+                        ).await {
                             error!("Failed to handle worker event: {}", e);
                         }
                     }
-                    
+
                     else => {
                         // No events, continue
                         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
@@ -298,22 +334,39 @@ impl EnhancedCoordinator {
     /// Start metrics collection
     async fn start_metrics_collection(&self) -> Result<()> {
         let interval = tokio::time::Duration::from_secs(60);
-        let _metrics_collector = self.metrics_collector.clone();
+        let metrics_collector = self.metrics_collector.clone();
         let kafka_coordinator = self.kafka_coordinator.clone();
-        let _network_coordinator = self.network_coordinator.clone();
-        let _job_processor = self.job_processor.clone();
-        let _worker_manager = self.worker_manager.clone();
+        let running = self.running.clone();
+        let node_id = self.node_id;
+
+        // Get Send+Sync handles to the stats - these are Arc<RwLock<T>> which ARE Send+Sync
+        // This is the key fix: instead of capturing the whole components (which contain
+        // non-Send fields like mpsc::UnboundedReceiver), we only capture the stats Arcs
+        let job_stats_handle = self.job_processor.stats_handle();
+        let worker_stats_handle = self.worker_manager.stats_handle();
 
         tokio::spawn(async move {
             let mut interval_timer = tokio::time::interval(interval);
-            
+
             loop {
                 interval_timer.tick().await;
-                
-                // Collect metrics from all components - with Send trait fixes
-                let _kafka_stats = kafka_coordinator.get_message_stats().await;
-                let _network_stats = NetworkCoordinatorStats {
-                    total_peers: 0,
+
+                // Check if we should stop
+                if !*running.read().await {
+                    info!("Metrics collection loop stopping");
+                    break;
+                }
+
+                // Collect metrics from all components using the Send+Sync handles
+                let kafka_stats = kafka_coordinator.get_kafka_stats().await;
+
+                // Now we can actually read the stats from the handles!
+                let job_stats = job_stats_handle.read().await.clone();
+                let worker_stats = worker_stats_handle.read().await.clone();
+
+                // Create network stats (network coordinator stats would need similar handle treatment)
+                let network_stats = NetworkCoordinatorStats {
+                    total_peers: 0, // TODO: Add network stats handle
                     active_peers: 0,
                     messages_sent: 0,
                     messages_received: 0,
@@ -324,128 +377,32 @@ impl EnhancedCoordinator {
                     jobs_completed: 0,
                     average_reputation: 0.0,
                 };
-                // TODO: Fix Send trait issues with these components in tokio::spawn
-                // let job_stats = job_processor.get_job_stats().await;
-                // let worker_stats = worker_manager.get_worker_stats().await;
-                let job_stats: Option<JobStats> = None;
-                let worker_stats: Option<WorkerStats> = None;
-                
-                // Update metrics collector
-                let _kafka_stats = KafkaStats {
-                    messages_sent: 0,
-                    messages_received: 0,
-                    messages_failed: 0,
-                    dead_letter_queue_size: 0,
-                    job_queue_size: 0,
-                    consumer_lag: 0,
-                    producer_queue_size: 0,
-                    connection_status: "Connected".to_string(),
-                    last_message_timestamp: 0,
-                    average_message_size_bytes: 0,
-                    error_rate: 0.0,
-                    throughput_messages_per_sec: 0.0,
-                };
-                let _network_stats = NetworkCoordinatorStats {
-                    total_peers: 0,
-                    active_peers: 0,
-                    jobs_announced: 0,
-                    jobs_bid_on: 0,
-                    jobs_assigned: 0,
-                    jobs_completed: 0,
-                    average_reputation: 0.0,
-                    network_latency_ms: 0,
-                    messages_sent: 0,
-                    messages_received: 0,
-                };
-                let _job_stats = JobStats {
-                    total_jobs: 0,
-                    active_jobs: 0,
-                    completed_jobs: 0,
-                    failed_jobs: 0,
-                    cancelled_jobs: 0,
-                    average_completion_time_secs: 0,
-                    jobs_per_minute: 0.0,
-                    success_rate: 0.0,
-                };
-                let _worker_stats = WorkerStats {
-                    total_workers: 0,
-                    active_workers: 0,
-                    online_workers: 0,
-                    busy_workers: 0,
-                    offline_workers: 0,
-                    average_reputation: 0.0,
-                    average_load: 0.0,
-                    total_compute_capacity: 0,
-                    available_compute_capacity: 0,
-                };
-                
-                // TODO: Fix Send trait issue with metrics_collector in tokio::spawn
-                debug!("Metrics collection placeholder (would update metrics here)");
+
+                // Update metrics collector with actual data
+                metrics_collector.update_component_metrics(
+                    Some(kafka_stats),
+                    Some(network_stats),
+                    Some(job_stats.clone()),
+                    Some(worker_stats.clone()),
+                ).await;
+
+                // Log metrics summary
+                debug!(
+                    "Metrics collected - Jobs: {}/{} active, Workers: {}/{} active, Health: {:.1}%",
+                    job_stats.active_jobs,
+                    job_stats.total_jobs,
+                    worker_stats.active_workers,
+                    worker_stats.total_workers,
+                    metrics_collector.get_metrics().await
+                        .map(|m| m.system_health_score * 100.0)
+                        .unwrap_or(0.0)
+                );
             }
         });
 
         Ok(())
     }
 
-    /// Handle Kafka events
-    async fn handle_kafka_event(event: KafkaEvent) -> Result<()> {
-        match event {
-            KafkaEvent::JobReceived(job_message) => {
-                info!("Received job from Kafka: {}", job_message.job_id);
-                // TODO: Process job message
-            }
-            KafkaEvent::WorkerRegistered(worker_id, _capabilities) => {
-                info!("Worker registered via Kafka: {}", worker_id);
-                // TODO: Register worker
-            }
-            KafkaEvent::WorkerHeartbeat(worker_id, load) => {
-                debug!("Worker heartbeat via Kafka: {} (load: {})", worker_id, load);
-                // TODO: Update worker load
-            }
-            KafkaEvent::WorkerDeparted(worker_id, reason) => {
-                warn!("Worker departed via Kafka: {} (reason: {})", worker_id, reason);
-                // TODO: Handle worker departure
-            }
-            KafkaEvent::JobAssigned(job_id, worker_id) => {
-                info!("Job assigned via Kafka: {} -> {}", job_id, worker_id);
-                // TODO: Update job assignment
-            }
-            KafkaEvent::JobCompleted(job_id, _result) => {
-                info!("Job completed via Kafka: {}", job_id);
-                // TODO: Process job completion
-            }
-            KafkaEvent::JobFailed(job_id, error) => {
-                error!("Job failed via Kafka: {} (error: {})", job_id, error);
-                // TODO: Handle job failure
-            }
-            KafkaEvent::HealthMetricsUpdated(worker_id, _metrics) => {
-                debug!("Health metrics updated via Kafka: {}", worker_id);
-                // TODO: Update health metrics
-            }
-        }
-        Ok(())
-    }
-
-    /// Handle network events
-    async fn handle_network_event(event: NetworkEvent) -> Result<()> {
-        // TODO: Implement network event handling
-        debug!("Network event: {:?}", event);
-        Ok(())
-    }
-
-    /// Handle job events
-    async fn handle_job_event(event: crate::coordinator::job_processor::JobEvent) -> Result<()> {
-        // TODO: Implement job event handling
-        debug!("Job event: {:?}", event);
-        Ok(())
-    }
-
-    /// Handle worker events
-    async fn handle_worker_event(event: crate::coordinator::worker_manager::WorkerEvent) -> Result<()> {
-        // TODO: Implement worker event handling
-        debug!("Worker event: {:?}", event);
-        Ok(())
-    }
 
     /// Get coordinator status
     pub async fn get_status(&self) -> CoordinatorStatus {
@@ -512,4 +469,250 @@ impl std::fmt::Display for CoordinatorStatus {
         write!(f, "  Active Workers: {}", self.active_workers)?;
         Ok(())
     }
+}
+
+// =============================================================================
+// Event Handler Implementations
+// =============================================================================
+
+use crate::node::coordinator::JobResult as CoordinatorJobResult;
+
+/// Handle Kafka events with full component access
+async fn handle_kafka_event_impl(
+    event: KafkaEvent,
+    job_processor: &Arc<JobProcessor>,
+    worker_manager: &Arc<WorkerManager>,
+    blockchain_integration: &Arc<BlockchainIntegration>,
+    _database: &Arc<Database>,
+) -> Result<()> {
+    match event {
+        KafkaEvent::JobReceived(job_message) => {
+            info!("Received job from Kafka: {}", job_message.job_id);
+
+            // Submit job to job processor queue
+            let job_id = job_processor.submit_job(job_message.job_request.clone()).await?;
+
+            // Register job on blockchain
+            if let Err(e) = blockchain_integration.register_job(
+                job_id.clone(),
+                &job_message.job_request,
+            ).await {
+                warn!("Failed to register job on blockchain: {} (continuing with off-chain processing)", e);
+            }
+
+            info!("Job {} queued for processing", job_id);
+        }
+
+        KafkaEvent::WorkerRegistered(worker_id, capabilities) => {
+            info!("Worker {} registered via Kafka with capabilities: {:?}", worker_id, capabilities);
+            // Worker registration is handled by the worker_manager's internal mechanisms
+            // The capabilities are logged for monitoring purposes
+        }
+
+        KafkaEvent::WorkerHeartbeat(worker_id, load) => {
+            debug!("Worker heartbeat via Kafka: {} (load: {})", worker_id, load);
+
+            // Update worker load in worker manager
+            if let Err(e) = worker_manager.update_worker_load(worker_id.clone(), load as f64).await {
+                debug!("Worker {} not found in manager, may need registration first: {}", worker_id, e);
+            }
+        }
+
+        KafkaEvent::WorkerDeparted(worker_id, reason) => {
+            warn!("Worker departed via Kafka: {} (reason: {})", worker_id, reason);
+
+            // Unregister the worker
+            if let Err(e) = worker_manager.unregister_worker(worker_id.clone()).await {
+                warn!("Failed to unregister departed worker: {}", e);
+            }
+        }
+
+        KafkaEvent::JobAssigned(job_id, worker_id) => {
+            info!("Job assigned via Kafka: {} -> {}", job_id, worker_id);
+
+            // Update job assignment in processor
+            if let Err(e) = job_processor.assign_job_to_worker(job_id.clone(), worker_id.clone()).await {
+                warn!("Failed to update job assignment: {}", e);
+            }
+
+            // Record assignment on blockchain
+            if let Err(e) = blockchain_integration.assign_job_to_worker(job_id, worker_id).await {
+                warn!("Failed to record job assignment on blockchain: {}", e);
+            }
+        }
+
+        KafkaEvent::JobCompleted(job_id, result) => {
+            info!("Job completed via Kafka: {}", job_id);
+
+            // Convert to CoordinatorJobResult
+            let coordinator_result = CoordinatorJobResult {
+                job_id: job_id.clone(),
+                status: crate::node::coordinator::JobStatus::Completed,
+                output_files: result.output_files.clone(),
+                execution_time: result.execution_time,
+                total_cost: result.total_cost,
+                completed_tasks: 1,
+                total_tasks: 1,
+                error_message: None,
+            };
+
+            // Complete job in processor
+            if let Err(e) = job_processor.complete_job(job_id.clone(), coordinator_result.clone()).await {
+                warn!("Failed to complete job: {}", e);
+            }
+
+            // Submit result to blockchain
+            if let Err(e) = blockchain_integration.complete_job(job_id, &coordinator_result).await {
+                warn!("Failed to submit job result to blockchain: {}", e);
+            }
+        }
+
+        KafkaEvent::JobFailed(job_id, error) => {
+            error!("Job failed via Kafka: {} (error: {})", job_id, error);
+
+            // Fail job in processor
+            if let Err(e) = job_processor.fail_job(job_id, error).await {
+                warn!("Failed to mark job as failed: {}", e);
+            }
+        }
+
+        KafkaEvent::HealthMetricsUpdated(worker_id, metrics) => {
+            debug!("Health metrics updated via Kafka for worker {}: response_time={}ms, cpu={}%, mem={}%",
+                worker_id,
+                metrics.response_time_ms,
+                metrics.cpu_usage_percent,
+                metrics.memory_usage_percent
+            );
+
+            // Check if worker is overloaded
+            if metrics.cpu_usage_percent > 95.0 || metrics.memory_usage_percent > 95.0 {
+                warn!("Worker {} is overloaded (CPU: {}%, Memory: {}%)",
+                    worker_id, metrics.cpu_usage_percent, metrics.memory_usage_percent);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Handle network events with component access
+async fn handle_network_event_impl(
+    event: NetworkEvent,
+    _job_processor: &Arc<JobProcessor>,
+    _worker_manager: &Arc<WorkerManager>,
+) -> Result<()> {
+    match event {
+        NetworkEvent::PeerConnected(peer_id) => {
+            info!("Peer connected: {}", peer_id);
+        }
+
+        NetworkEvent::PeerDisconnected(peer_id) => {
+            warn!("Peer disconnected: {}", peer_id);
+        }
+
+        NetworkEvent::MessageReceived { peer_id, message } => {
+            debug!("Message received from peer {}: {:?}", peer_id, message);
+        }
+
+        NetworkEvent::PeerDiscovered { peer_id, addresses } => {
+            info!("Peer discovered: {} at {:?}", peer_id, addresses);
+        }
+
+        NetworkEvent::NetworkError(error) => {
+            error!("Network error: {}", error);
+        }
+    }
+    Ok(())
+}
+
+/// Handle job processor events
+async fn handle_job_event_impl(
+    event: crate::coordinator::job_processor::JobEvent,
+    _worker_manager: &Arc<WorkerManager>,
+    _blockchain_integration: &Arc<BlockchainIntegration>,
+) -> Result<()> {
+    use crate::coordinator::job_processor::JobEvent;
+
+    match event {
+        JobEvent::JobSubmitted(job_id, _request) => {
+            debug!("Job {} submitted", job_id);
+        }
+
+        JobEvent::JobStarted(job_id, worker_id) => {
+            info!("Job {} started on worker {}", job_id, worker_id);
+        }
+
+        JobEvent::JobCompleted(job_id, _result) => {
+            info!("Job {} completed", job_id);
+        }
+
+        JobEvent::JobFailed(job_id, error) => {
+            error!("Job {} failed: {}", job_id, error);
+        }
+
+        JobEvent::JobCancelled(job_id) => {
+            warn!("Job {} cancelled", job_id);
+        }
+
+        JobEvent::JobTimeout(job_id) => {
+            error!("Job {} timed out", job_id);
+        }
+
+        JobEvent::JobAssigned(job_id, worker_id) => {
+            info!("Job {} assigned to worker {}", job_id, worker_id);
+        }
+
+        JobEvent::JobUnassigned(job_id, worker_id) => {
+            info!("Job {} unassigned from worker {}", job_id, worker_id);
+        }
+    }
+    Ok(())
+}
+
+/// Handle worker manager events
+async fn handle_worker_event_impl(
+    event: crate::coordinator::worker_manager::WorkerEvent,
+    _job_processor: &Arc<JobProcessor>,
+    _database: &Arc<Database>,
+) -> Result<()> {
+    use crate::coordinator::worker_manager::WorkerEvent;
+
+    match event {
+        WorkerEvent::WorkerRegistered(worker_id, _info) => {
+            info!("Worker {} registered", worker_id);
+        }
+
+        WorkerEvent::WorkerUnregistered(worker_id) => {
+            info!("Worker {} unregistered", worker_id);
+        }
+
+        WorkerEvent::WorkerHeartbeat(worker_id, _health) => {
+            debug!("Worker {} heartbeat received", worker_id);
+        }
+
+        WorkerEvent::WorkerHealthChanged(worker_id, health) => {
+            debug!("Worker {} health changed: cpu={}%, mem={}%",
+                worker_id, health.cpu_usage, health.memory_usage);
+        }
+
+        WorkerEvent::WorkerCapabilitiesUpdated(worker_id, _capabilities) => {
+            info!("Worker {} capabilities updated", worker_id);
+        }
+
+        WorkerEvent::WorkerLoadUpdated(worker_id, load) => {
+            debug!("Worker {} load updated: {}", worker_id, load);
+        }
+
+        WorkerEvent::WorkerReputationUpdated(worker_id, reputation) => {
+            info!("Worker {} reputation updated: {}", worker_id, reputation);
+        }
+
+        WorkerEvent::WorkerTimeout(worker_id) => {
+            warn!("Worker {} timed out", worker_id);
+        }
+
+        WorkerEvent::WorkerFailed(worker_id, error) => {
+            error!("Worker {} failed: {}", worker_id, error);
+        }
+    }
+    Ok(())
 } 
