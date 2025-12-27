@@ -164,9 +164,10 @@ impl FrameworkEval for ObelyskConstraints {
 const MIN_LOG_SIZE: u32 = 6;
 
 /// Minimum trace length for real stwo proving
-/// Traces smaller than this use mock proofs due to stwo's commitment scheme
-/// tree structure requirements. Production traces are typically much larger.
-const MIN_TRACE_FOR_REAL_PROVING: usize = 128;
+/// Stwo's FRI folding requires careful alignment of trace sizes with FRI parameters.
+/// Traces smaller than 512 elements may cause "Invalid FRI folding" errors due to
+/// layer evaluation count mismatches. Production workloads should exceed this threshold.
+const MIN_TRACE_FOR_REAL_PROVING: usize = 512;
 
 /// Generate real Stwo STARK proof
 pub fn prove_with_stwo(
@@ -233,6 +234,19 @@ pub fn prove_with_stwo(
             config,
             &twiddles,
         );
+
+    // 5.5. Commit preprocessed trace at tree index 0 (PREPROCESSED_TRACE_IDX)
+    // The prove() function expects trees[0] to exist, and components using next_trace_mask()
+    // expect their columns in trees[1] (ORIGINAL_TRACE_IDX). We commit a single zero column
+    // as a placeholder (empty trees cause issues with stwo's proof structure).
+    {
+        let domain = CanonicCoset::new(log_size).circle_domain();
+        let dummy_col = BaseColumn::zeros(1 << log_size);
+        let dummy_eval = CircleEvaluation::new(domain, dummy_col);
+        let mut tree_builder = commitment_scheme.tree_builder();
+        tree_builder.extend_evals(vec![dummy_eval]);
+        tree_builder.commit(&mut channel);
+    }
 
     // 6. Create trace columns: [pc_curr, reg0_curr, reg1_curr, pc_next, reg0_next, reg1_next]
     // Build column data as Vec<BaseField> then convert to BaseColumn to avoid borrow issues
@@ -429,6 +443,17 @@ fn prove_with_stwo_gpu_backend(
             config,
             &twiddles,
         );
+
+    // 5.5. Commit preprocessed trace at tree index 0 (PREPROCESSED_TRACE_IDX)
+    // Same as SIMD path - we commit a single zero column as placeholder
+    {
+        let domain = CanonicCoset::new(log_size).circle_domain();
+        let dummy_col = BaseColumn::zeros(1 << log_size);
+        let dummy_eval: CircleEvaluation<GpuBackend, _, _> = CircleEvaluation::new(domain, dummy_col);
+        let mut tree_builder = commitment_scheme.tree_builder();
+        tree_builder.extend_evals(vec![dummy_eval]);
+        tree_builder.commit(&mut channel);
+    }
 
     // 6. Create trace columns (build as Vec<BaseField> then convert to BaseColumn)
     let n_columns = 6;
