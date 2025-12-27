@@ -11,8 +11,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
 use std::sync::Arc;
-use tokio::sync::RwLock;
-use tokio_stream::{Stream, StreamExt};
+use tokio_stream::Stream;
 use tokio::time::{Duration, interval};
 use tracing::{info, error};
 
@@ -20,7 +19,7 @@ use std::str::FromStr;
 
 use crate::types::JobId;
 use crate::coordinator::job_processor::{JobProcessor, JobInfo};
-use crate::node::coordinator::{JobResult, JobStatus};
+use crate::node::coordinator::JobStatus;
 
 /// API state
 #[derive(Clone)]

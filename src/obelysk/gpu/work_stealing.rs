@@ -40,8 +40,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crossbeam::deque::{Injector, Stealer, Worker as WorkerDeque};
-use parking_lot::{Mutex, RwLock};
-use tracing::{debug, info, warn};
+use parking_lot::Mutex;
+use tracing::{debug, info};
 
 use crate::obelysk::ExecutionTrace;
 

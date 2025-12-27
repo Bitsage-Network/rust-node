@@ -5,7 +5,7 @@
 use std::sync::Arc;
 use std::net::SocketAddr;
 use clap::Parser;
-use tracing::{info, error};
+use tracing::info;
 use anyhow::Result;
 use axum::{Router, routing::get};
 use tower_http::cors::CorsLayer;
@@ -14,7 +14,7 @@ use tokio::signal;
 use bitsage_node::{
     coordinator::{
         job_processor::JobProcessor,
-        config::{CoordinatorConfig, JobProcessorConfig, load_config},
+        config::load_config,
     },
     api::{
         create_monitoring_router, MonitoringApiState,

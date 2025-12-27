@@ -12,8 +12,8 @@
 // validation into a succinct ZK proof that can be verified cheaply on-chain.
 
 use super::field::M31;
-use super::circuit::{Circuit, Constraint, LookupTable};
-use super::tee_types::{TEEQuote, TEEType, Certificate, EnclaveWhitelist};
+use super::circuit::Circuit;
+use super::tee_types::{TEEQuote, Certificate, EnclaveWhitelist};
 use super::vm::{ObelyskVM, OpCode, Instruction, ExecutionTrace};
 use super::ecdsa::{ECDSAVerifier, ECDSASignature, P256Point, ECDSACircuitConstraints};
 use serde::{Serialize, Deserialize};

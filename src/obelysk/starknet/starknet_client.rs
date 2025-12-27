@@ -5,7 +5,7 @@
 
 use super::proof_serializer::{CairoSerializedProof, Felt252};
 use super::proof_compression::{
-    ProofCompressor, CompressedProof, CompressionLevel, CompressionStats,
+    ProofCompressor, CompressionLevel, CompressionStats,
     OnChainCompressedProof,
 };
 use serde::{Deserialize, Serialize};

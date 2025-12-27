@@ -12,7 +12,7 @@
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, VecDeque, BinaryHeap};
+use std::collections::{HashMap, BinaryHeap};
 use std::sync::Arc;
 use std::cmp::Ordering;
 use tokio::sync::{mpsc, RwLock, Mutex};
@@ -25,7 +25,6 @@ use crate::storage::Database;
 use crate::blockchain::contracts::JobManagerContract;
 use crate::coordinator::config::JobProcessorConfig;
 use crate::coordinator::worker_manager::WorkerManager;
-use crate::blockchain::client::StarknetClient;
 
 /// Job processor events
 #[derive(Debug, Clone)]

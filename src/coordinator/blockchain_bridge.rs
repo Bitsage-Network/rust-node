@@ -6,15 +6,15 @@
 
 use anyhow::{Result, anyhow, Context};
 use starknet::core::types::FieldElement;
-use tracing::{info, warn, error, debug};
+use tracing::{info, warn, debug};
 use std::sync::Arc;
 use sha2::{Sha256, Digest};
 
 use crate::blockchain::client::StarknetClient;
 use crate::blockchain::contracts::JobManagerContract;
-use crate::blockchain::types::{JobSpec, JobType, VerificationMethod, ModelId, JobResult as BlockchainJobResult, selectors};
+use crate::blockchain::types::selectors;
 use crate::types::{JobId, WorkerId};
-use super::production_coordinator::{JobRequest, JobRequirements};
+use super::production_coordinator::JobRequest;
 
 /// Account credentials for signing transactions
 #[derive(Clone)]

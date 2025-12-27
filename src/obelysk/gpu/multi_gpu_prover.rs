@@ -41,13 +41,12 @@ use std::time::{Duration, Instant};
 use tracing::{info, warn, debug};
 
 use crate::obelysk::{
-    ExecutionTrace, StarkProof, M31,
-    prover::{ProverError, ProofMetadata, FRILayer, Opening},
+    ExecutionTrace, StarkProof,
 };
 
 use super::work_stealing::{
-    WorkStealingScheduler, WorkStealingConfig, WorkItem, WorkResult,
-    GpuWorker, SchedulerStats,
+    WorkStealingScheduler, WorkStealingConfig, WorkResult,
+    SchedulerStats,
 };
 
 /// Configuration for multi-GPU prover

@@ -28,7 +28,7 @@
 //! └─────────────────────────────────────────────────────────────┘
 //! ```
 
-use anyhow::{Result, anyhow, Context};
+use anyhow::{Result, anyhow};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};

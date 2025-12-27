@@ -2,19 +2,13 @@
 //!
 //! Lightweight coordinator for testing and development
 
-use std::sync::Arc;
 use std::net::SocketAddr;
 use clap::Parser;
-use tracing::{info, error};
+use tracing::info;
 use anyhow::Result;
 use axum::{Router, routing::get, Json};
 use tower_http::cors::CorsLayer;
 use tokio::signal;
-
-use bitsage_node::api::{
-    create_monitoring_router, MonitoringApiState,
-    create_submission_router, SubmissionApiState,
-};
 
 #[derive(Parser)]
 #[command(name = "bitsage-simple-coordinator")]

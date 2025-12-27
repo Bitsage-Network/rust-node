@@ -15,9 +15,9 @@
 use anyhow::Result;
 use std::collections::{HashMap, VecDeque};
 use std::time::{Instant, Duration};
-use tracing::{info, debug};
+use tracing::info;
 
-use super::{GpuBackend, GpuBackendType, GpuBuffer};
+use super::{GpuBackendType, GpuBuffer};
 use crate::obelysk::field::M31;
 
 /// Threshold below which GPU overhead isn't worth it

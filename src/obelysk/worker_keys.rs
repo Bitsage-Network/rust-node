@@ -16,11 +16,11 @@ use serde::{Serialize, Deserialize};
 use std::path::PathBuf;
 use std::fs;
 use sha3::{Digest, Keccak256};
-use tracing::{info, debug, warn};
+use tracing::{info, debug};
 
 use super::elgamal::{
     Felt252, ECPoint, KeyPair, ElGamalCiphertext,
-    decrypt_point, derive_public_key, hash_felts,
+    decrypt_point, hash_felts,
 };
 
 // =============================================================================

@@ -13,7 +13,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{info, error};
 
-use crate::types::JobId;
 use crate::coordinator::job_processor::JobProcessor;
 use crate::node::coordinator::{JobRequest, JobType as CoordinatorJobType};
 

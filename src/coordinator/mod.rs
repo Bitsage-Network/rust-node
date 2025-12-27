@@ -21,10 +21,10 @@ use tracing::{info, warn, error, debug};
 
 use crate::blockchain::{client::StarknetClient, contracts::JobManagerContract};
 use crate::coordinator::{
-    kafka::{KafkaCoordinator, KafkaStats},
+    kafka::KafkaCoordinator,
     network_coordinator::{NetworkCoordinatorService, NetworkCoordinatorStats},
-    job_processor::{JobProcessor, JobStats},
-    worker_manager::{WorkerManager, WorkerStats},
+    job_processor::JobProcessor,
+    worker_manager::WorkerManager,
     blockchain_integration::BlockchainIntegration,
     metrics::MetricsCollector,
     config::CoordinatorConfig,

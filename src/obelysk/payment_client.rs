@@ -15,7 +15,6 @@ use starknet::{
 use std::sync::Arc;
 use tracing::{info, debug};
 
-use super::privacy_client::{felt252_to_field_element, field_element_to_felt252};
 
 // =============================================================================
 // Contract Types (mirroring Cairo structs)

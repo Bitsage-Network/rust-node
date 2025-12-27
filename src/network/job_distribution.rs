@@ -33,7 +33,7 @@ use crate::network::health_reputation::{
 };
 use crate::network::encrypted_jobs::{
     EncryptedJobManager, EncryptedJobConfig, EncryptedJobAnnouncement,
-    EncryptedWorkerBid, EncryptedJobResult,
+    EncryptedJobResult,
 };
 use crate::types::{JobId, WorkerId};
 

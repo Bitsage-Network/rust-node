@@ -5,7 +5,6 @@
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use std::time::Duration;
 
 /// Supported cloud provider types
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

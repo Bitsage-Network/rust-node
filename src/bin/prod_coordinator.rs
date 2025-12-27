@@ -11,9 +11,9 @@ use axum::{
     Json,
     http::StatusCode,
 };
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use tower_http::cors::CorsLayer;
-use tracing::{info, error};
+use tracing::info;
 use clap::Parser;
 
 use bitsage_node::coordinator::production_coordinator::{
@@ -21,8 +21,6 @@ use bitsage_node::coordinator::production_coordinator::{
     WorkerCapabilities,
     WorkerHeartbeat,
     JobRequest,
-    JobRequirements,
-    GpuSpecification,
 };
 
 #[derive(Parser)]

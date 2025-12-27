@@ -24,7 +24,7 @@ use crate::coordinator::{
     network_coordinator::{NetworkCoordinatorService, NetworkCoordinatorStats},
     job_processor::{JobProcessor, JobStats},
     worker_manager::{WorkerManager, WorkerStats},
-    blockchain_integration::{BlockchainIntegration, BlockchainMetrics, BlockchainStats},
+    blockchain_integration::{BlockchainIntegration, BlockchainMetrics},
 };
 
 /// System resource metrics collected from the operating system

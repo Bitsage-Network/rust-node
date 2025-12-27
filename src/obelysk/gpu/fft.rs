@@ -14,8 +14,7 @@
 // - Large FFTs (>16K): GPU provides significant speedup
 // - Memory transfer is the main bottleneck for moderate sizes
 
-use anyhow::{Result, Context, anyhow};
-use std::collections::HashMap;
+use anyhow::{Result, anyhow};
 use tracing::info;
 
 #[cfg(feature = "cuda")]

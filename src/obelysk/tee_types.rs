@@ -47,9 +47,9 @@ impl TEEType {
     /// Get expected signature algorithm
     pub fn signature_algorithm(&self) -> SignatureAlgorithm {
         match self {
-            TEEType::IntelTDX => SignatureAlgorithm::ECDSA_P256,
-            TEEType::IntelSGX => SignatureAlgorithm::ECDSA_P256,
-            TEEType::AMDSEVSMP => SignatureAlgorithm::ECDSA_P384,
+            TEEType::IntelTDX => SignatureAlgorithm::EcdsaP256,
+            TEEType::IntelSGX => SignatureAlgorithm::EcdsaP256,
+            TEEType::AMDSEVSMP => SignatureAlgorithm::EcdsaP384,
         }
     }
 }
@@ -57,8 +57,8 @@ impl TEEType {
 /// Signature algorithms used by TEEs
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SignatureAlgorithm {
-    ECDSA_P256,  // Intel
-    ECDSA_P384,  // AMD
+    EcdsaP256,  // Intel
+    EcdsaP384,  // AMD
 }
 
 /// TEE Attestation Quote
@@ -303,10 +303,10 @@ mod tests {
     #[test]
     fn test_tee_type_detection() {
         let tdx = TEEType::IntelTDX;
-        assert_eq!(tdx.signature_algorithm(), SignatureAlgorithm::ECDSA_P256);
+        assert_eq!(tdx.signature_algorithm(), SignatureAlgorithm::EcdsaP256);
         
         let sev = TEEType::AMDSEVSMP;
-        assert_eq!(sev.signature_algorithm(), SignatureAlgorithm::ECDSA_P384);
+        assert_eq!(sev.signature_algorithm(), SignatureAlgorithm::EcdsaP384);
     }
     
     #[test]

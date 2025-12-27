@@ -8,10 +8,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
-use tokio::time::{sleep, Duration};
+use tokio::time::Duration;
 use tracing::{info, error, debug};
 
-use crate::types::{WorkerId, JobId};
+use crate::types::WorkerId;
 use crate::network::p2p::{NetworkClient, P2PMessage};
 use crate::network::health_reputation::{HealthReputationSystem, WorkerHealth, WorkerReputation};
 

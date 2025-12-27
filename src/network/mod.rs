@@ -37,7 +37,7 @@ pub use dht::{
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock, Mutex};
 use anyhow::Result;
-use tracing::{info, warn};
+use tracing::info;
 
 use crate::blockchain::{client::StarknetClient, contracts::JobManagerContract};
 use crate::types::NodeId;

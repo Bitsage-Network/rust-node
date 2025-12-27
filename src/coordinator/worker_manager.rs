@@ -11,12 +11,11 @@ use tokio::sync::{mpsc, RwLock, Mutex};
 use tokio::time::{Duration, Instant};
 use tracing::{info, debug, error};
 
-use crate::types::{WorkerId, NodeId, TeeType};
+use crate::types::{WorkerId, TeeType};
 use crate::node::coordinator::{WorkerInfo, WorkerCapabilities, ComputeRequirements};
 use crate::storage::Database;
 use crate::network::NetworkCoordinator;
 use crate::coordinator::config::WorkerManagerConfig;
-use crate::blockchain::{StarknetClient, JobManagerContract};
 
 /// Worker manager events
 #[derive(Debug, Clone)]

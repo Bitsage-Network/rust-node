@@ -3,10 +3,10 @@
 
 use super::field::M31;
 use super::vm::{ObelyskVM, OpCode, Instruction};
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use datafusion::prelude::*;
 use datafusion::arrow::array::{Int32Array, Float64Array, StringArray};
-use datafusion::arrow::datatypes::{DataType, Field, Schema};
+use datafusion::arrow::datatypes::{DataType, Schema};
 use datafusion::arrow::record_batch::RecordBatch;
 use std::sync::Arc;
 

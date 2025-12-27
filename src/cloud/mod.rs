@@ -9,7 +9,6 @@ pub mod gpu_manager;
 pub use providers::{CloudProvider, ProviderType, GpuInstance, GpuSpec};
 pub use gpu_manager::CloudGpuManager;
 
-use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 /// Cloud provider configuration

@@ -15,7 +15,7 @@ use anyhow::{Result, anyhow};
 use tracing::{info, debug};
 use starknet::core::types::FieldElement;
 
-use crate::types::{JobId, WorkerId, TaskId, TeeType};
+use crate::types::{JobId, WorkerId, TaskId};
 pub use crate::types::WorkerCapabilities; // Re-export for backward compatibility
 use crate::blockchain::contracts::JobManagerContract;
 use crate::storage::Database;

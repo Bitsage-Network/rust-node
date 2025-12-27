@@ -32,7 +32,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, RwLock, Mutex};
-use tracing::{info, debug, warn};
+use tracing::{info, debug};
 
 use crate::types::{JobId, WorkerId};
 

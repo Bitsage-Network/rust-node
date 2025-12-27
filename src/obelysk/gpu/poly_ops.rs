@@ -15,7 +15,7 @@
 // - Benchmark GPU vs CPU with the same interface
 
 use anyhow::Result;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Mutex, OnceLock};
 
 use super::fft::{GpuFft, create_gpu_fft};
 use crate::obelysk::field::M31;

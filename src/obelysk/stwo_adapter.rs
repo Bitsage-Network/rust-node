@@ -17,10 +17,9 @@ use stwo_prover::core::poly::circle::CanonicCoset;
 use stwo_prover::prover::backend::simd::SimdBackend;
 use stwo_prover::prover::backend::simd::column::BaseColumn;
 use stwo_prover::prover::backend::gpu::GpuBackend;
-use stwo_prover::prover::backend::{Backend, Column};
+use stwo_prover::prover::backend::Column;
 use stwo_prover::prover::poly::circle::{CircleEvaluation, PolyOps};
 use stwo_prover::prover::{prove, CommitmentSchemeProver};
-use stwo_prover::core::fields::Field;
 
 // Constraint framework
 use stwo_constraint_framework::{
@@ -28,11 +27,10 @@ use stwo_constraint_framework::{
 };
 
 use std::time::Instant;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use std::collections::HashMap;
 
 // GPU acceleration imports
-use super::gpu::{GpuAcceleratedProver, create_gpu_prover};
 
 /// Performance optimization: Column buffer pool
 /// Reuses allocated columns to reduce memory churn in hot paths
@@ -193,46 +191,42 @@ pub fn prove_with_stwo(
         );
     
     // 5. Create trace columns: [pc_curr, reg0_curr, reg1_curr, pc_next, reg0_next, reg1_next]
-    // Create fresh columns (pool disabled due to size caching issues)
+    // Build column data as Vec<BaseField> then convert to BaseColumn to avoid borrow issues
     let n_columns = 6;
-    let mut columns: Vec<BaseColumn> = (0..n_columns)
-        .map(|_| BaseColumn::zeros(size))
+    let mut col_data: Vec<Vec<StwoM31>> = (0..n_columns)
+        .map(|_| vec![StwoM31::from_u32_unchecked(0); size])
         .collect();
-    
-    // 6. Fill trace data using slices for proper SIMD access
-    {
-        // Get mutable slices for all columns
-        let col0 = columns[0].as_mut_slice();
-        let col1 = columns[1].as_mut_slice();
-        let col2 = columns[2].as_mut_slice();
-        let col3 = columns[3].as_mut_slice();
-        let col4 = columns[4].as_mut_slice();
-        let col5 = columns[5].as_mut_slice();
 
-        for (row_idx, step) in trace.steps.iter().enumerate() {
-            if row_idx >= size {
-                break;
-            }
+    // 6. Fill trace data
+    for (row_idx, step) in trace.steps.iter().enumerate() {
+        if row_idx >= size {
+            break;
+        }
 
-            // Current state
-            col0[row_idx] = m31_to_stwo(M31::from_u32(step.pc as u32));
-            col1[row_idx] = m31_to_stwo(step.registers_before[0]);
-            col2[row_idx] = m31_to_stwo(step.registers_before[1]);
+        // Current state
+        col_data[0][row_idx] = m31_to_stwo(M31::from_u32(step.pc as u32));
+        col_data[1][row_idx] = m31_to_stwo(step.registers_before[0]);
+        col_data[2][row_idx] = m31_to_stwo(step.registers_before[1]);
 
-            // Next state
-            if row_idx + 1 < trace.steps.len() {
-                let next_step = &trace.steps[row_idx + 1];
-                col3[row_idx] = m31_to_stwo(M31::from_u32(next_step.pc as u32));
-                col4[row_idx] = m31_to_stwo(next_step.registers_before[0]);
-                col5[row_idx] = m31_to_stwo(next_step.registers_before[1]);
-            } else {
-                // Last row: copy current state
-                col3[row_idx] = col0[row_idx];
-                col4[row_idx] = col1[row_idx];
-                col5[row_idx] = col2[row_idx];
-            }
+        // Next state
+        if row_idx + 1 < trace.steps.len() {
+            let next_step = &trace.steps[row_idx + 1];
+            col_data[3][row_idx] = m31_to_stwo(M31::from_u32(next_step.pc as u32));
+            col_data[4][row_idx] = m31_to_stwo(next_step.registers_before[0]);
+            col_data[5][row_idx] = m31_to_stwo(next_step.registers_before[1]);
+        } else {
+            // Last row: copy current state
+            col_data[3][row_idx] = col_data[0][row_idx];
+            col_data[4][row_idx] = col_data[1][row_idx];
+            col_data[5][row_idx] = col_data[2][row_idx];
         }
     }
+
+    // Convert Vec<BaseField> to BaseColumn
+    let columns: Vec<BaseColumn> = col_data
+        .into_iter()
+        .map(|data| BaseColumn::from_cpu(data))
+        .collect();
     
     // Pad remaining rows with zeros (already done by zeros())
     
@@ -375,44 +369,41 @@ fn prove_with_stwo_gpu_backend(
             &twiddles,
         );
     
-    // 5. Create trace columns (reuse SIMD column type - compatible with GpuBackend)
+    // 5. Create trace columns (build as Vec<BaseField> then convert to BaseColumn)
     let n_columns = 6;
-    let mut columns: Vec<BaseColumn> = (0..n_columns)
-        .map(|_| BaseColumn::zeros(size))
+    let mut col_data: Vec<Vec<StwoM31>> = (0..n_columns)
+        .map(|_| vec![StwoM31::from_u32_unchecked(0); size])
         .collect();
-    
-    // 6. Fill trace data using slices for proper SIMD access
-    {
-        let col0 = columns[0].as_mut_slice();
-        let col1 = columns[1].as_mut_slice();
-        let col2 = columns[2].as_mut_slice();
-        let col3 = columns[3].as_mut_slice();
-        let col4 = columns[4].as_mut_slice();
-        let col5 = columns[5].as_mut_slice();
 
-        for (row_idx, step) in trace.steps.iter().enumerate() {
-            if row_idx >= size {
-                break;
-            }
+    // 6. Fill trace data
+    for (row_idx, step) in trace.steps.iter().enumerate() {
+        if row_idx >= size {
+            break;
+        }
 
-            // Current state
-            col0[row_idx] = m31_to_stwo(M31::from_u32(step.pc as u32));
-            col1[row_idx] = m31_to_stwo(step.registers_before[0]);
-            col2[row_idx] = m31_to_stwo(step.registers_before[1]);
+        // Current state
+        col_data[0][row_idx] = m31_to_stwo(M31::from_u32(step.pc as u32));
+        col_data[1][row_idx] = m31_to_stwo(step.registers_before[0]);
+        col_data[2][row_idx] = m31_to_stwo(step.registers_before[1]);
 
-            // Next state
-            if row_idx + 1 < trace.steps.len() {
-                let next_step = &trace.steps[row_idx + 1];
-                col3[row_idx] = m31_to_stwo(M31::from_u32(next_step.pc as u32));
-                col4[row_idx] = m31_to_stwo(next_step.registers_before[0]);
-                col5[row_idx] = m31_to_stwo(next_step.registers_before[1]);
-            } else {
-                col3[row_idx] = col0[row_idx];
-                col4[row_idx] = col1[row_idx];
-                col5[row_idx] = col2[row_idx];
-            }
+        // Next state
+        if row_idx + 1 < trace.steps.len() {
+            let next_step = &trace.steps[row_idx + 1];
+            col_data[3][row_idx] = m31_to_stwo(M31::from_u32(next_step.pc as u32));
+            col_data[4][row_idx] = m31_to_stwo(next_step.registers_before[0]);
+            col_data[5][row_idx] = m31_to_stwo(next_step.registers_before[1]);
+        } else {
+            col_data[3][row_idx] = col_data[0][row_idx];
+            col_data[4][row_idx] = col_data[1][row_idx];
+            col_data[5][row_idx] = col_data[2][row_idx];
         }
     }
+
+    // Convert Vec<BaseField> to BaseColumn
+    let columns: Vec<BaseColumn> = col_data
+        .into_iter()
+        .map(|data| BaseColumn::from_cpu(data))
+        .collect();
 
     // 7. Convert columns to CircleEvaluation format
     let domain = CanonicCoset::new(log_size).circle_domain();
@@ -507,8 +498,6 @@ struct ExtractedProofData {
 fn extract_proof_data(
     stark_proof: &stwo_prover::core::proof::StarkProof<stwo_prover::core::vcs::blake2_merkle::Blake2sMerkleHasher>,
 ) -> Result<ExtractedProofData, ProverError> {
-    use blake2::Digest;
-    use blake2::Blake2s256;
     
     // Access the inner CommitmentSchemeProof
     let commitment_scheme_proof = &stark_proof.0;
@@ -820,8 +809,7 @@ pub fn verify_with_stwo(
     trace: &ExecutionTrace,
 ) -> Result<bool, ProverError> {
     use stwo_prover::core::channel::Blake2sChannel;
-    use stwo_prover::core::pcs::{CommitmentSchemeVerifier, PcsConfig};
-    use stwo_prover::core::verifier::verify;
+    use stwo_prover::core::pcs::CommitmentSchemeVerifier;
     
     // 1. Reconstruct the proof configuration
     let config = PcsConfig::default();
@@ -932,7 +920,7 @@ pub fn verify_stwo_proof_cryptographic(
     trace: &ExecutionTrace,
 ) -> Result<bool, ProverError> {
     use stwo_prover::core::channel::Blake2sChannel;
-    use stwo_prover::core::pcs::{CommitmentSchemeVerifier, PcsConfig};
+    use stwo_prover::core::pcs::CommitmentSchemeVerifier;
     use stwo_prover::core::verifier::verify;
     use stwo_prover::core::air::Component;
     

@@ -3,15 +3,15 @@
 
 use anyhow::Result;
 use starknet::{
-    core::types::{FieldElement, BlockId, BlockTag, FunctionCall},
+    core::types::{FieldElement, FunctionCall},
     accounts::{Account, ExecutionEncoding, SingleOwnerAccount, Call},
-    providers::{jsonrpc::HttpTransport, JsonRpcClient, Provider},
+    providers::{jsonrpc::HttpTransport, JsonRpcClient},
     signers::{LocalWallet, SigningKey},
 };
 use starknet::core::utils::get_selector_from_name;
 use std::sync::Arc;
 
-use crate::obelysk::{TEEQuote, Matrix, ObelyskVM, OpCode, Instruction, M31};
+use crate::obelysk::{TEEQuote, Matrix, ObelyskVM};
 use crate::types::JobId;
 
 /// Bridge between Rust worker and Starknet contracts
