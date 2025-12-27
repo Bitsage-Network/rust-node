@@ -26,6 +26,7 @@ pub mod elgamal;      // ElGamal EC encryption for privacy payments (Phase 8) �
 pub mod privacy_client; // Privacy Router contract client (Phase 8) 🔐
 pub mod payment_client; // Payment Router contract client (Phase 8) 💰
 pub mod worker_keys;    // Worker keypair management (Phase 8) 🔑
+pub mod proof_compression; // Proof compression for on-chain submission 📦
 
 // Re-exports for convenience
 pub use vm::{ObelyskVM, OpCode, Instruction, ExecutionTrace};
@@ -44,8 +45,10 @@ pub use proof_aggregation::{
 };
 pub use elgamal::{
     Felt252, ECPoint, ElGamalCiphertext, EncryptionProof, EncryptedBalance, KeyPair,
-    encrypt, decrypt_point, derive_public_key, homomorphic_add, homomorphic_sub,
+    CryptoError, encrypt, decrypt_point, derive_public_key, homomorphic_add, homomorphic_sub,
     create_schnorr_proof, verify_schnorr_proof, create_decryption_proof, verify_decryption_proof,
+    generate_randomness, generate_nonce, generate_keypair, encrypt_secure,
+    create_decryption_proof_secure,
 };
 pub use privacy_client::{
     PrivacyRouterClient, WorkerPrivacyManager, PrivateAccount, PrivateWorkerPayment,
@@ -54,8 +57,14 @@ pub use privacy_client::{
 pub use payment_client::{
     PaymentRouterClient, PaymentToken, PaymentQuote, PaymentCalculator,
     FeeDistribution, DiscountTiers, OTCConfig,
+    ProofGatedPayment, EncryptedPaymentData, PaymentSubmissionResult, ProofPaymentError,
 };
 pub use worker_keys::{
     WorkerKeyManager, PublicKeyExport, RegistrationSignature,
     generate_worker_keys, verify_registration_signature,
+};
+pub use proof_compression::{
+    ProofCompressor, CompressedProof, CompressionAlgorithm,
+    compute_proof_hash, compute_proof_commitment,
+    MAX_ONCHAIN_PROOF_SIZE, MAX_UNCOMPRESSED_PROOF_SIZE,
 };

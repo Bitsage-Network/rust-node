@@ -22,6 +22,7 @@ pub mod cloud;
 pub mod api;
 pub mod obelysk;  // Obelysk Protocol: Native Stwo integration for zkML
 pub mod pricing;  // GPU-aware proof pricing and marketplace economics
+pub mod validator; // BFT validator consensus for proof validation
 
 // Re-export commonly used types
 pub use types::{
@@ -65,6 +66,11 @@ pub use obelysk::{
     ObelyskVM, OpCode, ExecutionTrace,
     ObelyskProver, ProverConfig, StarkProof, LogLevel,
     M31, Matrix,
+};
+
+// Re-export validator consensus
+pub use validator::{
+    ValidatorConsensus, ValidatorInfo, Vote, ConsensusResult, ConsensusConfig,
 };
 
 /// Version information

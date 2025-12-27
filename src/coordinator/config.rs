@@ -275,25 +275,37 @@ pub struct WorkerMonitoringConfig {
 pub struct BlockchainConfig {
     /// Starknet RPC URL
     pub rpc_url: String,
-    
+
     /// Job manager contract address
     pub job_manager_address: String,
-    
+
     /// CDC pool contract address
     pub cdc_pool_address: String,
-    
+
     /// SAGE token contract address
     pub sage_token_address: String,
-    
+
+    /// Prover staking contract address for worker registration verification
+    pub staking_contract_address: String,
+
+    /// Reputation manager contract address for worker reputation queries
+    pub reputation_contract_address: String,
+
+    /// Enable on-chain staking verification for worker registration
+    pub enable_staking_verification: bool,
+
+    /// Enable on-chain reputation queries for worker selection
+    pub enable_reputation_queries: bool,
+
     /// Blockchain monitoring configuration
     pub monitoring: BlockchainMonitoringConfig,
-    
+
     /// Gas optimization settings
     pub gas_optimization: GasOptimizationConfig,
-    
+
     /// Signer private key (hex string)
     pub signer_private_key: String,
-    
+
     /// Signer account address (hex string)
     pub signer_account_address: String,
 }
@@ -591,6 +603,10 @@ impl Default for BlockchainConfig {
             job_manager_address: "0x00bf025663b8a7c7e43393f082b10afe66bd9ddb06fb5e521e3adbcf693094bd".to_string(),
             cdc_pool_address: "0x0000000000000000000000000000000000000000000000000000000000000000".to_string(),
             sage_token_address: "0x0000000000000000000000000000000000000000000000000000000000000000".to_string(),
+            staking_contract_address: "0x0000000000000000000000000000000000000000000000000000000000000000".to_string(),
+            reputation_contract_address: "0x0000000000000000000000000000000000000000000000000000000000000000".to_string(),
+            enable_staking_verification: true,
+            enable_reputation_queries: true,
             monitoring: BlockchainMonitoringConfig::default(),
             gas_optimization: GasOptimizationConfig::default(),
             signer_private_key: "".to_string(),

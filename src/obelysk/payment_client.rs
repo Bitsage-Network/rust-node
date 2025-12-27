@@ -3,7 +3,7 @@
 // Rust client for interacting with the Cairo PaymentRouter contract.
 // Handles multi-token payments, quotes, and privacy credit management.
 
-use anyhow::{Result, anyhow};
+use anyhow::{Result, anyhow, Context};
 use serde::{Serialize, Deserialize};
 use starknet::{
     core::types::{FieldElement, FunctionCall, BlockId, BlockTag},
@@ -13,7 +13,11 @@ use starknet::{
     signers::{LocalWallet, SigningKey},
 };
 use std::sync::Arc;
-use tracing::{info, debug};
+use tracing::{info, debug, warn};
+
+use super::proof_compression::{CompressedProof, compute_proof_commitment};
+use super::elgamal::{ElGamalCiphertext, Felt252, generate_randomness, encrypt, ECPoint};
+use super::privacy_client::felt252_to_field_element;
 
 
 // =============================================================================
@@ -117,6 +121,89 @@ pub struct OTCConfig {
     pub staking_address: FieldElement,
     pub quote_validity_seconds: u64,
     pub max_slippage_bps: u32,
+}
+
+// =============================================================================
+// Proof-Gated Payment Types
+// =============================================================================
+
+/// Payment request with proof verification
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProofGatedPayment {
+    /// Worker address to receive payment
+    pub worker_address: String,
+
+    /// Job identifier
+    pub job_id: u128,
+
+    /// Payment amount in base units (wei for ETH, satoshi for BTC, etc.)
+    pub amount: u128,
+
+    /// Payment token type
+    pub payment_token: PaymentToken,
+
+    /// Blake3 hash of the proof
+    pub proof_hash: [u8; 32],
+
+    /// Proof commitment for on-chain verification
+    pub proof_commitment: [u8; 32],
+
+    /// Optional encrypted payment (for privacy)
+    pub encrypted_payment: Option<EncryptedPaymentData>,
+}
+
+/// Encrypted payment data for privacy-preserving payments
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EncryptedPaymentData {
+    /// ElGamal ciphertext of the amount
+    pub ciphertext: ElGamalCiphertext,
+
+    /// Randomness commitment (for verification)
+    pub randomness_commitment: [u8; 32],
+}
+
+/// Result of a proof-gated payment submission
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PaymentSubmissionResult {
+    /// Transaction hash on Starknet
+    pub tx_hash: FieldElement,
+
+    /// Whether payment was encrypted
+    pub is_encrypted: bool,
+
+    /// Proof commitment included in transaction
+    pub proof_commitment: [u8; 32],
+
+    /// Estimated confirmation time (seconds)
+    pub estimated_confirmation_secs: u64,
+}
+
+/// Error types for proof-gated payments
+#[derive(Debug, thiserror::Error)]
+pub enum ProofPaymentError {
+    #[error("Invalid proof: {0}")]
+    InvalidProof(String),
+
+    #[error("Proof too large for on-chain submission: {size} bytes (max {max})")]
+    ProofTooLarge { size: usize, max: usize },
+
+    #[error("Proof verification failed")]
+    VerificationFailed,
+
+    #[error("Payment amount mismatch: expected {expected}, got {actual}")]
+    AmountMismatch { expected: u128, actual: u128 },
+
+    #[error("Worker address mismatch")]
+    WorkerMismatch,
+
+    #[error("Job ID mismatch")]
+    JobMismatch,
+
+    #[error("Encryption failed: {0}")]
+    EncryptionFailed(String),
+
+    #[error("Contract call failed: {0}")]
+    ContractError(String),
 }
 
 // =============================================================================
@@ -401,6 +488,213 @@ impl PaymentRouterClient {
 
         debug!("Pay with privacy credits tx: {:?}", tx.transaction_hash);
         Ok(tx.transaction_hash)
+    }
+
+    // =========================================================================
+    // Proof-Gated Payment Methods
+    // =========================================================================
+
+    /// Submit a payment that is gated by proof verification.
+    /// The proof commitment is included in the transaction to ensure the worker
+    /// completed the job correctly before receiving payment.
+    pub async fn submit_payment_with_proof(
+        &self,
+        worker_address: &str,
+        job_id: u128,
+        amount: u128,
+        compressed_proof: &CompressedProof,
+    ) -> Result<PaymentSubmissionResult> {
+        let account = self.account.as_ref()
+            .ok_or_else(|| anyhow!("No account configured for write operations"))?;
+
+        // Verify proof is valid for on-chain submission
+        if !compressed_proof.is_valid_for_onchain() {
+            return Err(anyhow!(
+                "Proof too large for on-chain: {} bytes (max 256KB)",
+                compressed_proof.compressed_size()
+            ));
+        }
+
+        // Verify proof integrity
+        if !compressed_proof.verify_integrity() {
+            return Err(anyhow!("Proof integrity check failed"));
+        }
+
+        // Compute proof commitment
+        let proof_commitment = compute_proof_commitment(
+            &compressed_proof.proof_hash,
+            job_id,
+            worker_address,
+        );
+
+        // Convert addresses and values to field elements
+        let worker_felt = FieldElement::from_hex_be(worker_address)
+            .map_err(|e| anyhow!("Invalid worker address: {}", e))?;
+
+        // Build calldata: worker, job_id (u256), amount (u256), proof_commitment (4 x felt)
+        let calldata = vec![
+            worker_felt,
+            FieldElement::from(job_id as u64),
+            FieldElement::from((job_id >> 64) as u64),
+            FieldElement::from(amount as u64),
+            FieldElement::from((amount >> 64) as u64),
+            // Proof commitment as 4 field elements (32 bytes = 4 x 8 bytes)
+            FieldElement::from_byte_slice_be(&proof_commitment[0..8]).unwrap_or_default(),
+            FieldElement::from_byte_slice_be(&proof_commitment[8..16]).unwrap_or_default(),
+            FieldElement::from_byte_slice_be(&proof_commitment[16..24]).unwrap_or_default(),
+            FieldElement::from_byte_slice_be(&proof_commitment[24..32]).unwrap_or_default(),
+        ];
+
+        info!(
+            "Submitting proof-gated payment: {} SAGE to worker {} for job {}",
+            amount, worker_address, job_id
+        );
+
+        let call = Call {
+            to: self.contract_address,
+            selector: get_selector_from_name("submit_payment_with_proof")?,
+            calldata,
+        };
+
+        let tx = account.execute(vec![call]).send().await?;
+
+        debug!("Proof-gated payment tx: {:?}", tx.transaction_hash);
+
+        Ok(PaymentSubmissionResult {
+            tx_hash: tx.transaction_hash,
+            is_encrypted: false,
+            proof_commitment,
+            estimated_confirmation_secs: 15,
+        })
+    }
+
+    /// Submit an encrypted payment with proof verification.
+    /// Uses ElGamal encryption for privacy-preserving worker payments.
+    pub async fn submit_encrypted_payment_with_proof(
+        &self,
+        worker_address: &str,
+        worker_public_key: &ECPoint,
+        job_id: u128,
+        amount: u128,
+        compressed_proof: &CompressedProof,
+    ) -> Result<PaymentSubmissionResult> {
+        let account = self.account.as_ref()
+            .ok_or_else(|| anyhow!("No account configured for write operations"))?;
+
+        // Verify proof
+        if !compressed_proof.is_valid_for_onchain() {
+            return Err(anyhow!("Proof too large for on-chain submission"));
+        }
+
+        // Generate secure randomness for encryption
+        let randomness = generate_randomness()
+            .map_err(|e| anyhow!("Failed to generate randomness: {}", e))?;
+
+        // Encrypt the payment amount
+        let encrypted = encrypt(amount as u64, worker_public_key, &randomness);
+
+        // Compute proof commitment
+        let proof_commitment = compute_proof_commitment(
+            &compressed_proof.proof_hash,
+            job_id,
+            worker_address,
+        );
+
+        // Convert addresses and values to field elements
+        let worker_felt = FieldElement::from_hex_be(worker_address)
+            .map_err(|e| anyhow!("Invalid worker address: {}", e))?;
+
+        // Build calldata with encrypted payment
+        let calldata = vec![
+            worker_felt,
+            FieldElement::from(job_id as u64),
+            FieldElement::from((job_id >> 64) as u64),
+            // ElGamal ciphertext: c1_x, c1_y, c2_x, c2_y
+            felt252_to_field_element(&encrypted.c1_x),
+            felt252_to_field_element(&encrypted.c1_y),
+            felt252_to_field_element(&encrypted.c2_x),
+            felt252_to_field_element(&encrypted.c2_y),
+            // Proof commitment
+            FieldElement::from_byte_slice_be(&proof_commitment[0..8]).unwrap_or_default(),
+            FieldElement::from_byte_slice_be(&proof_commitment[8..16]).unwrap_or_default(),
+            FieldElement::from_byte_slice_be(&proof_commitment[16..24]).unwrap_or_default(),
+            FieldElement::from_byte_slice_be(&proof_commitment[24..32]).unwrap_or_default(),
+        ];
+
+        info!(
+            "Submitting encrypted proof-gated payment to worker {} for job {}",
+            worker_address, job_id
+        );
+
+        let call = Call {
+            to: self.contract_address,
+            selector: get_selector_from_name("submit_encrypted_payment_with_proof")?,
+            calldata,
+        };
+
+        let tx = account.execute(vec![call]).send().await?;
+
+        debug!("Encrypted proof-gated payment tx: {:?}", tx.transaction_hash);
+
+        Ok(PaymentSubmissionResult {
+            tx_hash: tx.transaction_hash,
+            is_encrypted: true,
+            proof_commitment,
+            estimated_confirmation_secs: 15,
+        })
+    }
+
+    /// Verify a proof commitment is recorded on-chain for a job
+    pub async fn verify_proof_commitment(
+        &self,
+        job_id: u128,
+        expected_commitment: &[u8; 32],
+    ) -> Result<bool> {
+        let calldata = vec![
+            FieldElement::from(job_id as u64),
+            FieldElement::from((job_id >> 64) as u64),
+        ];
+
+        let result = self.provider.call(
+            FunctionCall {
+                contract_address: self.contract_address,
+                entry_point_selector: get_selector_from_name("get_proof_commitment")?,
+                calldata,
+            },
+            BlockId::Tag(BlockTag::Latest),
+        ).await?;
+
+        // Compare commitment
+        if result.len() < 4 {
+            return Ok(false);
+        }
+
+        let mut stored_commitment = [0u8; 32];
+        for (i, felt) in result.iter().take(4).enumerate() {
+            let bytes = felt.to_bytes_be();
+            stored_commitment[i * 8..(i + 1) * 8].copy_from_slice(&bytes[24..32]);
+        }
+
+        Ok(stored_commitment == *expected_commitment)
+    }
+
+    /// Check if a job has been paid
+    pub async fn is_job_paid(&self, job_id: u128) -> Result<bool> {
+        let calldata = vec![
+            FieldElement::from(job_id as u64),
+            FieldElement::from((job_id >> 64) as u64),
+        ];
+
+        let result = self.provider.call(
+            FunctionCall {
+                contract_address: self.contract_address,
+                entry_point_selector: get_selector_from_name("is_job_paid")?,
+                calldata,
+            },
+            BlockId::Tag(BlockTag::Latest),
+        ).await?;
+
+        Ok(result.first().map(|f| *f != FieldElement::ZERO).unwrap_or(false))
     }
 
     // =========================================================================

@@ -23,6 +23,29 @@
 use serde::{Serialize, Deserialize};
 use sha3::{Digest, Keccak256};
 use std::ops::{Add, Sub, Mul};
+use thiserror::Error;
+
+/// Cryptographic error types
+#[derive(Debug, Error)]
+pub enum CryptoError {
+    #[error("Random number generation failed")]
+    RngFailed,
+
+    #[error("Generated randomness is not less than STARK_PRIME (extremely rare)")]
+    RandomnessOutOfRange,
+
+    #[error("Invalid point: not on curve")]
+    InvalidPoint,
+
+    #[error("Invalid scalar: out of range")]
+    InvalidScalar,
+
+    #[error("Decryption failed")]
+    DecryptionFailed,
+
+    #[error("Proof verification failed")]
+    VerificationFailed,
+}
 
 // =============================================================================
 // STARK Curve Parameters (matching Cairo implementation)
@@ -831,6 +854,64 @@ impl KeyPair {
     pub fn secret_key(&self) -> Felt252 {
         self.secret_key
     }
+}
+
+// =============================================================================
+// Secure Randomness Generation
+// =============================================================================
+
+/// Generate cryptographically secure randomness for ElGamal encryption.
+/// Uses OS-level entropy via getrandom crate (CSPRNG).
+///
+/// # Security
+/// - Uses getrandom which provides access to OS random number generator
+/// - On Linux: /dev/urandom
+/// - On macOS/iOS: SecRandomCopyBytes
+/// - On Windows: BCryptGenRandom
+/// - Ensures randomness is < STARK_PRIME for valid field element
+pub fn generate_randomness() -> Result<Felt252, CryptoError> {
+    let mut bytes = [0u8; 32];
+    getrandom::getrandom(&mut bytes).map_err(|_| CryptoError::RngFailed)?;
+
+    // Clear top bits to ensure < STARK_PRIME
+    // STARK_PRIME is ~2^251, so we clear top 5 bits (bytes[0] & 0x07)
+    bytes[0] &= 0x07;
+
+    let felt = Felt252::from_be_bytes(&bytes);
+
+    // Double-check (should always pass after bit clearing)
+    if felt.gte(&STARK_PRIME) {
+        // Extremely rare: retry
+        return generate_randomness();
+    }
+
+    Ok(felt)
+}
+
+/// Generate a random nonce for Schnorr proofs
+pub fn generate_nonce() -> Result<Felt252, CryptoError> {
+    generate_randomness()
+}
+
+/// Generate a fresh ElGamal keypair with secure randomness
+pub fn generate_keypair() -> Result<KeyPair, CryptoError> {
+    let secret_key = generate_randomness()?;
+    Ok(KeyPair::from_secret(secret_key))
+}
+
+/// Encrypt an amount with secure randomness (convenience function)
+pub fn encrypt_secure(amount: u64, public_key: &ECPoint) -> Result<ElGamalCiphertext, CryptoError> {
+    let randomness = generate_randomness()?;
+    Ok(encrypt(amount, public_key, &randomness))
+}
+
+/// Create a decryption proof with secure nonce
+pub fn create_decryption_proof_secure(
+    keypair: &KeyPair,
+    ciphertext: &ElGamalCiphertext,
+) -> Result<EncryptionProof, CryptoError> {
+    let nonce = generate_nonce()?;
+    Ok(create_decryption_proof(keypair, ciphertext, &nonce))
 }
 
 // =============================================================================

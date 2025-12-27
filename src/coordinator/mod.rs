@@ -13,6 +13,7 @@ pub mod config;
 pub mod simple_coordinator;
 pub mod production_coordinator;
 pub mod blockchain_bridge;
+pub mod rate_limiter;
 
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -33,10 +34,12 @@ use crate::network::NetworkEvent;
 use crate::network::NetworkCoordinator;
 use crate::storage::Database;
 use crate::types::NodeId;
+use crate::obelysk::starknet::{StakingClientConfig, ReputationClientConfig};
 
 // Re-export main components
 pub use kafka::{KafkaConfig, KafkaEvent};
 pub use config::{NetworkCoordinatorConfig, JobProcessorConfig, WorkerManagerConfig, BlockchainConfig, MetricsConfig};
+pub use rate_limiter::{RateLimiter, RateLimiterConfig, RateLimitConfig, RateLimitError, RateLimiterStats};
 
 /// Main coordinator service that orchestrates all components
 pub struct EnhancedCoordinator {
@@ -105,11 +108,28 @@ impl EnhancedCoordinator {
         )?;
         let _network_coordinator_service = Arc::new(network_coordinator_service);
         
-        // Initialize worker manager
+        // Initialize worker manager with staking and reputation verification
+        let staking_config = StakingClientConfig {
+            rpc_url: config.blockchain.rpc_url.clone(),
+            staking_contract: config.blockchain.staking_contract_address.clone(),
+            timeout: std::time::Duration::from_secs(30),
+            enabled: config.blockchain.enable_staking_verification,
+        };
+
+        let reputation_config = ReputationClientConfig {
+            rpc_url: config.blockchain.rpc_url.clone(),
+            reputation_contract: config.blockchain.reputation_contract_address.clone(),
+            timeout: std::time::Duration::from_secs(15),
+            enabled: config.blockchain.enable_reputation_queries,
+            cache_ttl_secs: 60,
+        };
+
         let worker_manager = Arc::new(WorkerManager::new(
             config.worker_manager.clone(),
             database.clone(),
             network_coordinator.clone(),
+            staking_config,
+            reputation_config,
         ));
         
         // Initialize blockchain integration

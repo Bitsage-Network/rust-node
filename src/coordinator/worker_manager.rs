@@ -3,19 +3,23 @@
 //! Comprehensive worker management system for the Bitsage Network coordinator,
 //! handling worker registration, health monitoring, and capability management.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock, Mutex};
 use tokio::time::{Duration, Instant};
-use tracing::{info, debug, error};
+use tracing::{info, debug, warn, error};
 
 use crate::types::{WorkerId, TeeType};
 use crate::node::coordinator::{WorkerInfo, WorkerCapabilities, ComputeRequirements};
 use crate::storage::Database;
 use crate::network::NetworkCoordinator;
 use crate::coordinator::config::WorkerManagerConfig;
+use crate::obelysk::starknet::{
+    StakingClient, StakingClientConfig, GpuTier,
+    ReputationClient, ReputationClientConfig,
+};
 
 /// Worker manager events
 #[derive(Debug, Clone)]
@@ -123,18 +127,24 @@ pub struct WorkerManager {
     config: WorkerManagerConfig,
     database: Arc<Database>,
     network_coordinator: Arc<NetworkCoordinator>,
-    
+
+    // Staking contract client for on-chain stake verification
+    staking_client: Arc<StakingClient>,
+
+    // Reputation contract client for on-chain reputation queries
+    reputation_client: Arc<ReputationClient>,
+
     // Worker storage
     active_workers: Arc<RwLock<HashMap<WorkerId, WorkerDetails>>>,
     worker_loads: Arc<RwLock<HashMap<WorkerId, WorkerLoad>>>,
-    
+
     // Worker statistics
     stats: Arc<RwLock<WorkerStats>>,
-    
+
     // Communication channels
     event_sender: mpsc::UnboundedSender<WorkerEvent>,
     event_receiver: Arc<RwLock<Option<mpsc::UnboundedReceiver<WorkerEvent>>>>,
-    
+
     // Internal state
     running: Arc<RwLock<bool>>,
     next_worker_id: Arc<Mutex<u64>>,
@@ -146,9 +156,11 @@ impl WorkerManager {
         config: WorkerManagerConfig,
         database: Arc<Database>,
         network_coordinator: Arc<NetworkCoordinator>,
+        staking_config: StakingClientConfig,
+        reputation_config: ReputationClientConfig,
     ) -> Self {
         let (event_sender, event_receiver) = mpsc::unbounded_channel();
-        
+
         let stats = WorkerStats {
             total_workers: 0,
             active_workers: 0,
@@ -160,11 +172,16 @@ impl WorkerManager {
             total_compute_capacity: 0,
             available_compute_capacity: 0,
         };
-        
+
+        let staking_client = Arc::new(StakingClient::new(staking_config));
+        let reputation_client = Arc::new(ReputationClient::new(reputation_config));
+
         Self {
             config,
             database,
             network_coordinator,
+            staking_client,
+            reputation_client,
             active_workers: Arc::new(RwLock::new(HashMap::new())),
             worker_loads: Arc::new(RwLock::new(HashMap::new())),
             stats: Arc::new(RwLock::new(stats)),
@@ -173,6 +190,27 @@ impl WorkerManager {
             running: Arc::new(RwLock::new(false)),
             next_worker_id: Arc::new(Mutex::new(1)),
         }
+    }
+
+    /// Create a worker manager with staking/reputation verification disabled (for testing)
+    pub fn new_without_blockchain(
+        config: WorkerManagerConfig,
+        database: Arc<Database>,
+        network_coordinator: Arc<NetworkCoordinator>,
+    ) -> Self {
+        Self::new(
+            config,
+            database,
+            network_coordinator,
+            StakingClientConfig {
+                enabled: false,
+                ..Default::default()
+            },
+            ReputationClientConfig {
+                enabled: false,
+                ..Default::default()
+            },
+        )
     }
 
     /// Start the worker manager
@@ -419,23 +457,105 @@ impl WorkerManager {
             .collect()
     }
 
-    /// Find best worker for job
+    /// Find best worker for job using on-chain reputation when available
     pub async fn find_best_worker(&self, requirements: &ComputeRequirements) -> Option<WorkerDetails> {
         let available_workers = self.find_workers_by_capabilities(requirements).await;
-        
+
         if available_workers.is_empty() {
             return None;
         }
-        
-        // Sort by reputation and load (higher reputation, lower load is better)
-        let mut sorted_workers = available_workers;
-        sorted_workers.sort_by(|a, b| {
-            let a_score = a.reputation * (1.0 - a.load);
-            let b_score = b.reputation * (1.0 - b.load);
-            b_score.partial_cmp(&a_score).unwrap_or(std::cmp::Ordering::Equal)
+
+        // Score each worker, preferring on-chain reputation when available
+        let mut scored_workers: Vec<(WorkerDetails, f64)> = Vec::with_capacity(available_workers.len());
+
+        for worker in available_workers {
+            let score = self.calculate_worker_score(&worker).await;
+            scored_workers.push((worker, score));
+        }
+
+        // Sort by score (descending)
+        scored_workers.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
         });
-        
-        sorted_workers.first().cloned()
+
+        // Return the best worker
+        scored_workers.first().map(|(worker, score)| {
+            debug!(
+                worker_id = %worker.id,
+                score = score,
+                "Selected best worker"
+            );
+            worker.clone()
+        })
+    }
+
+    /// Calculate worker selection score using on-chain reputation
+    async fn calculate_worker_score(&self, worker: &WorkerDetails) -> f64 {
+        // Get on-chain reputation if worker has wallet address
+        let on_chain_reputation = if let Some(ref wallet) = worker.info.wallet_address {
+            match self.reputation_client.get_reputation(wallet).await {
+                Ok(rep) => {
+                    // Check if worker is eligible based on reputation
+                    if !rep.is_eligible() {
+                        warn!(
+                            worker_id = %worker.id,
+                            wallet = %wallet,
+                            score = rep.score,
+                            "Worker has low reputation, skipping"
+                        );
+                        return 0.0; // Ineligible workers get zero score
+                    }
+                    Some(rep)
+                }
+                Err(e) => {
+                    debug!(
+                        worker_id = %worker.id,
+                        error = %e,
+                        "Failed to fetch on-chain reputation, using local"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        // Calculate base reputation score
+        let reputation_score = if let Some(rep) = on_chain_reputation {
+            // On-chain reputation: 0-1000 -> 0.0-10.0
+            let base = rep.as_float();
+
+            // Boost for high reputation workers (700+)
+            let boost = if rep.is_high_reputation() { 1.2 } else { 1.0 };
+
+            // Factor in success rate
+            let success_factor = 0.5 + (rep.success_rate * 0.5);
+
+            base * boost * success_factor
+        } else {
+            // Fall back to local reputation (0.0-10.0 scale)
+            worker.reputation
+        };
+
+        // Load factor: prefer less loaded workers (0.0-1.0 -> 1.0-0.0)
+        let load_factor = 1.0 - worker.load.min(1.0);
+
+        // Experience factor: slight bonus for workers with more completed jobs
+        let experience_bonus = ((worker.total_jobs_completed as f64).ln() + 1.0) / 10.0;
+
+        // Calculate final score
+        let score = reputation_score * (0.5 + load_factor * 0.4 + experience_bonus * 0.1);
+
+        debug!(
+            worker_id = %worker.id,
+            reputation_score = reputation_score,
+            load_factor = load_factor,
+            experience_bonus = experience_bonus,
+            final_score = score,
+            "Calculated worker score"
+        );
+
+        score
     }
 
     /// Start health monitoring
@@ -652,20 +772,82 @@ impl WorkerManager {
         Ok(())
     }
 
-    /// Validate worker info
+    /// Validate worker info including on-chain stake verification
     async fn validate_worker_info(&self, worker_info: &WorkerInfo) -> Result<()> {
         // Check if worker already exists
         let workers = self.active_workers.read().await;
         if workers.values().any(|w| w.info.node_id == worker_info.node_id) {
             return Err(anyhow::anyhow!("Worker with node ID {} already registered", worker_info.node_id));
         }
-        
-        // Validate capabilities
-        if !self.config.registration.enable_capability_validation {
-            return Ok(());
+        drop(workers); // Release lock before async call
+
+        // Verify on-chain stake requirement
+        let wallet_address = worker_info.wallet_address.as_ref()
+            .ok_or_else(|| anyhow::anyhow!(
+                "Wallet address required for registration. Workers must stake SAGE tokens to participate."
+            ))?;
+
+        // Determine GPU tier from worker capabilities
+        let gpu_tier = GpuTier::from_gpu_model(&worker_info.capabilities.gpu_model);
+
+        // Check if worker has sufficient stake on-chain
+        let is_eligible = self.staking_client
+            .verify_stake(wallet_address, gpu_tier)
+            .await
+            .context("Failed to verify stake on-chain")?;
+
+        if !is_eligible {
+            let min_stake = gpu_tier.min_stake_display();
+            return Err(anyhow::anyhow!(
+                "Insufficient stake for {} tier GPU ({}). Minimum stake required: {}. \
+                Please stake SAGE tokens at the staking contract before registering.",
+                gpu_tier,
+                worker_info.capabilities.gpu_model,
+                min_stake
+            ));
         }
-        
-        // TODO: Implement capability validation
+
+        info!(
+            wallet = %wallet_address,
+            gpu_tier = %gpu_tier,
+            gpu_model = %worker_info.capabilities.gpu_model,
+            "Worker stake verified successfully"
+        );
+
+        // Validate capabilities if enabled
+        if self.config.registration.enable_capability_validation {
+            self.validate_capabilities(&worker_info.capabilities).await?;
+        }
+
+        Ok(())
+    }
+
+    /// Validate worker capabilities (GPU, CPU, memory, etc.)
+    async fn validate_capabilities(&self, capabilities: &WorkerCapabilities) -> Result<()> {
+        // Verify GPU memory meets minimum requirements
+        if capabilities.gpu_memory_gb < 4 {
+            warn!(
+                gpu_memory = capabilities.gpu_memory_gb,
+                "Worker GPU memory below recommended minimum (4GB)"
+            );
+        }
+
+        // Verify RAM meets minimum for proof generation
+        if capabilities.ram_gb < 8 {
+            return Err(anyhow::anyhow!(
+                "Insufficient RAM: {} GB. Minimum 8 GB required for proof generation.",
+                capabilities.ram_gb
+            ));
+        }
+
+        // Verify CPU cores for multi-threaded proof work
+        if capabilities.cpu_cores < 2 {
+            return Err(anyhow::anyhow!(
+                "Insufficient CPU cores: {}. Minimum 2 cores required.",
+                capabilities.cpu_cores
+            ));
+        }
+
         Ok(())
     }
 

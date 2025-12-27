@@ -2,6 +2,12 @@
 //!
 //! This module provides the client for submitting proofs to Starknet L2
 //! and interacting with the on-chain verifier contract.
+//!
+//! Features:
+//! - Production-ready transaction signing using ECDSA on STARK curve
+//! - Support for INVOKE_V1 transactions
+//! - Automatic nonce management
+//! - Fee estimation with safety margins
 
 use super::proof_serializer::{CairoSerializedProof, Felt252};
 use super::proof_compression::{
@@ -9,7 +15,9 @@ use super::proof_compression::{
     OnChainCompressedProof,
 };
 use serde::{Deserialize, Serialize};
+use starknet_crypto::{pedersen_hash, sign, rfc6979_generate_k, FieldElement as StarkFelt};
 use std::time::Duration;
+use tracing::{debug, warn};
 
 /// Starknet network configuration
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -410,6 +418,142 @@ impl StarknetClient {
         Ok(calldata)
     }
 
+    /// Compute the INVOKE_V1 transaction hash for signing
+    ///
+    /// The hash is computed using Pedersen hash over:
+    /// h("invoke", version, sender_address, 0, h(calldata), max_fee, chain_id, nonce)
+    fn compute_invoke_v1_hash(
+        &self,
+        sender: &Felt252,
+        calldata: &[Felt252],
+        max_fee: u64,
+        chain_id: &str,
+        nonce: u64,
+    ) -> Result<StarkFelt, StarknetError> {
+        // INVOKE transaction prefix
+        let prefix = StarkFelt::from_byte_slice_be(b"invoke")
+            .map_err(|e| StarknetError::InvalidResponse(format!("Invalid prefix: {:?}", e)))?;
+
+        // Version 1
+        let version = StarkFelt::ONE;
+
+        // Sender address
+        let sender_felt = StarkFelt::from_byte_slice_be(&sender.0)
+            .map_err(|e| StarknetError::InvalidResponse(format!("Invalid sender: {:?}", e)))?;
+
+        // Entry point selector (0 for INVOKE_V1 - uses __execute__)
+        let entry_point = StarkFelt::ZERO;
+
+        // Compute calldata hash
+        let calldata_hash = self.compute_calldata_hash(calldata)?;
+
+        // Max fee
+        let max_fee_felt = StarkFelt::from(max_fee);
+
+        // Chain ID (as felt)
+        let chain_id_felt = compute_chain_id_felt(chain_id);
+
+        // Nonce
+        let nonce_felt = StarkFelt::from(nonce);
+
+        // Compute transaction hash using Pedersen chain
+        // h = pedersen(pedersen(pedersen(pedersen(pedersen(pedersen(pedersen(prefix, version), sender), entry_point), calldata_hash), max_fee), chain_id), nonce)
+        let h1 = pedersen_hash(&prefix, &version);
+        let h2 = pedersen_hash(&h1, &sender_felt);
+        let h3 = pedersen_hash(&h2, &entry_point);
+        let h4 = pedersen_hash(&h3, &calldata_hash);
+        let h5 = pedersen_hash(&h4, &max_fee_felt);
+        let h6 = pedersen_hash(&h5, &chain_id_felt);
+        let tx_hash = pedersen_hash(&h6, &nonce_felt);
+
+        debug!(
+            tx_hash = format!("0x{:x}", tx_hash),
+            sender = sender.to_hex(),
+            nonce = nonce,
+            max_fee = max_fee,
+            "Computed INVOKE_V1 transaction hash"
+        );
+
+        Ok(tx_hash)
+    }
+
+    /// Compute the hash of calldata (Pedersen chain)
+    fn compute_calldata_hash(&self, calldata: &[Felt252]) -> Result<StarkFelt, StarknetError> {
+        if calldata.is_empty() {
+            return Ok(StarkFelt::ZERO);
+        }
+
+        let first = StarkFelt::from_byte_slice_be(&calldata[0].0)
+            .map_err(|e| StarknetError::InvalidResponse(format!("Invalid calldata[0]: {:?}", e)))?;
+        let mut hash = first;
+
+        for item in &calldata[1..] {
+            let felt = StarkFelt::from_byte_slice_be(&item.0)
+                .map_err(|e| StarknetError::InvalidResponse(format!("Invalid calldata: {:?}", e)))?;
+            hash = pedersen_hash(&hash, &felt);
+        }
+
+        // Include length in the hash
+        let len_felt = StarkFelt::from(calldata.len() as u64);
+        hash = pedersen_hash(&hash, &len_felt);
+
+        Ok(hash)
+    }
+
+    /// Sign a transaction hash using ECDSA on STARK curve
+    ///
+    /// Returns (r, s) signature components as hex strings
+    fn sign_transaction(&self, tx_hash: &StarkFelt) -> Result<(String, String), StarknetError> {
+        let private_key_hex = self.config.private_key
+            .as_ref()
+            .ok_or(StarknetError::NoAccount)?;
+
+        // Parse private key
+        let private_key_bytes = hex::decode(private_key_hex.trim_start_matches("0x"))
+            .map_err(|e| StarknetError::InvalidResponse(format!("Invalid private key: {}", e)))?;
+
+        if private_key_bytes.len() > 32 {
+            return Err(StarknetError::InvalidResponse(
+                "Private key must be at most 32 bytes".to_string()
+            ));
+        }
+
+        // Pad private key to 32 bytes (left-pad with zeros)
+        let mut pk_array = [0u8; 32];
+        let start = 32 - private_key_bytes.len();
+        pk_array[start..].copy_from_slice(&private_key_bytes);
+
+        let private_key = StarkFelt::from_bytes_be(&pk_array)
+            .map_err(|e| StarknetError::InvalidResponse(format!("Invalid private key: {:?}", e)))?;
+
+        // Generate deterministic k using RFC 6979
+        // This is the standard approach for ECDSA to ensure signature uniqueness
+        // without requiring a random number generator
+        let k = rfc6979_generate_k(tx_hash, &private_key, None);
+
+        // Sign the transaction hash with the deterministic k
+        let signature = sign(&private_key, tx_hash, &k)
+            .map_err(|e| StarknetError::InvalidResponse(format!("Signing failed: {:?}", e)))?;
+
+        // Convert signature to hex strings using the FieldElement's to_bytes_be
+        let r_bytes = signature.r.to_bytes_be();
+        let s_bytes = signature.s.to_bytes_be();
+        let r_hex = format!("0x{}", hex::encode(&r_bytes).trim_start_matches('0'));
+        let s_hex = format!("0x{}", hex::encode(&s_bytes).trim_start_matches('0'));
+
+        // Handle edge case where result is all zeros
+        let r_hex = if r_hex == "0x" { "0x0".to_string() } else { r_hex };
+        let s_hex = if s_hex == "0x" { "0x0".to_string() } else { s_hex };
+
+        debug!(
+            r = &r_hex,
+            s = &s_hex,
+            "Transaction signed successfully"
+        );
+
+        Ok((r_hex, s_hex))
+    }
+
     /// Estimate fee for a transaction
     async fn estimate_fee(&self, calldata: &[Felt252]) -> Result<u64, StarknetError> {
         let account = self.config.account_address
@@ -449,7 +593,13 @@ impl StarknetClient {
             .map_err(|_| StarknetError::InvalidResponse("Invalid fee format".to_string()))
     }
 
-    /// Invoke a contract function
+    /// Invoke a contract function with proper transaction signing
+    ///
+    /// This method:
+    /// 1. Gets the current nonce
+    /// 2. Computes the INVOKE_V1 transaction hash
+    /// 3. Signs the hash with the private key
+    /// 4. Submits the signed transaction
     async fn invoke_contract(
         &self,
         calldata: &[Felt252],
@@ -458,10 +608,36 @@ impl StarknetClient {
         let account = self.config.account_address
             .ok_or(StarknetError::NoAccount)?;
 
-        let nonce = self.get_nonce().await?;
+        // Verify we have a private key for signing
+        if self.config.private_key.is_none() {
+            warn!("No private key configured - transaction will fail signature validation");
+            return Err(StarknetError::NoAccount);
+        }
 
-        // In production, this would sign the transaction properly
-        // For now, we just show the structure
+        let nonce = self.get_nonce().await?;
+        let chain_id = self.config.network.chain_id();
+
+        // Compute the transaction hash
+        let tx_hash = self.compute_invoke_v1_hash(
+            &account,
+            calldata,
+            max_fee,
+            chain_id,
+            nonce,
+        )?;
+
+        // Sign the transaction hash
+        let (r, s) = self.sign_transaction(&tx_hash)?;
+
+        debug!(
+            sender = account.to_hex(),
+            nonce = nonce,
+            max_fee = max_fee,
+            chain_id = chain_id,
+            "Submitting signed INVOKE_V1 transaction"
+        );
+
+        // Submit the signed transaction
         let request = json_rpc_request(
             "starknet_addInvokeTransaction",
             serde_json::json!({
@@ -471,7 +647,7 @@ impl StarknetClient {
                     "calldata": calldata.iter().map(|f| f.to_hex()).collect::<Vec<_>>(),
                     "max_fee": format!("0x{:x}", max_fee),
                     "version": "0x1",
-                    "signature": [], // Would be actual signature
+                    "signature": [r, s],
                     "nonce": format!("0x{:x}", nonce),
                 }
             }),
@@ -482,6 +658,11 @@ impl StarknetClient {
         let tx_hash_str = response.get("transaction_hash")
             .and_then(|v| v.as_str())
             .ok_or_else(|| StarknetError::InvalidResponse("Missing transaction_hash".to_string()))?;
+
+        debug!(
+            tx_hash = tx_hash_str,
+            "Transaction submitted successfully"
+        );
 
         Felt252::from_hex(tx_hash_str)
             .map_err(|_| StarknetError::InvalidResponse("Invalid tx hash format".to_string()))
@@ -602,6 +783,18 @@ fn json_rpc_request(method: &str, params: serde_json::Value) -> serde_json::Valu
         "method": method,
         "params": params
     })
+}
+
+/// Compute chain ID as a felt for transaction hash computation
+fn compute_chain_id_felt(chain_id: &str) -> StarkFelt {
+    // Chain IDs are ASCII strings encoded as felt
+    // e.g., "SN_MAIN" -> 0x534e5f4d41494e
+    let bytes = chain_id.as_bytes();
+    let mut padded = [0u8; 32];
+    let start = 32 - bytes.len().min(32);
+    padded[start..].copy_from_slice(&bytes[..bytes.len().min(32)]);
+    // Safe to unwrap since padded is always 32 bytes and valid
+    StarkFelt::from_bytes_be(&padded).expect("Valid chain ID bytes")
 }
 
 /// Parse transaction status from response

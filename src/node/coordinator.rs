@@ -443,6 +443,8 @@ pub struct WorkerInfo {
     pub current_load: f32,
     pub reputation: f32,
     pub last_seen: chrono::DateTime<chrono::Utc>,
+    /// Starknet wallet address for stake verification and payments
+    pub wallet_address: Option<String>,
 }
 
 impl JobCoordinator {

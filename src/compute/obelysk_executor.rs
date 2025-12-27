@@ -32,6 +32,8 @@ use sha2::{Sha256, Digest};
 use crate::obelysk::{
     ObelyskVM, ObelyskProver, ProverConfig, LogLevel,
     ExecutionTrace, StarkProof, M31, Instruction, OpCode,
+    ProofCompressor, CompressedProof, CompressionAlgorithm,
+    compute_proof_hash, compute_proof_commitment,
 };
 use crate::obelysk::stwo_adapter::{prove_with_stwo_gpu, is_gpu_available};
 
@@ -71,23 +73,48 @@ impl Default for ObelyskExecutorConfig {
 pub struct ObelyskJobResult {
     /// Job identifier
     pub job_id: String,
-    
+
     /// Execution status
     pub status: ObelyskJobStatus,
-    
+
     /// The 32-byte proof attestation
     pub proof_attestation: [u8; 32],
-    
+
+    /// Blake3 hash of the proof for on-chain commitment
+    pub proof_hash: [u8; 32],
+
+    /// Proof commitment for on-chain verification
+    pub proof_commitment: [u8; 32],
+
+    /// Compressed proof for on-chain submission
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compressed_proof: Option<CompressedProof>,
+
     /// Full proof (optional, for verification)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub full_proof: Option<StarkProof>,
-    
+
     /// Execution metrics
     pub metrics: ExecutionMetrics,
-    
+
     /// TEE attestation (if enabled)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tee_attestation: Option<TeeAttestation>,
+}
+
+impl ObelyskJobResult {
+    /// Check if the compressed proof is valid for on-chain submission
+    pub fn is_valid_for_onchain(&self) -> bool {
+        self.compressed_proof
+            .as_ref()
+            .map(|p| p.is_valid_for_onchain())
+            .unwrap_or(false)
+    }
+
+    /// Get compressed proof size in bytes
+    pub fn compressed_proof_size(&self) -> Option<usize> {
+        self.compressed_proof.as_ref().map(|p| p.compressed_size())
+    }
 }
 
 /// Job execution status
@@ -211,18 +238,41 @@ impl ObelyskExecutor {
         
         // Step 3: Extract 32-byte attestation
         let proof_attestation = self.extract_attestation(&proof, &output);
-        
-        // Step 4: Generate TEE attestation if enabled
+
+        // Step 4: Serialize and compress proof for on-chain submission
+        let proof_bytes = bincode::serialize(&proof)
+            .context("Failed to serialize proof")?;
+        let proof_hash = compute_proof_hash(&proof_bytes);
+
+        // Compress proof using Zstd (best compression ratio for on-chain)
+        let compressed_proof = ProofCompressor::compress(&proof_bytes, CompressionAlgorithm::Zstd)
+            .context("Failed to compress proof")?;
+
+        info!(
+            "  Proof compression: {} -> {} bytes ({:.1}% reduction)",
+            proof_bytes.len(),
+            compressed_proof.compressed_size(),
+            (1.0 - compressed_proof.compression_ratio) * 100.0
+        );
+
+        // Compute proof commitment for on-chain verification
+        let proof_commitment = compute_proof_commitment(
+            &proof_hash,
+            job_id.parse::<u128>().unwrap_or(0),
+            &self.worker_id,
+        );
+
+        // Step 5: Generate TEE attestation if enabled
         let tee_attestation = if self.config.enable_tee {
             Some(self.generate_tee_attestation(job_id, &proof_attestation))
         } else {
             None
         };
-        
+
         // Calculate metrics
         let total_time_ms = total_start.elapsed().as_millis() as u64;
         let gpu_used = self.is_gpu_available();
-        
+
         // Estimate CPU time for speedup calculation
         let estimated_cpu_time_ms = self.estimate_cpu_time(trace.steps.len());
         let gpu_speedup = if gpu_used && proof_time_ms > 0 {
@@ -230,7 +280,7 @@ impl ObelyskExecutor {
         } else {
             None
         };
-        
+
         let metrics = ExecutionMetrics {
             total_time_ms,
             vm_time_ms,
@@ -240,18 +290,30 @@ impl ObelyskExecutor {
             gpu_used,
             gpu_speedup,
         };
-        
+
         info!(
-            "✅ Job {} completed: {}ms total, {}x GPU speedup",
+            "✅ Job {} completed: {}ms total, {}x GPU speedup, {} bytes compressed",
             job_id,
             total_time_ms,
-            gpu_speedup.map(|s| format!("{:.1}", s)).unwrap_or_else(|| "N/A".to_string())
+            gpu_speedup.map(|s| format!("{:.1}", s)).unwrap_or_else(|| "N/A".to_string()),
+            compressed_proof.compressed_size()
         );
-        
+
+        // Warn if proof is too large for on-chain
+        if !compressed_proof.is_valid_for_onchain() {
+            tracing::warn!(
+                "⚠️ Proof exceeds on-chain limit: {} bytes (max 256KB)",
+                compressed_proof.compressed_size()
+            );
+        }
+
         Ok(ObelyskJobResult {
             job_id: job_id.to_string(),
             status: ObelyskJobStatus::Completed,
             proof_attestation,
+            proof_hash,
+            proof_commitment,
+            compressed_proof: Some(compressed_proof),
             full_proof: Some(proof),
             metrics,
             tee_attestation,
@@ -448,43 +510,64 @@ impl ObelyskExecutor {
     
     /// Generate data pipeline program
     fn generate_data_pipeline_program(&self, payload: &[u8]) -> Vec<Instruction> {
-        // Data pipeline: hash and aggregate
+        // Data pipeline: hash and aggregate using supported opcodes (ADD, SUB, MUL, LoadImm)
+        // Note: XOR is not yet supported in the constraint system
         let mut program = Vec::new();
-        
-        // Initialize
+
+        // Initialize accumulator
         program.push(Instruction {
             opcode: OpCode::LoadImm,
             dst: 0,
             src1: 0,
             src2: 0,
-            immediate: Some(M31::from(0)),
+            immediate: Some(M31::from(1)),
             address: None,
         });
-        
-        // Process each chunk
+
+        // Load a constant for mixing
+        program.push(Instruction {
+            opcode: OpCode::LoadImm,
+            dst: 1,
+            src1: 0,
+            src2: 0,
+            immediate: Some(M31::from(0x9e3779b9_u32)), // Golden ratio constant
+            address: None,
+        });
+
+        // Process each chunk using MUL and ADD (simulated hash)
         let chunks = payload.len() / 4;
-        for i in 0..chunks.min(32) {
-            // XOR with accumulator (simple hash)
+        for i in 0..chunks.min(8) {
+            // Load input value
             program.push(Instruction {
-                opcode: OpCode::Xor,
-                dst: 0,
+                opcode: OpCode::LoadImm,
+                dst: 2,
                 src1: 0,
-                src2: (i % 8) as u8,
+                src2: 0,
+                immediate: Some(M31::from(payload.get(i * 4).copied().unwrap_or(0) as u32)),
+                address: None,
+            });
+
+            // Multiply with constant
+            program.push(Instruction {
+                opcode: OpCode::Mul,
+                dst: 3,
+                src1: 2,
+                src2: 1,
                 immediate: None,
                 address: None,
             });
-            
-            // Add constant to mix
+
+            // Add to accumulator
             program.push(Instruction {
                 opcode: OpCode::Add,
                 dst: 0,
                 src1: 0,
-                src2: 0,
-                immediate: Some(M31::from(0x9e3779b9_u32)),  // Golden ratio constant
+                src2: 3,
+                immediate: None,
                 address: None,
             });
         }
-        
+
         program.push(Instruction {
             opcode: OpCode::Halt,
             dst: 0,
@@ -493,7 +576,7 @@ impl ObelyskExecutor {
             immediate: None,
             address: None,
         });
-        
+
         program
     }
     
@@ -681,7 +764,7 @@ mod tests {
         let payload = b"SELECT * FROM data WHERE value > 100";
         let result = executor.execute_with_proof("job-data", "DataPipeline", payload).await;
 
-        assert!(result.is_ok());
+        assert!(result.is_ok(), "Data pipeline job failed: {:?}", result.err());
     }
 }
 

@@ -35,6 +35,7 @@ url = "2.5"
 
 # ===== Cryptography =====
 rand = "0.8"
+getrandom = "0.2"  # Secure OS randomness for cryptographic operations
 sha2 = "0.10"
 sha3 = "0.10"
 blake2 = "0.10"

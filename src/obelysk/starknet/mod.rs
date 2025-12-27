@@ -10,9 +10,18 @@ pub mod verifier_contract;
 // Proof compression for 30-50% calldata/gas savings
 pub mod proof_compression;
 
+// Staking contract client for worker stake verification
+pub mod staking_client;
+
+// Reputation contract client for worker reputation queries
+pub mod reputation_client;
+
+// Network configuration, circuit breaker, and metrics
+pub mod network;
+
 pub use proof_serializer::{CairoSerializedProof, ProofSerializer};
 pub use starknet_client::{
-    StarknetClient, StarknetClientConfig, StarknetNetwork,
+    StarknetClient, StarknetClientConfig,
     FriConfig, FriLayerCommitment, FriVerificationRequest, FriVerificationResult,
     SubmissionResult, SubmissionStatus, VerificationResult,
 };
@@ -20,5 +29,16 @@ pub use verifier_contract::VerifierContract;
 pub use proof_compression::{
     ProofCompressor, CompressedProof, CompressionLevel, CompressionAlgorithm,
     CompressionStats, BatchCompressor, OnChainCompressedProof,
+};
+pub use staking_client::{
+    StakingClient, StakingClientConfig, GpuTier, WorkerStake,
+};
+pub use reputation_client::{
+    ReputationClient, ReputationClientConfig, ReputationScore,
+};
+// Export network types for production configuration
+pub use network::{
+    StarknetNetwork, CircuitBreaker, CircuitBreakerConfig, CircuitState,
+    RpcMetrics, RpcMetricsSnapshot, NetworkContracts,
 };
 
