@@ -199,28 +199,38 @@ pub fn prove_with_stwo(
         .map(|_| BaseColumn::zeros(size))
         .collect();
     
-    // 6. Fill trace data
-    for (row_idx, step) in trace.steps.iter().enumerate() {
-        if row_idx >= size {
-            break;
-        }
-        
-        // Current state
-        columns[0].data[row_idx] = m31_to_stwo(M31::from_u32(step.pc as u32)).into();
-        columns[1].data[row_idx] = m31_to_stwo(step.registers_before[0]).into();
-        columns[2].data[row_idx] = m31_to_stwo(step.registers_before[1]).into();
-        
-        // Next state
-        if row_idx + 1 < trace.steps.len() {
-            let next_step = &trace.steps[row_idx + 1];
-            columns[3].data[row_idx] = m31_to_stwo(M31::from_u32(next_step.pc as u32)).into();
-            columns[4].data[row_idx] = m31_to_stwo(next_step.registers_before[0]).into();
-            columns[5].data[row_idx] = m31_to_stwo(next_step.registers_before[1]).into();
-        } else {
-            // Last row: copy current state
-            columns[3].data[row_idx] = columns[0].data[row_idx];
-            columns[4].data[row_idx] = columns[1].data[row_idx];
-            columns[5].data[row_idx] = columns[2].data[row_idx];
+    // 6. Fill trace data using slices for proper SIMD access
+    {
+        // Get mutable slices for all columns
+        let col0 = columns[0].as_mut_slice();
+        let col1 = columns[1].as_mut_slice();
+        let col2 = columns[2].as_mut_slice();
+        let col3 = columns[3].as_mut_slice();
+        let col4 = columns[4].as_mut_slice();
+        let col5 = columns[5].as_mut_slice();
+
+        for (row_idx, step) in trace.steps.iter().enumerate() {
+            if row_idx >= size {
+                break;
+            }
+
+            // Current state
+            col0[row_idx] = m31_to_stwo(M31::from_u32(step.pc as u32));
+            col1[row_idx] = m31_to_stwo(step.registers_before[0]);
+            col2[row_idx] = m31_to_stwo(step.registers_before[1]);
+
+            // Next state
+            if row_idx + 1 < trace.steps.len() {
+                let next_step = &trace.steps[row_idx + 1];
+                col3[row_idx] = m31_to_stwo(M31::from_u32(next_step.pc as u32));
+                col4[row_idx] = m31_to_stwo(next_step.registers_before[0]);
+                col5[row_idx] = m31_to_stwo(next_step.registers_before[1]);
+            } else {
+                // Last row: copy current state
+                col3[row_idx] = col0[row_idx];
+                col4[row_idx] = col1[row_idx];
+                col5[row_idx] = col2[row_idx];
+            }
         }
     }
     
@@ -371,31 +381,40 @@ fn prove_with_stwo_gpu_backend(
         .map(|_| BaseColumn::zeros(size))
         .collect();
     
-    // 6. Fill trace data
-    for (row_idx, step) in trace.steps.iter().enumerate() {
-        if row_idx >= size {
-            break;
-        }
-        
-        // Current state
-        columns[0].data[row_idx] = m31_to_stwo(M31::from_u32(step.pc as u32)).into();
-        columns[1].data[row_idx] = m31_to_stwo(step.registers_before[0]).into();
-        columns[2].data[row_idx] = m31_to_stwo(step.registers_before[1]).into();
-        
-        // Next state
-        if row_idx + 1 < trace.steps.len() {
-            let next_step = &trace.steps[row_idx + 1];
-            columns[3].data[row_idx] = m31_to_stwo(M31::from_u32(next_step.pc as u32)).into();
-            columns[4].data[row_idx] = m31_to_stwo(next_step.registers_before[0]).into();
-            columns[5].data[row_idx] = m31_to_stwo(next_step.registers_before[1]).into();
-        } else {
-            columns[3].data[row_idx] = columns[0].data[row_idx];
-            columns[4].data[row_idx] = columns[1].data[row_idx];
-            columns[5].data[row_idx] = columns[2].data[row_idx];
+    // 6. Fill trace data using slices for proper SIMD access
+    {
+        let col0 = columns[0].as_mut_slice();
+        let col1 = columns[1].as_mut_slice();
+        let col2 = columns[2].as_mut_slice();
+        let col3 = columns[3].as_mut_slice();
+        let col4 = columns[4].as_mut_slice();
+        let col5 = columns[5].as_mut_slice();
+
+        for (row_idx, step) in trace.steps.iter().enumerate() {
+            if row_idx >= size {
+                break;
+            }
+
+            // Current state
+            col0[row_idx] = m31_to_stwo(M31::from_u32(step.pc as u32));
+            col1[row_idx] = m31_to_stwo(step.registers_before[0]);
+            col2[row_idx] = m31_to_stwo(step.registers_before[1]);
+
+            // Next state
+            if row_idx + 1 < trace.steps.len() {
+                let next_step = &trace.steps[row_idx + 1];
+                col3[row_idx] = m31_to_stwo(M31::from_u32(next_step.pc as u32));
+                col4[row_idx] = m31_to_stwo(next_step.registers_before[0]);
+                col5[row_idx] = m31_to_stwo(next_step.registers_before[1]);
+            } else {
+                col3[row_idx] = col0[row_idx];
+                col4[row_idx] = col1[row_idx];
+                col5[row_idx] = col2[row_idx];
+            }
         }
     }
-    
-    // 7. Convert columns to CircleEvaluation format  
+
+    // 7. Convert columns to CircleEvaluation format
     let domain = CanonicCoset::new(log_size).circle_domain();
     let trace_evals: Vec<CircleEvaluation<GpuBackend, _, _>> = columns
         .into_iter()
