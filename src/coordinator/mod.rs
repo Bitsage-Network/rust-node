@@ -41,6 +41,10 @@ pub use kafka::{KafkaConfig, KafkaEvent};
 pub use config::{NetworkCoordinatorConfig, JobProcessorConfig, WorkerManagerConfig, BlockchainConfig, MetricsConfig};
 pub use rate_limiter::{RateLimiter, RateLimiterConfig, RateLimitConfig, RateLimitError, RateLimiterStats};
 
+// Re-export batch operation types
+pub use job_processor::{BatchConfig, PendingSubmission, PendingResult};
+pub use blockchain_bridge::{BatchJobSubmission, BatchResultSubmission, BatchSubmissionResult};
+
 /// Main coordinator service that orchestrates all components
 pub struct EnhancedCoordinator {
     config: CoordinatorConfig,

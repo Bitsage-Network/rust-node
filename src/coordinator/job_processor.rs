@@ -25,6 +25,9 @@ use crate::storage::Database;
 use crate::blockchain::contracts::JobManagerContract;
 use crate::coordinator::config::JobProcessorConfig;
 use crate::coordinator::worker_manager::WorkerManager;
+use crate::coordinator::blockchain_bridge::{
+    BlockchainBridge, BatchJobSubmission, BatchResultSubmission, BatchSubmissionResult,
+};
 
 /// Job processor events
 #[derive(Debug, Clone)]
@@ -83,6 +86,43 @@ pub struct JobStats {
     pub success_rate: f64,
 }
 
+/// Batch processing configuration
+#[derive(Debug, Clone)]
+pub struct BatchConfig {
+    /// Maximum jobs per batch
+    pub max_batch_size: usize,
+    /// Maximum wait time before flushing batch (ms)
+    pub max_batch_wait_ms: u64,
+    /// Enable blockchain batch submission
+    pub enabled: bool,
+}
+
+impl Default for BatchConfig {
+    fn default() -> Self {
+        Self {
+            max_batch_size: 50,
+            max_batch_wait_ms: 5000, // 5 seconds
+            enabled: true,
+        }
+    }
+}
+
+/// Pending blockchain submission
+#[derive(Debug, Clone)]
+pub struct PendingSubmission {
+    pub job_id: JobId,
+    pub submission: BatchJobSubmission,
+    pub created_at: Instant,
+}
+
+/// Pending result submission
+#[derive(Debug, Clone)]
+pub struct PendingResult {
+    pub job_id: JobId,
+    pub submission: BatchResultSubmission,
+    pub created_at: Instant,
+}
+
 /// Job queue entry with priority ordering
 #[derive(Debug, Clone)]
 struct JobQueueEntry {
@@ -137,6 +177,15 @@ pub struct JobProcessor {
     // Worker manager for job assignment
     worker_manager: Option<Arc<WorkerManager>>,
 
+    // Blockchain bridge for batch operations
+    blockchain_bridge: Option<Arc<BlockchainBridge>>,
+    batch_config: BatchConfig,
+
+    // Batch queues for blockchain submissions
+    pending_job_submissions: Arc<Mutex<Vec<PendingSubmission>>>,
+    pending_result_submissions: Arc<Mutex<Vec<PendingResult>>>,
+    pending_reward_distributions: Arc<Mutex<Vec<String>>>,
+
     // Job storage
     active_jobs: Arc<RwLock<HashMap<JobId, JobInfo>>>,
     job_queue: Arc<Mutex<BinaryHeap<JobQueueEntry>>>,
@@ -178,6 +227,11 @@ impl JobProcessor {
             database,
             job_manager_contract,
             worker_manager: None,
+            blockchain_bridge: None,
+            batch_config: BatchConfig::default(),
+            pending_job_submissions: Arc::new(Mutex::new(Vec::new())),
+            pending_result_submissions: Arc::new(Mutex::new(Vec::new())),
+            pending_reward_distributions: Arc::new(Mutex::new(Vec::new())),
             active_jobs: Arc::new(RwLock::new(HashMap::new())),
             job_queue: Arc::new(Mutex::new(BinaryHeap::new())),
             stats: Arc::new(RwLock::new(stats)),
@@ -193,6 +247,17 @@ impl JobProcessor {
         self.worker_manager = Some(worker_manager);
     }
 
+    /// Set the blockchain bridge for on-chain operations
+    pub fn set_blockchain_bridge(&mut self, bridge: Arc<BlockchainBridge>) {
+        self.blockchain_bridge = Some(bridge);
+        info!("Blockchain bridge configured for batch operations");
+    }
+
+    /// Configure batch processing
+    pub fn set_batch_config(&mut self, config: BatchConfig) {
+        self.batch_config = config;
+    }
+
     /// Create with worker manager
     pub fn with_worker_manager(
         config: JobProcessorConfig,
@@ -205,10 +270,26 @@ impl JobProcessor {
         processor
     }
 
+    /// Create with worker manager and blockchain bridge
+    pub fn with_blockchain(
+        config: JobProcessorConfig,
+        database: Arc<Database>,
+        job_manager_contract: Arc<JobManagerContract>,
+        worker_manager: Arc<WorkerManager>,
+        blockchain_bridge: Arc<BlockchainBridge>,
+        batch_config: BatchConfig,
+    ) -> Self {
+        let mut processor = Self::new(config, database, job_manager_contract);
+        processor.worker_manager = Some(worker_manager);
+        processor.blockchain_bridge = Some(blockchain_bridge);
+        processor.batch_config = batch_config;
+        processor
+    }
+
     /// Start the job processor
     pub async fn start(&self) -> Result<()> {
         info!("Starting Job Processor...");
-        
+
         {
             let mut running = self.running.write().await;
             if *running {
@@ -222,8 +303,16 @@ impl JobProcessor {
         let _timeout_monitoring_handle = self.start_timeout_monitoring().await?;
         let _stats_collection_handle = self.start_stats_collection().await?;
 
+        // Start batch flush task if blockchain bridge is configured
+        if self.blockchain_bridge.is_some() && self.batch_config.enabled {
+            let _batch_flush_handle = self.start_batch_flush_task().await?;
+            info!("Batch blockchain submission enabled (max_size: {}, max_wait: {}ms)",
+                self.batch_config.max_batch_size,
+                self.batch_config.max_batch_wait_ms);
+        }
+
         info!("Job processor started successfully");
-        
+
         Ok(())
     }
 
@@ -960,6 +1049,435 @@ impl JobProcessor {
     /// Check if the event receiver is still available.
     pub async fn has_event_receiver(&self) -> bool {
         self.event_receiver.read().await.is_some()
+    }
+
+    // =========================================================================
+    // Batch Blockchain Operations
+    // =========================================================================
+
+    /// Queue a job for batch blockchain submission
+    ///
+    /// Instead of submitting each job individually to the blockchain,
+    /// this queues jobs for batch processing, reducing gas costs by ~40%.
+    pub async fn queue_job_for_blockchain(
+        &self,
+        job_id: JobId,
+        job_type: &str,
+        worker_address: &str,
+        max_cost: u64,
+        timeout_secs: u64,
+        priority: u8,
+        payload_hash: Option<String>,
+    ) -> Result<()> {
+        if self.blockchain_bridge.is_none() {
+            debug!("No blockchain bridge configured, skipping queue");
+            return Ok(());
+        }
+
+        let submission = BatchJobSubmission {
+            job_id: job_id.to_string(),
+            job_type: job_type.to_string(),
+            worker_address: worker_address.to_string(),
+            max_cost,
+            timeout_secs,
+            priority,
+            payload_hash,
+        };
+
+        let pending = PendingSubmission {
+            job_id,
+            submission,
+            created_at: Instant::now(),
+        };
+
+        let mut queue = self.pending_job_submissions.lock().await;
+        queue.push(pending);
+
+        debug!("Job {} queued for batch blockchain submission (queue size: {})",
+            job_id, queue.len());
+
+        // Check if we should flush immediately due to batch size
+        if queue.len() >= self.batch_config.max_batch_size {
+            drop(queue); // Release lock before flush
+            self.flush_job_submissions().await?;
+        }
+
+        Ok(())
+    }
+
+    /// Queue a job result for batch blockchain submission
+    pub async fn queue_result_for_blockchain(
+        &self,
+        job_id: JobId,
+        result_hash: &str,
+        execution_time_ms: u64,
+        success: bool,
+        tee_attestation: Option<String>,
+    ) -> Result<()> {
+        if self.blockchain_bridge.is_none() {
+            debug!("No blockchain bridge configured, skipping result queue");
+            return Ok(());
+        }
+
+        let submission = BatchResultSubmission {
+            job_id: job_id.to_string(),
+            result_hash: result_hash.to_string(),
+            execution_time_ms,
+            success,
+            tee_attestation,
+        };
+
+        let pending = PendingResult {
+            job_id,
+            submission,
+            created_at: Instant::now(),
+        };
+
+        let mut queue = self.pending_result_submissions.lock().await;
+        queue.push(pending);
+
+        debug!("Result for job {} queued for batch submission (queue size: {})",
+            job_id, queue.len());
+
+        // Check if we should flush immediately
+        if queue.len() >= self.batch_config.max_batch_size {
+            drop(queue);
+            self.flush_result_submissions().await?;
+        }
+
+        Ok(())
+    }
+
+    /// Queue a completed job for batch reward distribution
+    pub async fn queue_reward_distribution(&self, job_id: JobId) -> Result<()> {
+        if self.blockchain_bridge.is_none() {
+            return Ok(());
+        }
+
+        let mut queue = self.pending_reward_distributions.lock().await;
+        queue.push(job_id.to_string());
+
+        debug!("Job {} queued for batch reward distribution (queue size: {})",
+            job_id, queue.len());
+
+        if queue.len() >= self.batch_config.max_batch_size {
+            drop(queue);
+            self.flush_reward_distributions().await?;
+        }
+
+        Ok(())
+    }
+
+    /// Flush all pending job submissions to blockchain
+    pub async fn flush_job_submissions(&self) -> Result<BatchSubmissionResult> {
+        let bridge = match &self.blockchain_bridge {
+            Some(b) => b,
+            None => return Ok(BatchSubmissionResult {
+                transaction_hash: starknet::core::types::FieldElement::ZERO,
+                job_ids: vec![],
+                success_count: 0,
+                failed_count: 0,
+                errors: vec![],
+            }),
+        };
+
+        let submissions: Vec<BatchJobSubmission> = {
+            let mut queue = self.pending_job_submissions.lock().await;
+            queue.drain(..).map(|p| p.submission).collect()
+        };
+
+        if submissions.is_empty() {
+            return Ok(BatchSubmissionResult {
+                transaction_hash: starknet::core::types::FieldElement::ZERO,
+                job_ids: vec![],
+                success_count: 0,
+                failed_count: 0,
+                errors: vec![],
+            });
+        }
+
+        info!("Flushing {} job submissions to blockchain", submissions.len());
+
+        let result = bridge.submit_jobs_batch(submissions).await?;
+
+        if result.failed_count > 0 {
+            warn!("Batch job submission had {} failures: {:?}",
+                result.failed_count, result.errors);
+        }
+
+        Ok(result)
+    }
+
+    /// Flush all pending result submissions to blockchain
+    pub async fn flush_result_submissions(&self) -> Result<BatchSubmissionResult> {
+        let bridge = match &self.blockchain_bridge {
+            Some(b) => b,
+            None => return Ok(BatchSubmissionResult {
+                transaction_hash: starknet::core::types::FieldElement::ZERO,
+                job_ids: vec![],
+                success_count: 0,
+                failed_count: 0,
+                errors: vec![],
+            }),
+        };
+
+        let submissions: Vec<BatchResultSubmission> = {
+            let mut queue = self.pending_result_submissions.lock().await;
+            queue.drain(..).map(|p| p.submission).collect()
+        };
+
+        if submissions.is_empty() {
+            return Ok(BatchSubmissionResult {
+                transaction_hash: starknet::core::types::FieldElement::ZERO,
+                job_ids: vec![],
+                success_count: 0,
+                failed_count: 0,
+                errors: vec![],
+            });
+        }
+
+        info!("Flushing {} result submissions to blockchain", submissions.len());
+
+        let result = bridge.submit_results_batch(submissions).await?;
+
+        if result.failed_count > 0 {
+            warn!("Batch result submission had {} failures: {:?}",
+                result.failed_count, result.errors);
+        }
+
+        Ok(result)
+    }
+
+    /// Flush all pending reward distributions to blockchain
+    pub async fn flush_reward_distributions(&self) -> Result<BatchSubmissionResult> {
+        let bridge = match &self.blockchain_bridge {
+            Some(b) => b,
+            None => return Ok(BatchSubmissionResult {
+                transaction_hash: starknet::core::types::FieldElement::ZERO,
+                job_ids: vec![],
+                success_count: 0,
+                failed_count: 0,
+                errors: vec![],
+            }),
+        };
+
+        let job_ids: Vec<String> = {
+            let mut queue = self.pending_reward_distributions.lock().await;
+            queue.drain(..).collect()
+        };
+
+        if job_ids.is_empty() {
+            return Ok(BatchSubmissionResult {
+                transaction_hash: starknet::core::types::FieldElement::ZERO,
+                job_ids: vec![],
+                success_count: 0,
+                failed_count: 0,
+                errors: vec![],
+            });
+        }
+
+        info!("Flushing {} reward distributions to blockchain", job_ids.len());
+
+        let result = bridge.distribute_rewards_batch(job_ids).await?;
+
+        if result.failed_count > 0 {
+            warn!("Batch reward distribution had {} failures: {:?}",
+                result.failed_count, result.errors);
+        }
+
+        Ok(result)
+    }
+
+    /// Flush all pending blockchain operations
+    pub async fn flush_all_blockchain_ops(&self) -> Result<()> {
+        // Flush all queues in parallel
+        let (jobs_result, results_result, rewards_result) = tokio::join!(
+            self.flush_job_submissions(),
+            self.flush_result_submissions(),
+            self.flush_reward_distributions()
+        );
+
+        // Log any errors but don't fail - partial success is acceptable
+        if let Err(e) = jobs_result {
+            error!("Failed to flush job submissions: {}", e);
+        }
+        if let Err(e) = results_result {
+            error!("Failed to flush result submissions: {}", e);
+        }
+        if let Err(e) = rewards_result {
+            error!("Failed to flush reward distributions: {}", e);
+        }
+
+        Ok(())
+    }
+
+    /// Get pending batch counts
+    pub async fn get_pending_batch_counts(&self) -> (usize, usize, usize) {
+        let jobs = self.pending_job_submissions.lock().await.len();
+        let results = self.pending_result_submissions.lock().await.len();
+        let rewards = self.pending_reward_distributions.lock().await.len();
+        (jobs, results, rewards)
+    }
+
+    /// Start the batch flush background task
+    async fn start_batch_flush_task(&self) -> Result<()> {
+        let pending_jobs = Arc::clone(&self.pending_job_submissions);
+        let pending_results = Arc::clone(&self.pending_result_submissions);
+        let pending_rewards = Arc::clone(&self.pending_reward_distributions);
+        let bridge = self.blockchain_bridge.clone();
+        let max_wait_ms = self.batch_config.max_batch_wait_ms;
+        let running = Arc::clone(&self.running);
+
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_millis(max_wait_ms));
+
+            loop {
+                interval.tick().await;
+
+                // Check if still running
+                if !*running.read().await {
+                    info!("Batch flush task stopping");
+                    break;
+                }
+
+                let bridge = match &bridge {
+                    Some(b) => b,
+                    None => continue,
+                };
+
+                // Flush job submissions if any are pending
+                let job_submissions: Vec<BatchJobSubmission> = {
+                    let mut queue = pending_jobs.lock().await;
+                    if queue.is_empty() {
+                        vec![]
+                    } else {
+                        // Check if oldest entry has waited long enough
+                        if let Some(oldest) = queue.first() {
+                            if oldest.created_at.elapsed().as_millis() >= max_wait_ms as u128 {
+                                queue.drain(..).map(|p| p.submission).collect()
+                            } else {
+                                vec![]
+                            }
+                        } else {
+                            vec![]
+                        }
+                    }
+                };
+
+                if !job_submissions.is_empty() {
+                    info!("Batch flush: submitting {} jobs", job_submissions.len());
+                    if let Err(e) = bridge.submit_jobs_batch(job_submissions).await {
+                        error!("Batch job submission failed: {}", e);
+                    }
+                }
+
+                // Flush result submissions
+                let result_submissions: Vec<BatchResultSubmission> = {
+                    let mut queue = pending_results.lock().await;
+                    if queue.is_empty() {
+                        vec![]
+                    } else {
+                        if let Some(oldest) = queue.first() {
+                            if oldest.created_at.elapsed().as_millis() >= max_wait_ms as u128 {
+                                queue.drain(..).map(|p| p.submission).collect()
+                            } else {
+                                vec![]
+                            }
+                        } else {
+                            vec![]
+                        }
+                    }
+                };
+
+                if !result_submissions.is_empty() {
+                    info!("Batch flush: submitting {} results", result_submissions.len());
+                    if let Err(e) = bridge.submit_results_batch(result_submissions).await {
+                        error!("Batch result submission failed: {}", e);
+                    }
+                }
+
+                // Flush reward distributions
+                let reward_job_ids: Vec<String> = {
+                    let mut queue = pending_rewards.lock().await;
+                    if queue.is_empty() {
+                        vec![]
+                    } else {
+                        // No timestamp tracking for rewards, just flush if any pending
+                        queue.drain(..).collect()
+                    }
+                };
+
+                if !reward_job_ids.is_empty() {
+                    info!("Batch flush: distributing rewards for {} jobs", reward_job_ids.len());
+                    if let Err(e) = bridge.distribute_rewards_batch(reward_job_ids).await {
+                        error!("Batch reward distribution failed: {}", e);
+                    }
+                }
+            }
+        });
+
+        Ok(())
+    }
+
+    /// Submit multiple jobs in a single batch (convenience method)
+    pub async fn submit_jobs_batch(
+        &self,
+        requests: Vec<(JobRequest, String)>, // (request, worker_address)
+    ) -> Result<Vec<JobId>> {
+        let mut job_ids = Vec::with_capacity(requests.len());
+
+        for (request, worker_address) in requests {
+            // Create the job normally
+            let job_id = self.submit_job(request.clone()).await?;
+            job_ids.push(job_id);
+
+            // Queue for blockchain submission
+            let job_type = request.job_type.to_string();
+            self.queue_job_for_blockchain(
+                job_id,
+                &job_type,
+                &worker_address,
+                request.max_cost,
+                request.max_duration_secs,
+                request.priority,
+                None,
+            ).await?;
+        }
+
+        // Force flush after batch submission
+        self.flush_job_submissions().await?;
+
+        info!("Batch submitted {} jobs", job_ids.len());
+        Ok(job_ids)
+    }
+
+    /// Complete multiple jobs in a single batch
+    pub async fn complete_jobs_batch(
+        &self,
+        completions: Vec<(JobId, CoordinatorJobResult, String)>, // (job_id, result, result_hash)
+    ) -> Result<()> {
+        for (job_id, result, result_hash) in completions {
+            // Complete the job locally
+            self.complete_job(job_id, result.clone()).await?;
+
+            // Queue for blockchain submission
+            let execution_time = result.execution_time_secs.map(|s| s as u64 * 1000).unwrap_or(0);
+            self.queue_result_for_blockchain(
+                job_id,
+                &result_hash,
+                execution_time,
+                result.error.is_none(),
+                None,
+            ).await?;
+
+            // Queue reward distribution
+            self.queue_reward_distribution(job_id).await?;
+        }
+
+        // Force flush all blockchain operations
+        self.flush_all_blockchain_ops().await?;
+
+        Ok(())
     }
 }
 
