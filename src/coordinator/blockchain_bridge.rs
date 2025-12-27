@@ -92,8 +92,19 @@ impl BlockchainBridge {
     }
 
     /// Create a disabled bridge (for testing without blockchain)
+    /// Returns None if the client cannot be created (which is fine for disabled mode)
     pub fn disabled() -> Self {
-        let client = Arc::new(StarknetClient::new("http://localhost:5050".to_string()).unwrap());
+        // Use a fallback client - if creation fails, we still return a disabled bridge
+        // since the bridge won't be used anyway when disabled
+        let client = Arc::new(
+            StarknetClient::new("http://localhost:5050".to_string())
+                .unwrap_or_else(|_| {
+                    // Fallback to a minimal client that will fail on any real operation
+                    // This is acceptable since the bridge is disabled
+                    StarknetClient::new("http://127.0.0.1:1".to_string())
+                        .expect("Failed to create even fallback StarknetClient")
+                })
+        );
         Self {
             client: client.clone(),
             job_manager: Arc::new(JobManagerContract::new(
@@ -245,7 +256,9 @@ impl BlockchainBridge {
                 hasher.update(result_hash.as_bytes());
                 let hash = hasher.finalize();
                 let hash_bytes: [u8; 32] = hash.into();
-                FieldElement::from_bytes_be(&hash_bytes).unwrap()
+                // SHA256 produces 32 bytes which is valid for FieldElement, but handle edge case
+                FieldElement::from_bytes_be(&hash_bytes)
+                    .unwrap_or(FieldElement::ZERO)
             });
 
         // Build computation proof with TEE attestation if present

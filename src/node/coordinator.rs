@@ -607,7 +607,8 @@ impl JobCoordinator {
     fn find_best_worker<'a>(&self, workers: &[&'a WorkerInfo], task: &Task) -> Option<&'a WorkerInfo> {
         workers.iter()
             .filter(|w| self.worker_can_handle_task(w, task))
-            .min_by(|a, b| a.current_load.partial_cmp(&b.current_load).unwrap())
+            .min_by(|a, b| a.current_load.partial_cmp(&b.current_load)
+                .unwrap_or(std::cmp::Ordering::Equal))
             .copied()
     }
 

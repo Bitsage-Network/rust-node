@@ -665,12 +665,17 @@ impl NetworkActor {
 
 impl Default for P2PConfig {
     fn default() -> Self {
+        // These are compile-time constant addresses that are guaranteed to parse
+        let default_addresses = vec![
+            "/ip4/0.0.0.0/tcp/4001".parse()
+                .expect("Invalid hardcoded IPv4 multiaddr - this is a bug"),
+            "/ip6/::/tcp/4001".parse()
+                .expect("Invalid hardcoded IPv6 multiaddr - this is a bug"),
+        ];
+
         Self {
             keypair: None,
-            listen_addresses: vec![
-                "/ip4/0.0.0.0/tcp/4001".parse().unwrap(),
-                "/ip6/::/tcp/4001".parse().unwrap(),
-            ],
+            listen_addresses: default_addresses,
             bootstrap_peers: vec![],
             max_peers: 100,
             connection_timeout: Duration::from_secs(30),

@@ -363,13 +363,15 @@ impl ProductionCoordinator {
                     .filter(|w| w.status == WorkerStatus::Online)
                     .filter(|w| self.worker_meets_requirements(w, &job.request.requirements))
                     .min_by(|a, b| {
-                        // Primary: Load
-                        let load_cmp = a.current_load.partial_cmp(&b.current_load).unwrap();
+                        // Primary: Load (use Equal as fallback for NaN)
+                        let load_cmp = a.current_load.partial_cmp(&b.current_load)
+                            .unwrap_or(std::cmp::Ordering::Equal);
                         if load_cmp != std::cmp::Ordering::Equal {
                             return load_cmp;
                         }
-                        // Secondary: Reputation (higher is better)
-                        b.reputation_score.partial_cmp(&a.reputation_score).unwrap()
+                        // Secondary: Reputation (higher is better, Equal fallback for NaN)
+                        b.reputation_score.partial_cmp(&a.reputation_score)
+                            .unwrap_or(std::cmp::Ordering::Equal)
                     });
 
                 if let Some(worker) = best_worker {

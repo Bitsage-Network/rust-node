@@ -26,40 +26,41 @@ pub enum JobType {
 
 impl JobType {
     /// Convert to FieldElement for Cairo contract calls
+    /// Uses infallible FieldElement::from() for small integer constants
     pub fn to_field_element(&self) -> FieldElement {
         match self {
-            JobType::AIInference => FieldElement::from_hex_be("0x0").unwrap(),
-            JobType::AITraining => FieldElement::from_hex_be("0x1").unwrap(),
-            JobType::ComputerVision => FieldElement::from_hex_be("0x2").unwrap(),
-            JobType::NLP => FieldElement::from_hex_be("0x3").unwrap(),
-            JobType::AudioProcessing => FieldElement::from_hex_be("0x4").unwrap(),
-            JobType::TimeSeriesAnalysis => FieldElement::from_hex_be("0x5").unwrap(),
-            JobType::MultimodalAI => FieldElement::from_hex_be("0x6").unwrap(),
-            JobType::ReinforcementLearning => FieldElement::from_hex_be("0x7").unwrap(),
-            JobType::SpecializedAI => FieldElement::from_hex_be("0x8").unwrap(),
-            JobType::ProofGeneration => FieldElement::from_hex_be("0x9").unwrap(),
-            JobType::ProofVerification => FieldElement::from_hex_be("0xA").unwrap(),
-            JobType::DataPipeline => FieldElement::from_hex_be("0xB").unwrap(),
-            JobType::ConfidentialVM => FieldElement::from_hex_be("0xC").unwrap(),
+            JobType::AIInference => FieldElement::from(0u8),
+            JobType::AITraining => FieldElement::from(1u8),
+            JobType::ComputerVision => FieldElement::from(2u8),
+            JobType::NLP => FieldElement::from(3u8),
+            JobType::AudioProcessing => FieldElement::from(4u8),
+            JobType::TimeSeriesAnalysis => FieldElement::from(5u8),
+            JobType::MultimodalAI => FieldElement::from(6u8),
+            JobType::ReinforcementLearning => FieldElement::from(7u8),
+            JobType::SpecializedAI => FieldElement::from(8u8),
+            JobType::ProofGeneration => FieldElement::from(9u8),
+            JobType::ProofVerification => FieldElement::from(10u8),
+            JobType::DataPipeline => FieldElement::from(11u8),
+            JobType::ConfidentialVM => FieldElement::from(12u8),
         }
     }
 
     /// Convert from FieldElement received from Cairo contract
     pub fn from_field_element(field: FieldElement) -> Option<Self> {
         match field {
-            f if f == FieldElement::from_hex_be("0x0").unwrap() => Some(JobType::AIInference),
-            f if f == FieldElement::from_hex_be("0x1").unwrap() => Some(JobType::AITraining),
-            f if f == FieldElement::from_hex_be("0x2").unwrap() => Some(JobType::ComputerVision),
-            f if f == FieldElement::from_hex_be("0x3").unwrap() => Some(JobType::NLP),
-            f if f == FieldElement::from_hex_be("0x4").unwrap() => Some(JobType::AudioProcessing),
-            f if f == FieldElement::from_hex_be("0x5").unwrap() => Some(JobType::TimeSeriesAnalysis),
-            f if f == FieldElement::from_hex_be("0x6").unwrap() => Some(JobType::MultimodalAI),
-            f if f == FieldElement::from_hex_be("0x7").unwrap() => Some(JobType::ReinforcementLearning),
-            f if f == FieldElement::from_hex_be("0x8").unwrap() => Some(JobType::SpecializedAI),
-            f if f == FieldElement::from_hex_be("0x9").unwrap() => Some(JobType::ProofGeneration),
-            f if f == FieldElement::from_hex_be("0xA").unwrap() => Some(JobType::ProofVerification),
-            f if f == FieldElement::from_hex_be("0xB").unwrap() => Some(JobType::DataPipeline),
-            f if f == FieldElement::from_hex_be("0xC").unwrap() => Some(JobType::ConfidentialVM),
+            f if f == FieldElement::from(0u8) => Some(JobType::AIInference),
+            f if f == FieldElement::from(1u8) => Some(JobType::AITraining),
+            f if f == FieldElement::from(2u8) => Some(JobType::ComputerVision),
+            f if f == FieldElement::from(3u8) => Some(JobType::NLP),
+            f if f == FieldElement::from(4u8) => Some(JobType::AudioProcessing),
+            f if f == FieldElement::from(5u8) => Some(JobType::TimeSeriesAnalysis),
+            f if f == FieldElement::from(6u8) => Some(JobType::MultimodalAI),
+            f if f == FieldElement::from(7u8) => Some(JobType::ReinforcementLearning),
+            f if f == FieldElement::from(8u8) => Some(JobType::SpecializedAI),
+            f if f == FieldElement::from(9u8) => Some(JobType::ProofGeneration),
+            f if f == FieldElement::from(10u8) => Some(JobType::ProofVerification),
+            f if f == FieldElement::from(11u8) => Some(JobType::DataPipeline),
+            f if f == FieldElement::from(12u8) => Some(JobType::ConfidentialVM),
             _ => None,
         }
     }
@@ -76,12 +77,13 @@ pub enum VerificationMethod {
 
 impl VerificationMethod {
     /// Convert to FieldElement for Cairo contract calls
+    /// Uses infallible FieldElement::from() for small integer constants
     pub fn to_field_element(&self) -> FieldElement {
         match self {
-            VerificationMethod::None => FieldElement::from_hex_be("0x0").unwrap(),
-            VerificationMethod::StatisticalSampling => FieldElement::from_hex_be("0x1").unwrap(),
-            VerificationMethod::ZeroKnowledgeProof => FieldElement::from_hex_be("0x2").unwrap(),
-            VerificationMethod::ConsensusValidation => FieldElement::from_hex_be("0x3").unwrap(),
+            VerificationMethod::None => FieldElement::from(0u8),
+            VerificationMethod::StatisticalSampling => FieldElement::from(1u8),
+            VerificationMethod::ZeroKnowledgeProof => FieldElement::from(2u8),
+            VerificationMethod::ConsensusValidation => FieldElement::from(3u8),
         }
     }
 }
@@ -98,13 +100,14 @@ pub enum JobState {
 
 impl JobState {
     /// Convert from FieldElement received from Cairo contract
+    /// Uses infallible FieldElement::from() for comparison
     pub fn from_field_element(field: FieldElement) -> Option<Self> {
         match field {
-            f if f == FieldElement::from_hex_be("0x0").unwrap() => Some(JobState::Queued),
-            f if f == FieldElement::from_hex_be("0x1").unwrap() => Some(JobState::Processing),
-            f if f == FieldElement::from_hex_be("0x2").unwrap() => Some(JobState::Completed),
-            f if f == FieldElement::from_hex_be("0x3").unwrap() => Some(JobState::Failed),
-            f if f == FieldElement::from_hex_be("0x4").unwrap() => Some(JobState::Cancelled),
+            f if f == FieldElement::from(0u8) => Some(JobState::Queued),
+            f if f == FieldElement::from(1u8) => Some(JobState::Processing),
+            f if f == FieldElement::from(2u8) => Some(JobState::Completed),
+            f if f == FieldElement::from(3u8) => Some(JobState::Failed),
+            f if f == FieldElement::from(4u8) => Some(JobState::Cancelled),
             _ => None,
         }
     }
@@ -296,13 +299,14 @@ pub enum WorkerStatus {
 
 impl WorkerStatus {
     /// Convert from FieldElement received from Cairo contract
+    /// Uses infallible FieldElement::from() for bitmask constants
     pub fn from_field_element(field: FieldElement) -> Option<Self> {
         match field {
-            f if f == FieldElement::from_hex_be("0x1").unwrap() => Some(WorkerStatus::Active),
-            f if f == FieldElement::from_hex_be("0x2").unwrap() => Some(WorkerStatus::Inactive),
-            f if f == FieldElement::from_hex_be("0x4").unwrap() => Some(WorkerStatus::Slashed),
-            f if f == FieldElement::from_hex_be("0x8").unwrap() => Some(WorkerStatus::Exiting),
-            f if f == FieldElement::from_hex_be("0x10").unwrap() => Some(WorkerStatus::Banned),
+            f if f == FieldElement::from(1u8) => Some(WorkerStatus::Active),
+            f if f == FieldElement::from(2u8) => Some(WorkerStatus::Inactive),
+            f if f == FieldElement::from(4u8) => Some(WorkerStatus::Slashed),
+            f if f == FieldElement::from(8u8) => Some(WorkerStatus::Exiting),
+            f if f == FieldElement::from(16u8) => Some(WorkerStatus::Banned),
             _ => None,
         }
     }
@@ -355,41 +359,68 @@ pub struct WorkerProfile {
 }
 
 /// Contract function selectors (computed from function names)
+/// These are compile-time constants that use `expect` with clear error messages
+/// since get_selector_from_name only fails for non-ASCII strings (which we don't use)
 pub mod selectors {
     use starknet::core::types::FieldElement;
     use starknet::core::utils::get_selector_from_name;
 
     lazy_static::lazy_static! {
         // Job Manager contract selectors (functions)
-        pub static ref SUBMIT_AI_JOB: FieldElement = get_selector_from_name("submit_ai_job").unwrap();
-        pub static ref SUBMIT_PROVE_JOB: FieldElement = get_selector_from_name("submit_prove_job").unwrap();
-        pub static ref ASSIGN_JOB_TO_WORKER: FieldElement = get_selector_from_name("assign_job_to_worker").unwrap();
-        pub static ref SUBMIT_JOB_RESULT: FieldElement = get_selector_from_name("submit_job_result").unwrap();
-        pub static ref DISTRIBUTE_REWARDS: FieldElement = get_selector_from_name("distribute_rewards").unwrap();
-        pub static ref GET_JOB_DETAILS: FieldElement = get_selector_from_name("get_job_details").unwrap();
-        pub static ref GET_JOB_STATE: FieldElement = get_selector_from_name("get_job_state").unwrap();
-        pub static ref GET_WORKER_STATS: FieldElement = get_selector_from_name("get_worker_stats").unwrap();
-        pub static ref GET_PENDING_JOBS_COUNT: FieldElement = get_selector_from_name("get_pending_jobs_count").unwrap();
-        pub static ref GET_JOB_BY_INDEX: FieldElement = get_selector_from_name("get_job_by_index").unwrap();
+        pub static ref SUBMIT_AI_JOB: FieldElement = get_selector_from_name("submit_ai_job")
+            .expect("Invalid selector name: submit_ai_job");
+        pub static ref SUBMIT_PROVE_JOB: FieldElement = get_selector_from_name("submit_prove_job")
+            .expect("Invalid selector name: submit_prove_job");
+        pub static ref ASSIGN_JOB_TO_WORKER: FieldElement = get_selector_from_name("assign_job_to_worker")
+            .expect("Invalid selector name: assign_job_to_worker");
+        pub static ref SUBMIT_JOB_RESULT: FieldElement = get_selector_from_name("submit_job_result")
+            .expect("Invalid selector name: submit_job_result");
+        pub static ref DISTRIBUTE_REWARDS: FieldElement = get_selector_from_name("distribute_rewards")
+            .expect("Invalid selector name: distribute_rewards");
+        pub static ref GET_JOB_DETAILS: FieldElement = get_selector_from_name("get_job_details")
+            .expect("Invalid selector name: get_job_details");
+        pub static ref GET_JOB_STATE: FieldElement = get_selector_from_name("get_job_state")
+            .expect("Invalid selector name: get_job_state");
+        pub static ref GET_WORKER_STATS: FieldElement = get_selector_from_name("get_worker_stats")
+            .expect("Invalid selector name: get_worker_stats");
+        pub static ref GET_PENDING_JOBS_COUNT: FieldElement = get_selector_from_name("get_pending_jobs_count")
+            .expect("Invalid selector name: get_pending_jobs_count");
+        pub static ref GET_JOB_BY_INDEX: FieldElement = get_selector_from_name("get_job_by_index")
+            .expect("Invalid selector name: get_job_by_index");
 
         // CDC Pool contract selectors (functions)
-        pub static ref REGISTER_WORKER: FieldElement = get_selector_from_name("register_worker").unwrap();
-        pub static ref STAKE_TOKENS: FieldElement = get_selector_from_name("stake_tokens").unwrap();
-        pub static ref UNSTAKE_TOKENS: FieldElement = get_selector_from_name("unstake_tokens").unwrap();
-        pub static ref GET_WORKER_PROFILE: FieldElement = get_selector_from_name("get_worker_profile").unwrap();
-        pub static ref UPDATE_WORKER_STATUS: FieldElement = get_selector_from_name("update_worker_status").unwrap();
+        pub static ref REGISTER_WORKER: FieldElement = get_selector_from_name("register_worker")
+            .expect("Invalid selector name: register_worker");
+        pub static ref STAKE_TOKENS: FieldElement = get_selector_from_name("stake_tokens")
+            .expect("Invalid selector name: stake_tokens");
+        pub static ref UNSTAKE_TOKENS: FieldElement = get_selector_from_name("unstake_tokens")
+            .expect("Invalid selector name: unstake_tokens");
+        pub static ref GET_WORKER_PROFILE: FieldElement = get_selector_from_name("get_worker_profile")
+            .expect("Invalid selector name: get_worker_profile");
+        pub static ref UPDATE_WORKER_STATUS: FieldElement = get_selector_from_name("update_worker_status")
+            .expect("Invalid selector name: update_worker_status");
 
         // Event selectors (for filtering contract events)
-        pub static ref EVENT_JOB_SUBMITTED: FieldElement = get_selector_from_name("JobSubmitted").unwrap();
-        pub static ref EVENT_JOB_ASSIGNED: FieldElement = get_selector_from_name("JobAssigned").unwrap();
-        pub static ref EVENT_JOB_COMPLETED: FieldElement = get_selector_from_name("JobCompleted").unwrap();
-        pub static ref EVENT_JOB_FAILED: FieldElement = get_selector_from_name("JobFailed").unwrap();
-        pub static ref EVENT_JOB_CANCELLED: FieldElement = get_selector_from_name("JobCancelled").unwrap();
-        pub static ref EVENT_WORKER_REGISTERED: FieldElement = get_selector_from_name("WorkerRegistered").unwrap();
-        pub static ref EVENT_WORKER_UPDATED: FieldElement = get_selector_from_name("WorkerUpdated").unwrap();
-        pub static ref EVENT_REWARDS_DISTRIBUTED: FieldElement = get_selector_from_name("RewardsDistributed").unwrap();
-        pub static ref EVENT_STAKE_DEPOSITED: FieldElement = get_selector_from_name("StakeDeposited").unwrap();
-        pub static ref EVENT_STAKE_WITHDRAWN: FieldElement = get_selector_from_name("StakeWithdrawn").unwrap();
+        pub static ref EVENT_JOB_SUBMITTED: FieldElement = get_selector_from_name("JobSubmitted")
+            .expect("Invalid selector name: JobSubmitted");
+        pub static ref EVENT_JOB_ASSIGNED: FieldElement = get_selector_from_name("JobAssigned")
+            .expect("Invalid selector name: JobAssigned");
+        pub static ref EVENT_JOB_COMPLETED: FieldElement = get_selector_from_name("JobCompleted")
+            .expect("Invalid selector name: JobCompleted");
+        pub static ref EVENT_JOB_FAILED: FieldElement = get_selector_from_name("JobFailed")
+            .expect("Invalid selector name: JobFailed");
+        pub static ref EVENT_JOB_CANCELLED: FieldElement = get_selector_from_name("JobCancelled")
+            .expect("Invalid selector name: JobCancelled");
+        pub static ref EVENT_WORKER_REGISTERED: FieldElement = get_selector_from_name("WorkerRegistered")
+            .expect("Invalid selector name: WorkerRegistered");
+        pub static ref EVENT_WORKER_UPDATED: FieldElement = get_selector_from_name("WorkerUpdated")
+            .expect("Invalid selector name: WorkerUpdated");
+        pub static ref EVENT_REWARDS_DISTRIBUTED: FieldElement = get_selector_from_name("RewardsDistributed")
+            .expect("Invalid selector name: RewardsDistributed");
+        pub static ref EVENT_STAKE_DEPOSITED: FieldElement = get_selector_from_name("StakeDeposited")
+            .expect("Invalid selector name: StakeDeposited");
+        pub static ref EVENT_STAKE_WITHDRAWN: FieldElement = get_selector_from_name("StakeWithdrawn")
+            .expect("Invalid selector name: StakeWithdrawn");
     }
 }
 

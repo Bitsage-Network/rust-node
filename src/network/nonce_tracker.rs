@@ -157,7 +157,10 @@ impl BloomFilter {
         let hash = hasher.finalize();
 
         // Use first 8 bytes as u64, then modulo
-        let value = u64::from_le_bytes(hash[0..8].try_into().unwrap());
+        // SHA256 produces 32 bytes, so [0..8] is always valid
+        let bytes: [u8; 8] = hash[0..8].try_into()
+            .expect("SHA256 hash should always have at least 8 bytes");
+        let value = u64::from_le_bytes(bytes);
         (value as usize) % self.size_bits
     }
 }

@@ -479,7 +479,7 @@ pub struct TlsConfig {
 impl Default for CoordinatorConfig {
     fn default() -> Self {
         Self {
-            database_url: "postgresql://localhost/bitsage".to_string(),
+            database_url: "postgresql://localhost/sage".to_string(),
             kafka: KafkaConfig::default(),
             network: NetworkCoordinatorConfig::default(),
             job_processor: JobProcessorConfig::default(),
@@ -786,7 +786,7 @@ pub fn generate_default_config(environment: Environment) -> CoordinatorConfig {
             config.metrics.enable_metrics = true;
         }
         Environment::Test => {
-            config.database_url = "postgresql://localhost/bitsage_test".to_string();
+            config.database_url = "postgresql://localhost/sage_test".to_string();
             config.blockchain.rpc_url = "https://starknet-sepolia.public.blastapi.io".to_string();
             config.logging.level = "error".to_string();
             config.metrics.enable_metrics = false;

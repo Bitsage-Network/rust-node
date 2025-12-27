@@ -166,9 +166,9 @@ pub fn prove_with_stwo(
     let start = Instant::now();
     let mut metrics = ProofMetrics::new();
     
-    // 1. Calculate domain size
-    let trace_length = trace.steps.len();
-    let log_size = (trace_length as f64).log2().ceil() as u32;
+    // 1. Calculate domain size (stwo requires log_size > 0, so minimum is 2)
+    let trace_length = trace.steps.len().max(2);
+    let log_size = ((trace_length as f64).log2().ceil() as u32).max(1);
     let size = 1 << log_size;
     
     // 2. Setup Stwo prover configuration
@@ -193,10 +193,10 @@ pub fn prove_with_stwo(
         );
     
     // 5. Create trace columns: [pc_curr, reg0_curr, reg1_curr, pc_next, reg0_next, reg1_next]
-    // OPTIMIZATION: Use column pool to reduce allocations
+    // Create fresh columns (pool disabled due to size caching issues)
     let n_columns = 6;
     let mut columns: Vec<BaseColumn> = (0..n_columns)
-        .map(|_| COLUMN_POOL.get_column(size))
+        .map(|_| BaseColumn::zeros(size))
         .collect();
     
     // 6. Fill trace data
@@ -339,9 +339,9 @@ fn prove_with_stwo_gpu_backend(
     let start = Instant::now();
     let mut metrics = ProofMetrics::new();
     
-    // 1. Calculate domain size
-    let trace_length = trace.steps.len();
-    let log_size = (trace_length as f64).log2().ceil() as u32;
+    // 1. Calculate domain size (stwo requires log_size > 0, so minimum is 2)
+    let trace_length = trace.steps.len().max(2);
+    let log_size = ((trace_length as f64).log2().ceil() as u32).max(1);
     let size = 1 << log_size;
     
     // 2. Setup Stwo prover configuration
@@ -368,7 +368,7 @@ fn prove_with_stwo_gpu_backend(
     // 5. Create trace columns (reuse SIMD column type - compatible with GpuBackend)
     let n_columns = 6;
     let mut columns: Vec<BaseColumn> = (0..n_columns)
-        .map(|_| COLUMN_POOL.get_column(size))
+        .map(|_| BaseColumn::zeros(size))
         .collect();
     
     // 6. Fill trace data
