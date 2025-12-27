@@ -249,7 +249,7 @@ impl BlockchainBridge {
         let job_id_typed = JobId::from(job_uuid);
 
         // Convert result hash to FieldElement
-        let output_data_hash = FieldElement::from_hex_be(result_hash)
+        let _output_data_hash = FieldElement::from_hex_be(result_hash)
             .unwrap_or_else(|_| {
                 // If not a valid hex, hash it
                 let mut hasher = Sha256::new();
@@ -343,7 +343,7 @@ impl BlockchainBridge {
     pub async fn verify_proof_onchain(
         &self,
         proof_data: &[u8],
-        public_inputs: &[FieldElement],
+        _public_inputs: &[FieldElement],
     ) -> Result<bool> {
         if !self.enabled {
             debug!("Blockchain disabled, skipping proof verification");
@@ -569,6 +569,7 @@ impl BlockchainBridge {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::coordinator::production_coordinator::JobRequirements;
 
     #[test]
     fn test_disabled_bridge() {

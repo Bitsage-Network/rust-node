@@ -166,9 +166,9 @@ impl NetworkCoordinatorService {
         self.base_coordinator.start().await?;
         
         // Start monitoring tasks
-        let network_monitoring_handle = self.start_network_monitoring().await?;
-        let stats_collection_handle = self.start_stats_collection().await?;
-        let event_processing_handle = self.start_event_processing().await?;
+        let _network_monitoring_handle = self.start_network_monitoring().await?;
+        let _stats_collection_handle = self.start_stats_collection().await?;
+        let _event_processing_handle = self.start_event_processing().await?;
 
         // Update connection status
         {
@@ -177,12 +177,12 @@ impl NetworkCoordinatorService {
         }
 
         info!("Network coordinator service started successfully");
-        
+
         // Start all tasks and wait for them to complete
         // Note: These are now () since we're not awaiting them
-        let network_result = ();
-        let stats_result = ();
-        let event_result = ();
+        let _network_result = ();
+        let _stats_result = ();
+        let _event_result = ();
         
         // Log any errors (simplified since we're not actually checking results)
         debug!("Network coordinator tasks completed");
@@ -517,7 +517,7 @@ impl NetworkCoordinatorService {
     async fn start_event_processing(&self) -> Result<()> {
         let active_peers = self.active_peers_handle();
         let running = self.running_handle();
-        let event_sender = self.event_sender.clone();
+        let _event_sender = self.event_sender.clone();
 
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(10));

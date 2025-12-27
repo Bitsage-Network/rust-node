@@ -321,17 +321,17 @@ impl KafkaCoordinator {
         self.init_producer().await?;
         
         // Start message processing
-        let consumer_handle = self.start_consumer_loop().await?;
-        let producer_handle = self.start_producer_loop().await?;
-        let dead_letter_handle = self.start_dead_letter_processing().await?;
+        let _consumer_handle = self.start_consumer_loop().await?;
+        let _producer_handle = self.start_producer_loop().await?;
+        let _dead_letter_handle = self.start_dead_letter_processing().await?;
 
         info!("Kafka coordinator started successfully");
-        
+
         // Start all tasks and wait for them to complete
         // Note: These are now () since we're not awaiting them
-        let consumer_result = ();
-        let producer_result = ();
-        let dead_letter_result = ();
+        let _consumer_result = ();
+        let _producer_result = ();
+        let _dead_letter_result = ();
         
         // Log any errors (simplified since we're not actually checking results)
         debug!("Kafka coordinator tasks completed");
@@ -400,7 +400,7 @@ impl KafkaCoordinator {
             .set("retry.backoff.ms", "100")
             .set("max.in.flight.requests.per.connection", "5");
 
-        let producer: FutureProducer = producer_config.create()?;
+        let _producer: FutureProducer = producer_config.create()?;
         
         // Store producer - we have a new producer to store
         // Note: The producer field is already an Option<FutureProducer>, 

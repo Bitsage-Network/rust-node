@@ -97,7 +97,7 @@ impl ETLBridge {
     }
 
     /// Compile SQL to OVM instructions (simplified)
-    pub fn compile_sql_to_ovm(&self, sql: &str) -> Result<Vec<Instruction>> {
+    pub fn compile_sql_to_ovm(&self, _sql: &str) -> Result<Vec<Instruction>> {
         // This is a simplified compiler
         // Full implementation would parse SQL AST and generate proper instructions
         

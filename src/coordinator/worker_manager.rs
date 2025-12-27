@@ -188,9 +188,9 @@ impl WorkerManager {
         }
 
         // Start monitoring tasks
-        let health_monitoring_handle = self.start_health_monitoring().await?;
-        let load_monitoring_handle = self.start_load_monitoring().await?;
-        let stats_collection_handle = self.start_stats_collection().await?;
+        let _health_monitoring_handle = self.start_health_monitoring().await?;
+        let _load_monitoring_handle = self.start_load_monitoring().await?;
+        let _stats_collection_handle = self.start_stats_collection().await?;
 
         info!("Worker manager started successfully");
         
@@ -677,7 +677,7 @@ impl WorkerManager {
     }
 
     /// Extract worker tags
-    fn extract_worker_tags(&self, worker_info: &WorkerInfo) -> Vec<String> {
+    fn extract_worker_tags(&self, _worker_info: &WorkerInfo) -> Vec<String> {
         // TODO: Implement tag extraction based on capabilities, location, etc.
         vec!["worker".to_string()]
     }
@@ -784,7 +784,7 @@ impl WorkerManager {
     /// Get cluster load statistics
     pub async fn get_cluster_load_stats(&self) -> ClusterLoadStats {
         let loads = self.worker_loads.read().await;
-        let workers = self.active_workers.read().await;
+        let _workers = self.active_workers.read().await;
 
         let total_workers = loads.len();
         if total_workers == 0 {

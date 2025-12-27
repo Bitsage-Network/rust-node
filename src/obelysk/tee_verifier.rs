@@ -371,8 +371,8 @@ impl ProofOfAttestation {
         );
         
         // Execute verification to get trace
-        let trace = circuit.execute_verification()?;
-        
+        let _trace = circuit.execute_verification()?;
+
         // NOTE: In production, we would:
         // let prover = ObelyskProver::new();
         // let proof = prover.prove_execution(&trace)?;
@@ -450,18 +450,18 @@ fn sha256_hash(data: &[u8]) -> [u8; 32] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::obelysk::MockTEEGenerator;
+    use crate::obelysk::{MockTEEGenerator, TEEType};
     
     #[test]
     fn test_attestation_circuit_creation() {
         let generator = MockTEEGenerator::new(TEEType::IntelTDX);
         let quote = generator.generate_quote(b"test_result");
-        
+
         let mut whitelist = EnclaveWhitelist::new();
         whitelist.add(quote.mrenclave.clone());
-        
+
         let circuit = AttestationCircuit::new(quote, whitelist);
-        
+
         // Should be able to build circuit
         let built = circuit.build();
         assert!(built.is_ok());
@@ -483,16 +483,16 @@ mod tests {
     fn test_local_verification_with_whitelist() {
         let generator = MockTEEGenerator::new(TEEType::IntelTDX);
         let quote = generator.generate_quote(b"test");
-        
+
         let mut whitelist = EnclaveWhitelist::new();
         whitelist.add(quote.mrenclave.clone());
-        
+
         let poa = ProofOfAttestation::with_whitelist(whitelist);
-        
-        // Should succeed (MRENCLAVE whitelisted)
+
+        // Should succeed (MRENCLAVE whitelisted and signature valid)
         let result = poa.verify_quote_locally(&quote);
-        assert!(result.is_ok());
-        assert!(result.unwrap());
+        assert!(result.is_ok(), "Verification should succeed: {:?}", result);
+        assert!(result.unwrap(), "Quote should be verified as valid");
     }
     
     #[test]

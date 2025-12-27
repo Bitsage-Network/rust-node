@@ -79,17 +79,33 @@ impl M31 {
     }
     
     /// Fast reduction for 64-bit products
+    ///
+    /// For p = 2^31 - 1, we have 2^31 ≡ 1 (mod p)
+    /// Split x into 31-bit chunks and sum them
     #[inline]
     fn reduce64(x: u64) -> u32 {
-        // Split into two 32-bit halves and reduce
-        let low = (x & 0xFFFFFFFF) as u32;
-        let high = (x >> 32) as u32;
-        
-        // First reduction
-        let partial = Self::reduce(low) as u64 + (high as u64);
-        
-        // Second reduction (partial fits in 33 bits)
-        Self::reduce(partial as u32)
+        // Extract 31-bit chunks
+        // x = lo + mid * 2^31 + hi * 2^62
+        let lo = x & 0x7FFFFFFF;                   // bits 0-30 (31 bits)
+        let mid = (x >> 31) & 0x7FFFFFFF;          // bits 31-61 (31 bits)
+        let hi = x >> 62;                          // bits 62-63 (2 bits max)
+
+        // Since 2^31 ≡ 1 (mod p): x ≡ lo + mid + hi (mod p)
+        let sum = lo + mid + hi;
+
+        // sum is at most 2*(2^31-1) + 3 < 2^33
+        // Apply one more 31-bit reduction
+        let lo2 = (sum & 0x7FFFFFFF) as u32;
+        let hi2 = (sum >> 31) as u32;
+
+        let mut result = lo2 + hi2;
+
+        // Final normalization (result could be exactly p)
+        if result >= M31_PRIME {
+            result -= M31_PRIME;
+        }
+
+        result
     }
     
     /// Multiplicative inverse (for division)
@@ -257,9 +273,19 @@ mod tests {
     fn test_inverse() {
         let a = M31::new(7);
         let a_inv = a.inverse().unwrap();
-        
+
         // a * a^(-1) should equal 1
         assert_eq!(a * a_inv, M31::ONE);
+
+        // Test a few more values
+        let b = M31::new(12345);
+        let b_inv = b.inverse().unwrap();
+        assert_eq!(b * b_inv, M31::ONE);
+
+        // Test large value near modulus
+        let c = M31::new(M31_PRIME - 1);
+        let c_inv = c.inverse().unwrap();
+        assert_eq!(c * c_inv, M31::ONE);
     }
     
     #[test]

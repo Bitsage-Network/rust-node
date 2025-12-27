@@ -534,7 +534,7 @@ impl CairoSerializedProof {
         let felt_strings: Vec<String> = self.data.iter()
             .map(|f| {
                 // Convert bytes to big integer string
-                let mut value = num_bigint::BigUint::from_bytes_be(&f.0);
+                let value = num_bigint::BigUint::from_bytes_be(&f.0);
                 value.to_string()
             })
             .collect();

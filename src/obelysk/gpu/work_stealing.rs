@@ -260,7 +260,7 @@ impl WorkStealingScheduler {
         let mut work_items: Vec<_> = traces
             .into_iter()
             .enumerate()
-            .map(|(i, trace)| {
+            .map(|(_i, trace)| {
                 let id = self.total_submitted.fetch_add(1, Ordering::Relaxed);
                 work_ids.push(id);
                 WorkItem::new(id, trace)

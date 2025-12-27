@@ -706,7 +706,7 @@ impl JobCoordinator {
                 job_state.status = JobStatus::Completed;
 
                 // Assemble final result
-                let final_result = self.result_assembler
+                let _final_result = self.result_assembler
                     .assemble_job_result(job_id, &job_state.tasks)
                     .await?;
 
@@ -1425,7 +1425,7 @@ impl ResultAssembler {
     /// Tile stitching - combine image tiles into a single image
     async fn assemble_tiles(
         &self,
-        tasks: &[Task],
+        _tasks: &[Task],
         chunks: &[TaskResultChunk],
         width: u32,
         height: u32,
@@ -1438,7 +1438,7 @@ impl ResultAssembler {
 
         let tiles_x = (width + tile_size.0 - 1) / tile_size.0;
         let tiles_y = (height + tile_size.1 - 1) / tile_size.1;
-        let total_tiles = tiles_x * tiles_y;
+        let _total_tiles = tiles_x * tiles_y;
 
         // Create output buffer (assuming RGBA format, 4 bytes per pixel)
         let bytes_per_pixel = 4;
@@ -1473,7 +1473,7 @@ impl ResultAssembler {
     /// Batch merge - combine AI inference results
     async fn assemble_batch(
         &self,
-        tasks: &[Task],
+        _tasks: &[Task],
         chunks: &[TaskResultChunk],
     ) -> Result<Vec<u8>> {
         debug!("Performing batch merge assembly of {} chunks", chunks.len());
@@ -1520,7 +1520,7 @@ impl ResultAssembler {
     /// Consensus assembly - for ZK proofs and verified computation
     async fn assemble_consensus(
         &self,
-        tasks: &[Task],
+        _tasks: &[Task],
         chunks: &[TaskResultChunk],
     ) -> Result<Vec<u8>> {
         debug!("Performing consensus assembly of {} chunks", chunks.len());

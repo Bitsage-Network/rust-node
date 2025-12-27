@@ -119,7 +119,7 @@ impl WorkerBridge {
         let job_id_low = FieldElement::from_dec_str(&job_id_str)?;
         let job_id_high = FieldElement::ZERO;
 
-        let call = FunctionCall {
+        let _call = FunctionCall {
             contract_address: self.optimistic_tee_address,
             entry_point_selector: get_selector_from_name("get_result_status")?,
             calldata: vec![job_id_low, job_id_high],
@@ -185,6 +185,7 @@ pub fn hash_matrix_result(matrix: &Matrix) -> FieldElement {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::obelysk::M31;
 
     #[test]
     fn test_hash_consistency() {

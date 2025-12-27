@@ -360,7 +360,7 @@ impl GossipProtocol {
                 // or use an existing variant.
                 // Using JobAnnouncement as placeholder like before:
                 
-                let p2p_message = P2PMessage::JobAnnouncement {
+                let _p2p_message = P2PMessage::JobAnnouncement {
                     job_id: JobId::new(), // Placeholder
                     spec: crate::blockchain::types::JobSpec {
                         job_type: crate::blockchain::types::JobType::AIInference,

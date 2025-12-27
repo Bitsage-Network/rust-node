@@ -346,7 +346,8 @@ fn calculate_progress(job: &JobInfo) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+    use crate::node::coordinator::JobResult;
+
     #[tokio::test]
     async fn test_health_check() {
         let response = health_check().await;

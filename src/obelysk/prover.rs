@@ -267,43 +267,83 @@ pub enum ProverError {
 mod tests {
     use super::*;
     use crate::obelysk::vm::ObelyskVM;
-    
+
     #[test]
     fn test_basic_proving() {
+        use crate::obelysk::vm::{Instruction, OpCode};
+
         let mut vm = ObelyskVM::new();
-        
-        // Simple program: 5 + 7 = 12
-        vm.set_public_inputs(vec![M31::new(5), M31::new(7)]);
-        
-        let program = vec![
-            crate::obelysk::vm::Instruction {
-                opcode: crate::obelysk::vm::OpCode::Add,
-                dst: 2,
-                src1: 0,
-                src2: 1,
-                immediate: None,
-                address: None,
-            },
-            crate::obelysk::vm::Instruction {
-                opcode: crate::obelysk::vm::OpCode::Halt,
+
+        // Larger program to generate sufficient trace for stwo validation
+        // This computes: sum = 0; for i = 1 to 16: sum += i
+        // Result: 1+2+3+...+16 = 136
+        let mut program = Vec::new();
+
+        // Initialize sum in r1 = 0
+        program.push(Instruction {
+            opcode: OpCode::LoadImm,
+            dst: 1,
+            src1: 0,
+            src2: 0,
+            immediate: Some(M31::ZERO),
+            address: None,
+        });
+
+        // Unrolled loop: add 1 through 16 to sum
+        for i in 1..=16 {
+            // Load i into r0
+            program.push(Instruction {
+                opcode: OpCode::LoadImm,
                 dst: 0,
                 src1: 0,
                 src2: 0,
+                immediate: Some(M31::new(i)),
+                address: None,
+            });
+            // sum += i
+            program.push(Instruction {
+                opcode: OpCode::Add,
+                dst: 1,
+                src1: 1,
+                src2: 0,
                 immediate: None,
                 address: None,
-            },
-        ];
-        
+            });
+        }
+
+        // Halt
+        program.push(Instruction {
+            opcode: OpCode::Halt,
+            dst: 0,
+            src1: 0,
+            src2: 0,
+            immediate: None,
+            address: None,
+        });
+
         vm.load_program(program);
         let trace = vm.execute().unwrap();
-        
+
+        // Verify we have a reasonable trace size (33 steps: 1 init + 16*2 ops)
+        assert!(trace.steps.len() >= 32, "Trace too small: {} steps", trace.steps.len());
+
         // Generate proof
         let prover = ObelyskProver::new();
         let proof = prover.prove_execution(&trace).unwrap();
-        
-        // Verify
+
+        // Verify proof structure
         assert!(prover.verify_proof(&proof).unwrap());
-        assert_eq!(proof.metadata.trace_length, 2);
+        assert!(proof.metadata.trace_length >= 32);
+        assert!(!proof.trace_commitment.is_empty());
+        assert!(!proof.fri_layers.is_empty());
+    }
+
+    #[test]
+    fn test_prover_config() {
+        let config = ProverConfig::default();
+        assert_eq!(config.security_bits, 128);
+        assert_eq!(config.fri_blowup, 8);
+        assert!(config.use_gpu);
     }
 }
 

@@ -110,7 +110,7 @@ impl JobExecutor {
         // 3. Run inference (PyTorch, ONNX, etc.)
         // 4. Postprocess output
         
-        let payload_str = String::from_utf8_lossy(&request.payload);
+        let _payload_str = String::from_utf8_lossy(&request.payload);
         debug!("Input payload size: {} bytes", request.payload.len());
         
         // Simulate processing time based on input size
@@ -223,7 +223,7 @@ impl JobExecutor {
     }
 
     /// Execute Computer Vision job
-    async fn execute_computer_vision(&self, request: &JobExecutionRequest) -> Result<Vec<u8>> {
+    async fn execute_computer_vision(&self, _request: &JobExecutionRequest) -> Result<Vec<u8>> {
         info!("👁️  Running Computer Vision...");
         
         tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;

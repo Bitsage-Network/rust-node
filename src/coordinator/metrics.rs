@@ -654,11 +654,11 @@ impl MetricsCollector {
     async fn start_metrics_collection(&self) -> Result<()> {
         let config = self.config.clone();
         let running = self.running_handle();
-        let current_metrics = self.current_metrics_handle();
-        let metrics_history = self.metrics_history_handle();
+        let _current_metrics = self.current_metrics_handle();
+        let _metrics_history = self.metrics_history_handle();
         let last_collection = self.last_collection_handle();
-        let node_id = self.node_id.clone();
-        let environment = self.environment.clone();
+        let _node_id = self.node_id.clone();
+        let _environment = self.environment.clone();
         let event_sender = self.event_sender.clone();
 
         tokio::spawn(async move {

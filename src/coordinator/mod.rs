@@ -337,7 +337,7 @@ impl EnhancedCoordinator {
         let metrics_collector = self.metrics_collector.clone();
         let kafka_coordinator = self.kafka_coordinator.clone();
         let running = self.running.clone();
-        let node_id = self.node_id;
+        let _node_id = self.node_id;
 
         // Get Send+Sync handles to the stats - these are Arc<RwLock<T>> which ARE Send+Sync
         // This is the key fix: instead of capturing the whole components (which contain

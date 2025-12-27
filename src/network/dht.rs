@@ -576,7 +576,7 @@ impl DhtNode {
         let routing_table = self.routing_table.clone();
         let job_store = self.job_store.clone();
         let running = self.running.clone();
-        let node_id = self.node_id;
+        let _node_id = self.node_id;
 
         tokio::spawn(async move {
             let mut refresh_interval = tokio::time::interval(Duration::from_secs(60));
@@ -922,7 +922,7 @@ impl DhtNode {
         let routing_table = self.routing_table.read().await;
         stats.total_peers = routing_table.iter().map(|b| b.len()).sum();
 
-        let now = chrono::Utc::now().timestamp() as u64;
+        let _now = chrono::Utc::now().timestamp() as u64;
         stats.active_peers = routing_table.iter()
             .flat_map(|b| b.get_peers())
             .filter(|p| !p.is_stale(self.config.peer_timeout_secs))

@@ -166,19 +166,19 @@ impl BlockchainIntegration {
         self.test_connection().await?;
         
         // Start monitoring tasks
-        let block_monitoring_handle = self.start_block_monitoring().await?;
-        let transaction_monitoring_handle = self.start_transaction_monitoring().await?;
-        let event_monitoring_handle = self.start_event_monitoring().await?;
-        let metrics_collection_handle = self.start_metrics_collection().await?;
+        let _block_monitoring_handle = self.start_block_monitoring().await?;
+        let _transaction_monitoring_handle = self.start_transaction_monitoring().await?;
+        let _event_monitoring_handle = self.start_event_monitoring().await?;
+        let _metrics_collection_handle = self.start_metrics_collection().await?;
 
         info!("Blockchain integration service started successfully");
-        
+
         // Start all tasks and wait for them to complete
         // Note: These are now () since we're not awaiting them
-        let block_result = ();
-        let transaction_result = ();
-        let event_result = ();
-        let metrics_result = ();
+        let _block_result = ();
+        let _transaction_result = ();
+        let _event_result = ();
+        let _metrics_result = ();
         
         // Log any errors (simplified since we're not actually checking results)
         debug!("Blockchain integration tasks completed");
@@ -231,7 +231,7 @@ impl BlockchainIntegration {
         let config = self.config.clone();
         let starknet_client = self.starknet_client.clone();
         let last_block_number = Arc::clone(&self.last_block_number);
-        let event_sender = self.event_sender.clone();
+        let _event_sender = self.event_sender.clone();
 
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(config.monitoring.block_polling_interval_secs));

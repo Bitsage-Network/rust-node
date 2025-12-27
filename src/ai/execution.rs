@@ -277,7 +277,7 @@ impl AIExecutionEngine {
         let model = Self::select_model_for_job(&model_registry, &request)?;
         
         // Create execution context
-        let context = ExecutionContext::new(
+        let _context = ExecutionContext::new(
             model.framework.clone(),
             model.name.clone(),
             request.input_data.data_path.clone(),

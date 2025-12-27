@@ -621,14 +621,14 @@ mod tests {
     fn test_attestation_extraction() {
         let prover = GpuSecureProver::with_defaults();
         let trace = create_test_trace();
-        
+
         // Generate a mock proof
         let proof = crate::obelysk::ObelyskProver::new()
             .prove_execution(&trace)
             .unwrap();
-        
+
         let attestation = prover.extract_attestation(&proof);
-        
+
         // Attestation should be non-trivial
         assert!(!attestation.iter().all(|&b| b == 0));
     }

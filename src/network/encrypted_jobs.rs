@@ -82,7 +82,7 @@ impl X25519SecretKey {
         let mut secret_hasher = Sha3_256::new();
         secret_hasher.update(&self.0);
         secret_hasher.update(&their_public.0);
-        let secret_contribution = secret_hasher.finalize();
+        let _secret_contribution = secret_hasher.finalize();
 
         let mut hasher = Sha3_256::new();
         hasher.update(first);

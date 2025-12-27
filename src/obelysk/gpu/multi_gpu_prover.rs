@@ -511,6 +511,7 @@ mod tests {
     use super::*;
     use crate::obelysk::vm::ObelyskVM;
     use crate::obelysk::vm::{Instruction, OpCode};
+    use crate::obelysk::field::M31;
     
     fn create_test_trace() -> ExecutionTrace {
         let mut vm = ObelyskVM::new();

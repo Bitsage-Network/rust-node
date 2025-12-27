@@ -648,9 +648,8 @@ impl BatchObelyskExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[tokio::test]
-    #[ignore = "Requires larger trace size for stwo prover FRI protocol"]
     async fn test_obelysk_executor_basic() {
         let executor = ObelyskExecutor::with_defaults("test-worker".to_string());
 
@@ -664,7 +663,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "Requires larger trace size for stwo prover FRI protocol"]
     async fn test_ai_inference_job() {
         let executor = ObelyskExecutor::with_defaults("test-worker".to_string());
 
@@ -677,13 +675,12 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "Requires larger trace size for stwo prover FRI protocol"]
     async fn test_data_pipeline_job() {
         let executor = ObelyskExecutor::with_defaults("test-worker".to_string());
 
         let payload = b"SELECT * FROM data WHERE value > 100";
         let result = executor.execute_with_proof("job-data", "DataPipeline", payload).await;
-        
+
         assert!(result.is_ok());
     }
 }

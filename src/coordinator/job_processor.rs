@@ -218,9 +218,9 @@ impl JobProcessor {
         }
 
         // Start processing tasks
-        let queue_processing_handle = self.start_queue_processing().await?;
-        let timeout_monitoring_handle = self.start_timeout_monitoring().await?;
-        let stats_collection_handle = self.start_stats_collection().await?;
+        let _queue_processing_handle = self.start_queue_processing().await?;
+        let _timeout_monitoring_handle = self.start_timeout_monitoring().await?;
+        let _stats_collection_handle = self.start_stats_collection().await?;
 
         info!("Job processor started successfully");
         
@@ -465,7 +465,7 @@ impl JobProcessor {
 
     /// Start queue processing with actual worker assignment
     async fn start_queue_processing(&self) -> Result<()> {
-        let config = self.config.clone();
+        let _config = self.config.clone();
         let job_queue = Arc::clone(&self.job_queue);
         let active_jobs = Arc::clone(&self.active_jobs);
         let event_sender = self.event_sender.clone();

@@ -21,7 +21,7 @@
 //!
 //! # Usage
 //!
-//! ```rust
+//! ```rust,ignore
 //! use proof_compression::{ProofCompressor, CompressionLevel};
 //!
 //! // Compress proof

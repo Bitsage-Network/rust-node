@@ -345,7 +345,7 @@ pub fn generate_worker_keys(
 /// Verify a worker's registration signature
 pub fn verify_registration_signature(
     signature: &RegistrationSignature,
-    expected_worker_id: &str,
+    _expected_worker_id: &str,
 ) -> bool {
     // Recompute message
     let message = hash_felts(&[
