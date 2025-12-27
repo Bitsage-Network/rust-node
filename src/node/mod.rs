@@ -7,4 +7,4 @@ pub mod worker;
 pub mod health;
 
 pub use coordinator::JobCoordinator;
-pub use worker::Worker; 
+pub use worker::{Worker, WorkerConfig, WorkerStats, WorkerEvent, HealthStatus}; 

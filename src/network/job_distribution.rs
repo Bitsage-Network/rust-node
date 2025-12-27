@@ -1,7 +1,17 @@
 //! # P2P Job Distribution System
 //!
-//! This module implements the core job distribution system that bridges
-//! the blockchain contract with the P2P network for decentralized job processing.
+//! This module implements the GPU marketplace allocation system that connects
+//! users to available validator GPUs. Unlike auction-based systems, this uses
+//! direct allocation - users select a GPU type and are instantly connected to
+//! an available worker with that GPU.
+//!
+//! ## Architecture
+//!
+//! 1. Validators register their GPUs (H100, A100, RTX 4090, etc.)
+//! 2. GPUs are added to a pool organized by type
+//! 3. Users browse available GPU types in the marketplace
+//! 4. User selects GPU type → instant allocation to available worker
+//! 5. Direct connection established for compute tasks
 
 use anyhow::{Result, Context};
 use serde::{Deserialize, Serialize};
@@ -27,19 +37,105 @@ use crate::network::encrypted_jobs::{
 };
 use crate::types::{JobId, WorkerId};
 
+/// GPU types available in the marketplace
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum GpuType {
+    /// NVIDIA H100 - 80GB HBM3
+    H100,
+    /// NVIDIA A100 - 40GB/80GB HBM2e
+    A100,
+    /// NVIDIA RTX 4090 - 24GB GDDR6X
+    Rtx4090,
+    /// NVIDIA RTX 4080 - 16GB GDDR6X
+    Rtx4080,
+    /// NVIDIA RTX 3090 - 24GB GDDR6X
+    Rtx3090,
+    /// NVIDIA A10 - 24GB GDDR6
+    A10,
+    /// NVIDIA L40 - 48GB GDDR6
+    L40,
+    /// NVIDIA L4 - 24GB GDDR6
+    L4,
+    /// Other/Unknown GPU
+    Other(u32),
+}
+
+impl GpuType {
+    /// Get the typical VRAM in GB for this GPU type
+    pub fn vram_gb(&self) -> u32 {
+        match self {
+            GpuType::H100 => 80,
+            GpuType::A100 => 80,
+            GpuType::Rtx4090 => 24,
+            GpuType::Rtx4080 => 16,
+            GpuType::Rtx3090 => 24,
+            GpuType::A10 => 24,
+            GpuType::L40 => 48,
+            GpuType::L4 => 24,
+            GpuType::Other(_) => 0,
+        }
+    }
+
+    /// Get display name for the GPU
+    pub fn display_name(&self) -> &str {
+        match self {
+            GpuType::H100 => "NVIDIA H100",
+            GpuType::A100 => "NVIDIA A100",
+            GpuType::Rtx4090 => "NVIDIA RTX 4090",
+            GpuType::Rtx4080 => "NVIDIA RTX 4080",
+            GpuType::Rtx3090 => "NVIDIA RTX 3090",
+            GpuType::A10 => "NVIDIA A10",
+            GpuType::L40 => "NVIDIA L40",
+            GpuType::L4 => "NVIDIA L4",
+            GpuType::Other(_) => "Other GPU",
+        }
+    }
+}
+
+/// Registered GPU in the pool
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegisteredGpu {
+    pub gpu_id: String,
+    pub worker_id: WorkerId,
+    pub gpu_type: GpuType,
+    pub gpu_count: u32,
+    pub vram_gb: u32,
+    pub status: GpuStatus,
+    pub hourly_rate: u128,
+    pub reputation_score: f64,
+    pub health_score: f64,
+    pub registered_at: u64,
+    pub last_heartbeat: u64,
+}
+
+/// GPU availability status
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GpuStatus {
+    /// GPU is available for allocation
+    Available,
+    /// GPU is currently in use
+    InUse,
+    /// GPU is idle but reserved
+    Reserved,
+    /// GPU is offline or unreachable
+    Offline,
+    /// GPU is undergoing maintenance
+    Maintenance,
+}
+
 /// Job distribution configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JobDistributionConfig {
-    /// Maximum number of workers to consider for a job
-    pub max_workers_per_job: usize,
-    /// Timeout for worker bids in seconds
-    pub bid_timeout_secs: u64,
-    /// Minimum reputation score for workers
+    /// Minimum reputation score for workers to be eligible
     pub min_worker_reputation: f64,
-    /// Job announcement retry attempts
-    pub announcement_retries: u32,
+    /// Minimum health score for workers to be eligible
+    pub min_worker_health: f64,
     /// Blockchain polling interval in seconds
     pub blockchain_poll_interval_secs: u64,
+    /// Worker heartbeat timeout in seconds
+    pub worker_heartbeat_timeout_secs: u64,
+    /// Maximum jobs per worker concurrently
+    pub max_jobs_per_worker: u32,
     /// Health reputation system configuration
     pub health_reputation_config: HealthReputationConfig,
 }
@@ -47,11 +143,11 @@ pub struct JobDistributionConfig {
 impl Default for JobDistributionConfig {
     fn default() -> Self {
         Self {
-            max_workers_per_job: 10,
-            bid_timeout_secs: 30,
-            min_worker_reputation: 0.7,
-            announcement_retries: 3,
+            min_worker_reputation: 0.5,
+            min_worker_health: 0.7,
             blockchain_poll_interval_secs: 10,
+            worker_heartbeat_timeout_secs: 60,
+            max_jobs_per_worker: 4,
             health_reputation_config: HealthReputationConfig::default(),
         }
     }
@@ -112,15 +208,30 @@ pub struct JobResult {
 /// Job distribution events
 #[derive(Debug, Clone)]
 pub enum JobDistributionEvent {
+    /// Worker registered their GPU in the pool
+    GpuRegistered(RegisteredGpu),
+    /// GPU status changed (available, in use, offline)
+    GpuStatusChanged(String, GpuStatus),
+    /// Job was announced to the network
     JobAnnounced(JobAnnouncement),
-    BidReceived(WorkerBid),
+    /// GPU was allocated to a job (instant, no bidding)
+    GpuAllocated { gpu_id: String, job_id: JobId },
+    /// Job was assigned to a worker
     JobAssigned(JobAssignment),
+    /// Result was submitted by worker
     ResultSubmitted(JobResult),
+    /// Job completed successfully
     JobCompleted(JobId),
+    /// Job failed with error
     JobFailed(JobId, String),
+    /// Worker timed out on a job
     WorkerTimeout(WorkerId, JobId),
+    /// Worker health metrics updated
     WorkerHealthUpdated(WorkerId, HealthMetrics),
+    /// Malicious behavior detected
     MaliciousBehaviorDetected(WorkerId, String),
+    /// Worker went offline
+    WorkerOffline(WorkerId),
 }
 
 /// Job state tracking
@@ -128,7 +239,7 @@ pub enum JobDistributionEvent {
 pub struct DistributedJob {
     pub job_id: JobId,
     pub announcement: JobAnnouncement,
-    pub bids: Vec<WorkerBid>,
+    pub allocated_gpu: Option<String>,
     pub assignment: Option<JobAssignment>,
     pub result: Option<JobResult>,
     pub state: JobDistributionState,
@@ -138,41 +249,44 @@ pub struct DistributedJob {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum JobDistributionState {
-    Announced,
-    CollectingBids,
+    /// Job announced, waiting for GPU allocation
+    Pending,
+    /// GPU allocated, assignment in progress
+    Allocated,
+    /// Job assigned to worker
     Assigned,
+    /// Worker is executing the job
     InProgress,
+    /// Job completed successfully
     Completed,
+    /// Job failed
     Failed,
+    /// Job timed out
     Timeout,
+    /// Job cancelled
+    Cancelled,
 }
 
-/// Status of bid collection for a job
-#[derive(Debug, Clone)]
-pub struct BidCollectionStatus {
+/// GPU pool statistics
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GpuPoolStats {
+    pub total_gpus: usize,
+    pub available_gpus: usize,
+    pub in_use_gpus: usize,
+    pub offline_gpus: usize,
+    pub gpus_by_type: HashMap<String, usize>,
+    pub available_by_type: HashMap<String, usize>,
+}
+
+/// GPU allocation request
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GpuAllocationRequest {
     pub job_id: JobId,
-    pub state: JobDistributionState,
-    pub bid_count: usize,
-    pub created_at: u64,
-    pub has_active_timer: bool,
-}
-
-/// Calculate a composite score for a worker bid.
-/// Higher scores are better.
-fn calculate_bid_score(bid: &WorkerBid) -> f64 {
-    // Composite score based on:
-    // - Reputation (35%)
-    // - Health score (25%)
-    // - Bid competitiveness (25%) - lower bids are better
-    // - Estimated completion time (15%) - faster is better
-    let reputation_score = bid.reputation_score * 0.35;
-    let health_score = bid.health_score * 0.25;
-    // Use log scale for bid amount to avoid extreme values
-    let bid_score = (1.0 / (bid.bid_amount as f64 + 1.0).ln().max(0.1)) * 0.25;
-    // Use log scale for completion time as well
-    let time_score = (1.0 / (bid.estimated_completion_time as f64 + 1.0).ln().max(0.1)) * 0.15;
-
-    reputation_score + health_score + bid_score + time_score
+    pub required_gpu_type: Option<GpuType>,
+    pub min_vram_gb: Option<u32>,
+    pub min_gpu_count: Option<u32>,
+    pub max_hourly_rate: Option<u128>,
+    pub preferred_worker_id: Option<WorkerId>,
 }
 
 /// Blockchain polling statistics
@@ -185,6 +299,9 @@ pub struct BlockchainPollStats {
 }
 
 /// Main job distribution coordinator
+///
+/// Manages the GPU marketplace pool and handles direct allocation
+/// of GPUs to users without bidding or auctions.
 pub struct JobDistributor {
     config: JobDistributionConfig,
     blockchain_client: Arc<StarknetClient>,
@@ -194,6 +311,9 @@ pub struct JobDistributor {
 
     // Privacy-preserving job distribution
     encrypted_job_manager: Arc<RwLock<EncryptedJobManager>>,
+
+    // GPU Pool - the core marketplace data structure
+    gpu_pool: Arc<RwLock<HashMap<String, RegisteredGpu>>>,
 
     // State management
     jobs: Arc<RwLock<HashMap<JobId, DistributedJob>>>,
@@ -209,8 +329,6 @@ pub struct JobDistributor {
     last_processed_block: Arc<RwLock<u64>>,
     /// Jobs discovered from blockchain (by event data to avoid duplicates)
     known_blockchain_jobs: Arc<RwLock<std::collections::HashSet<String>>>,
-    /// Active bid collection timers (job_id -> cancel_token)
-    bid_timers: Arc<RwLock<HashMap<JobId, tokio::sync::watch::Sender<bool>>>>,
 }
 
 impl JobDistributor {
@@ -237,6 +355,7 @@ impl JobDistributor {
             p2p_network,
             health_reputation_system,
             encrypted_job_manager,
+            gpu_pool: Arc::new(RwLock::new(HashMap::new())),
             jobs: Arc::new(RwLock::new(HashMap::new())),
             event_sender,
             event_receiver: Arc::new(RwLock::new(Some(event_receiver))),
@@ -244,7 +363,6 @@ impl JobDistributor {
             last_blockchain_poll: Arc::new(RwLock::new(0)),
             last_processed_block: Arc::new(RwLock::new(0)),
             known_blockchain_jobs: Arc::new(RwLock::new(std::collections::HashSet::new())),
-            bid_timers: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -292,6 +410,7 @@ impl JobDistributor {
             p2p_network: self.p2p_network.clone(),
             health_reputation_system: self.health_reputation_system.clone(),
             encrypted_job_manager: self.encrypted_job_manager.clone(),
+            gpu_pool: self.gpu_pool.clone(),
             jobs: self.jobs.clone(),
             event_sender: self.event_sender.clone(),
             event_receiver: self.event_receiver.clone(),
@@ -299,7 +418,6 @@ impl JobDistributor {
             last_blockchain_poll: self.last_blockchain_poll.clone(),
             last_processed_block: self.last_processed_block.clone(),
             known_blockchain_jobs: self.known_blockchain_jobs.clone(),
-            bid_timers: self.bid_timers.clone(),
         }
     }
 
@@ -570,11 +688,17 @@ impl JobDistributor {
     /// Handle job distribution events
     async fn handle_event(&self, event: JobDistributionEvent) -> Result<()> {
         match event {
+            JobDistributionEvent::GpuRegistered(gpu) => {
+                self.handle_gpu_registered(gpu).await?;
+            }
+            JobDistributionEvent::GpuStatusChanged(gpu_id, status) => {
+                self.handle_gpu_status_changed(gpu_id, status).await?;
+            }
             JobDistributionEvent::JobAnnounced(announcement) => {
                 self.handle_job_announced(announcement).await?;
             }
-            JobDistributionEvent::BidReceived(bid) => {
-                self.handle_bid_received(bid).await?;
+            JobDistributionEvent::GpuAllocated { gpu_id, job_id } => {
+                info!("GPU {} allocated to job {}", gpu_id, job_id);
             }
             JobDistributionEvent::JobAssigned(assignment) => {
                 self.handle_job_assigned(assignment).await?;
@@ -597,63 +721,346 @@ impl JobDistributor {
             JobDistributionEvent::MaliciousBehaviorDetected(worker_id, behavior) => {
                 self.handle_malicious_behavior(worker_id, behavior).await?;
             }
+            JobDistributionEvent::WorkerOffline(worker_id) => {
+                self.handle_worker_offline(worker_id).await?;
+            }
         }
-        
+
         Ok(())
     }
 
-    /// Handle job announcement
+    /// Handle GPU registration from a worker
+    async fn handle_gpu_registered(&self, gpu: RegisteredGpu) -> Result<()> {
+        info!("GPU registered: {} ({}) from worker {}",
+            gpu.gpu_id, gpu.gpu_type.display_name(), gpu.worker_id);
+
+        let mut pool = self.gpu_pool.write().await;
+        pool.insert(gpu.gpu_id.clone(), gpu);
+
+        Ok(())
+    }
+
+    /// Handle GPU status change
+    async fn handle_gpu_status_changed(&self, gpu_id: String, status: GpuStatus) -> Result<()> {
+        let mut pool = self.gpu_pool.write().await;
+        if let Some(gpu) = pool.get_mut(&gpu_id) {
+            gpu.status = status;
+            info!("GPU {} status changed to {:?}", gpu_id, status);
+        }
+        Ok(())
+    }
+
+    /// Handle worker going offline
+    async fn handle_worker_offline(&self, worker_id: WorkerId) -> Result<()> {
+        warn!("Worker {} went offline, marking GPUs as offline", worker_id);
+
+        let mut pool = self.gpu_pool.write().await;
+        for gpu in pool.values_mut() {
+            if gpu.worker_id == worker_id {
+                gpu.status = GpuStatus::Offline;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Handle job announcement - immediately allocate an available GPU
+    ///
+    /// Unlike bidding systems, this uses direct allocation:
+    /// 1. Find an available GPU matching job requirements
+    /// 2. Allocate it immediately
+    /// 3. Create assignment and notify via P2P
     async fn handle_job_announced(&self, announcement: JobAnnouncement) -> Result<()> {
-        info!("Job announced: {}", announcement.job_id);
-        
+        info!("Job announced: {}, attempting direct GPU allocation", announcement.job_id);
+
+        // Create the job record
         let job = DistributedJob {
             job_id: announcement.job_id.clone(),
             announcement: announcement.clone(),
-            bids: Vec::new(),
+            allocated_gpu: None,
             assignment: None,
             result: None,
-            state: JobDistributionState::Announced,
+            state: JobDistributionState::Pending,
             created_at: chrono::Utc::now().timestamp() as u64,
             updated_at: chrono::Utc::now().timestamp() as u64,
         };
-        
+
         {
             let mut jobs = self.jobs.write().await;
             jobs.insert(announcement.job_id.clone(), job);
         }
-        
-        // Start bid collection timer
-        self.start_bid_collection_timer(announcement.job_id).await?;
-        
+
+        // Try to allocate a GPU immediately
+        let allocation_request = GpuAllocationRequest {
+            job_id: announcement.job_id.clone(),
+            required_gpu_type: None, // TODO: Extract from job spec
+            min_vram_gb: Some((announcement.required_capabilities.gpu_memory / (1024 * 1024 * 1024)) as u32),
+            min_gpu_count: None,
+            max_hourly_rate: Some(announcement.max_reward),
+            preferred_worker_id: None,
+        };
+
+        match self.allocate_gpu(allocation_request).await {
+            Ok(Some((gpu_id, worker_id))) => {
+                info!("GPU {} allocated to job {} (worker: {})",
+                    gpu_id, announcement.job_id, worker_id);
+
+                // Create assignment
+                let assignment = JobAssignment {
+                    job_id: announcement.job_id.clone(),
+                    worker_id: worker_id.clone(),
+                    assignment_id: Uuid::new_v4().to_string(),
+                    assigned_at: chrono::Utc::now().timestamp() as u64,
+                    deadline: announcement.deadline,
+                    reward_amount: announcement.max_reward,
+                };
+
+                // Update job state
+                {
+                    let mut jobs = self.jobs.write().await;
+                    if let Some(job) = jobs.get_mut(&announcement.job_id) {
+                        job.allocated_gpu = Some(gpu_id.clone());
+                        job.assignment = Some(assignment.clone());
+                        job.state = JobDistributionState::Assigned;
+                        job.updated_at = chrono::Utc::now().timestamp() as u64;
+                    }
+                }
+
+                // Broadcast assignment via P2P
+                let p2p_message = P2PMessage::JobAssignment {
+                    job_id: announcement.job_id.clone(),
+                    worker_id: worker_id.clone(),
+                    assignment_id: assignment.assignment_id.clone(),
+                    reward_amount: assignment.reward_amount,
+                };
+
+                if let Err(e) = self.p2p_network.broadcast_message(p2p_message, "bitsage-jobs").await {
+                    error!("Failed to broadcast job assignment: {}", e);
+                }
+
+                // Emit event
+                let _ = self.event_sender.send(JobDistributionEvent::JobAssigned(assignment));
+            }
+            Ok(None) => {
+                warn!("No available GPU for job {}, job remains pending", announcement.job_id);
+                // Job stays in Pending state, will be picked up when a GPU becomes available
+            }
+            Err(e) => {
+                error!("Failed to allocate GPU for job {}: {}", announcement.job_id, e);
+            }
+        }
+
         Ok(())
     }
 
-    /// Handle bid received
-    async fn handle_bid_received(&self, bid: WorkerBid) -> Result<()> {
-        debug!("Received bid from worker {} for job {}", bid.worker_id, bid.job_id);
-        
-        // Check if worker is eligible
-        if !self.health_reputation_system.is_worker_eligible(&bid.worker_id).await {
-            warn!("Worker {} not eligible for job {}", bid.worker_id, bid.job_id);
-            return Ok(());
-        }
-        
-        // Update job with new bid
-        {
-            let mut jobs = self.jobs.write().await;
-            if let Some(job) = jobs.get_mut(&bid.job_id) {
-                if job.state == JobDistributionState::CollectingBids {
-                    job.bids.push(bid.clone());
-                    job.updated_at = chrono::Utc::now().timestamp() as u64;
-                    info!("Added bid from worker {} for job {}", bid.worker_id, bid.job_id);
-                } else {
-                    warn!("Received bid for job {} in state {:?}, ignoring", bid.job_id, job.state);
+    /// Allocate an available GPU for a job
+    ///
+    /// Returns (gpu_id, worker_id) if allocation successful, None if no GPU available
+    pub async fn allocate_gpu(&self, request: GpuAllocationRequest) -> Result<Option<(String, WorkerId)>> {
+        let mut pool = self.gpu_pool.write().await;
+
+        // Find eligible GPUs
+        let mut candidates: Vec<_> = pool.values()
+            .filter(|gpu| {
+                // Must be available
+                if gpu.status != GpuStatus::Available {
+                    return false;
                 }
-            } else {
-                warn!("Received bid for unknown job {}", bid.job_id);
+
+                // Check reputation
+                if gpu.reputation_score < self.config.min_worker_reputation {
+                    return false;
+                }
+
+                // Check health
+                if gpu.health_score < self.config.min_worker_health {
+                    return false;
+                }
+
+                // Check VRAM requirement
+                if let Some(min_vram) = request.min_vram_gb {
+                    if gpu.vram_gb < min_vram {
+                        return false;
+                    }
+                }
+
+                // Check GPU type requirement
+                if let Some(required_type) = &request.required_gpu_type {
+                    if &gpu.gpu_type != required_type {
+                        return false;
+                    }
+                }
+
+                // Check hourly rate
+                if let Some(max_rate) = request.max_hourly_rate {
+                    if gpu.hourly_rate > max_rate {
+                        return false;
+                    }
+                }
+
+                // Check preferred worker
+                if let Some(ref preferred) = request.preferred_worker_id {
+                    if &gpu.worker_id != preferred {
+                        return false;
+                    }
+                }
+
+                true
+            })
+            .collect();
+
+        if candidates.is_empty() {
+            return Ok(None);
+        }
+
+        // Sort by score: reputation (40%) + health (30%) + lower rate (30%)
+        candidates.sort_by(|a, b| {
+            let score_a = a.reputation_score * 0.4 + a.health_score * 0.3
+                + (1.0 / (a.hourly_rate as f64 + 1.0).ln().max(0.1)) * 0.3;
+            let score_b = b.reputation_score * 0.4 + b.health_score * 0.3
+                + (1.0 / (b.hourly_rate as f64 + 1.0).ln().max(0.1)) * 0.3;
+            score_b.partial_cmp(&score_a).unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        // Allocate the best candidate
+        let best = candidates[0];
+        let gpu_id = best.gpu_id.clone();
+        let worker_id = best.worker_id.clone();
+
+        // Mark as in use
+        if let Some(gpu) = pool.get_mut(&gpu_id) {
+            gpu.status = GpuStatus::InUse;
+        }
+
+        // Emit allocation event
+        let _ = self.event_sender.send(JobDistributionEvent::GpuAllocated {
+            gpu_id: gpu_id.clone(),
+            job_id: request.job_id,
+        });
+
+        Ok(Some((gpu_id, worker_id)))
+    }
+
+    /// Release a GPU back to the available pool
+    pub async fn release_gpu(&self, gpu_id: &str) -> Result<()> {
+        let mut pool = self.gpu_pool.write().await;
+        if let Some(gpu) = pool.get_mut(gpu_id) {
+            gpu.status = GpuStatus::Available;
+            info!("GPU {} released back to pool", gpu_id);
+
+            // Emit status change event
+            let _ = self.event_sender.send(JobDistributionEvent::GpuStatusChanged(
+                gpu_id.to_string(),
+                GpuStatus::Available,
+            ));
+        }
+        Ok(())
+    }
+
+    /// Get GPU pool statistics
+    pub async fn get_gpu_pool_stats(&self) -> GpuPoolStats {
+        let pool = self.gpu_pool.read().await;
+
+        let mut gpus_by_type: HashMap<String, usize> = HashMap::new();
+        let mut available_by_type: HashMap<String, usize> = HashMap::new();
+        let mut available_count = 0;
+        let mut in_use_count = 0;
+        let mut offline_count = 0;
+
+        for gpu in pool.values() {
+            let type_name = gpu.gpu_type.display_name().to_string();
+            *gpus_by_type.entry(type_name.clone()).or_insert(0) += 1;
+
+            match gpu.status {
+                GpuStatus::Available => {
+                    available_count += 1;
+                    *available_by_type.entry(type_name).or_insert(0) += 1;
+                }
+                GpuStatus::InUse | GpuStatus::Reserved => {
+                    in_use_count += 1;
+                }
+                GpuStatus::Offline | GpuStatus::Maintenance => {
+                    offline_count += 1;
+                }
             }
         }
-        
+
+        GpuPoolStats {
+            total_gpus: pool.len(),
+            available_gpus: available_count,
+            in_use_gpus: in_use_count,
+            offline_gpus: offline_count,
+            gpus_by_type,
+            available_by_type,
+        }
+    }
+
+    /// Get available GPUs by type
+    pub async fn get_available_gpus_by_type(&self, gpu_type: GpuType) -> Vec<RegisteredGpu> {
+        let pool = self.gpu_pool.read().await;
+        pool.values()
+            .filter(|gpu| {
+                gpu.gpu_type == gpu_type
+                    && gpu.status == GpuStatus::Available
+                    && gpu.reputation_score >= self.config.min_worker_reputation
+                    && gpu.health_score >= self.config.min_worker_health
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Register a new GPU in the pool
+    pub async fn register_gpu(&self, gpu: RegisteredGpu) -> Result<()> {
+        info!("Registering GPU {} ({}) from worker {}",
+            gpu.gpu_id, gpu.gpu_type.display_name(), gpu.worker_id);
+
+        let mut pool = self.gpu_pool.write().await;
+        pool.insert(gpu.gpu_id.clone(), gpu.clone());
+
+        // Emit registration event
+        let _ = self.event_sender.send(JobDistributionEvent::GpuRegistered(gpu));
+
+        Ok(())
+    }
+
+    /// Unregister a GPU from the pool
+    pub async fn unregister_gpu(&self, gpu_id: &str) -> Result<Option<RegisteredGpu>> {
+        let mut pool = self.gpu_pool.write().await;
+        let removed = pool.remove(gpu_id);
+
+        if let Some(ref gpu) = removed {
+            info!("Unregistered GPU {} from worker {}", gpu_id, gpu.worker_id);
+        }
+
+        Ok(removed)
+    }
+
+    /// Update worker heartbeat timestamp
+    pub async fn update_worker_heartbeat(&self, worker_id: &WorkerId) {
+        let mut pool = self.gpu_pool.write().await;
+        let now = chrono::Utc::now().timestamp() as u64;
+
+        for gpu in pool.values_mut() {
+            if &gpu.worker_id == worker_id {
+                gpu.last_heartbeat = now;
+                // If GPU was offline due to timeout, bring it back
+                if gpu.status == GpuStatus::Offline {
+                    gpu.status = GpuStatus::Available;
+                }
+            }
+        }
+    }
+
+    // =========================================================================
+    // LEGACY METHODS (kept for compatibility, may be removed later)
+    // =========================================================================
+
+    /// Handle bid received - DEPRECATED, kept for P2P message compatibility
+    /// Bids are now ignored as we use direct GPU allocation
+    #[allow(dead_code)]
+    async fn handle_bid_received_legacy(&self, bid: &WorkerBid) -> Result<()> {
+        debug!("Received legacy bid from worker {} for job {} (ignored - using direct allocation)",
+            bid.worker_id, bid.job_id);
         Ok(())
     }
 
@@ -789,286 +1196,6 @@ impl JobDistributor {
         self.health_reputation_system.detect_malicious_behavior(worker_id, behavior).await?;
         
         Ok(())
-    }
-
-    /// Start bid collection timer
-    ///
-    /// Spawns a background task that waits for the bid timeout period,
-    /// then processes collected bids and assigns the job to the best worker.
-    /// The timer can be cancelled early via `cancel_bid_timer`.
-    async fn start_bid_collection_timer(&self, job_id: JobId) -> Result<()> {
-        let timeout_secs = self.config.bid_timeout_secs;
-        info!("Bid collection timer started for job {} ({}s timeout)", job_id, timeout_secs);
-
-        // Create a cancellation channel for this timer
-        let (cancel_tx, mut cancel_rx) = tokio::sync::watch::channel(false);
-
-        // Store the cancel sender so it can be used to cancel early if needed
-        {
-            let mut timers = self.bid_timers.write().await;
-            timers.insert(job_id.clone(), cancel_tx);
-        }
-
-        // Clone what we need for the spawned task
-        let jobs = self.jobs.clone();
-        let bid_timers = self.bid_timers.clone();
-        let p2p_network = self.p2p_network.clone();
-        let event_sender = self.event_sender.clone();
-        let min_reputation = self.config.min_worker_reputation;
-        let job_id_clone = job_id.clone();
-
-        tokio::spawn(async move {
-            let job_id = job_id_clone;
-
-            // Wait for timeout or cancellation
-            let timed_out = tokio::select! {
-                _ = tokio::time::sleep(Duration::from_secs(timeout_secs)) => {
-                    true
-                }
-                _ = cancel_rx.changed() => {
-                    // Timer was cancelled early
-                    info!("Bid collection timer cancelled for job {}", job_id);
-                    false
-                }
-            };
-
-            // Remove from active timers
-            {
-                let mut timers = bid_timers.write().await;
-                timers.remove(&job_id);
-            }
-
-            if !timed_out {
-                // Was cancelled, don't process
-                return;
-            }
-
-            info!("Bid collection timeout reached for job {}, processing bids", job_id);
-
-            // Get bids for this job
-            let (bids, current_state) = {
-                let jobs_guard = jobs.read().await;
-                match jobs_guard.get(&job_id) {
-                    Some(job) => (job.bids.clone(), job.state.clone()),
-                    None => {
-                        warn!("Job {} not found when processing bids", job_id);
-                        return;
-                    }
-                }
-            };
-
-            // Only process if still in CollectingBids state
-            if current_state != JobDistributionState::CollectingBids {
-                warn!("Job {} no longer collecting bids (state: {:?}), skipping assignment",
-                    job_id, current_state);
-                return;
-            }
-
-            if bids.is_empty() {
-                warn!("No bids received for job {}", job_id);
-                // Update state to timeout
-                {
-                    let mut jobs_guard = jobs.write().await;
-                    if let Some(job) = jobs_guard.get_mut(&job_id) {
-                        job.state = JobDistributionState::Timeout;
-                        job.updated_at = chrono::Utc::now().timestamp() as u64;
-                    }
-                }
-                return;
-            }
-
-            // Filter and sort bids
-            let mut qualified_bids: Vec<_> = bids.iter()
-                .filter(|bid| {
-                    bid.reputation_score >= min_reputation && bid.health_score >= 0.7
-                })
-                .cloned()
-                .collect();
-
-            if qualified_bids.is_empty() {
-                warn!("No qualified bids for job {} (min reputation: {})", job_id, min_reputation);
-                {
-                    let mut jobs_guard = jobs.write().await;
-                    if let Some(job) = jobs_guard.get_mut(&job_id) {
-                        job.state = JobDistributionState::Failed;
-                        job.updated_at = chrono::Utc::now().timestamp() as u64;
-                    }
-                }
-                return;
-            }
-
-            // Sort by score (highest first)
-            qualified_bids.sort_by(|a, b| {
-                let score_a = calculate_bid_score(a);
-                let score_b = calculate_bid_score(b);
-                score_b.partial_cmp(&score_a).unwrap_or(std::cmp::Ordering::Equal)
-            });
-
-            let best_bid = qualified_bids[0].clone();
-            info!("Selected worker {} for job {} (bid: {}, score: {:.3})",
-                best_bid.worker_id, job_id, best_bid.bid_amount, calculate_bid_score(&best_bid));
-
-            // Create assignment
-            let assignment = JobAssignment {
-                job_id: job_id.clone(),
-                worker_id: best_bid.worker_id.clone(),
-                assignment_id: Uuid::new_v4().to_string(),
-                assigned_at: chrono::Utc::now().timestamp() as u64,
-                deadline: chrono::Utc::now().timestamp() as u64 + best_bid.estimated_completion_time,
-                reward_amount: best_bid.bid_amount,
-            };
-
-            // Update job with assignment
-            {
-                let mut jobs_guard = jobs.write().await;
-                if let Some(job) = jobs_guard.get_mut(&job_id) {
-                    job.assignment = Some(assignment.clone());
-                    job.state = JobDistributionState::InProgress;
-                    job.updated_at = chrono::Utc::now().timestamp() as u64;
-                }
-            }
-
-            // Broadcast assignment via P2P
-            let p2p_message = crate::network::p2p::P2PMessage::JobAssignment {
-                job_id: job_id.clone(),
-                worker_id: best_bid.worker_id.clone(),
-                assignment_id: assignment.assignment_id.clone(),
-                reward_amount: assignment.reward_amount,
-            };
-
-            if let Err(e) = p2p_network.broadcast_message(p2p_message, "bitsage-jobs").await {
-                error!("Failed to broadcast job assignment: {}", e);
-            }
-
-            // Send assignment event
-            if let Err(e) = event_sender.send(JobDistributionEvent::JobAssigned(assignment)) {
-                error!("Failed to send job assigned event: {}", e);
-            }
-
-            info!("Job {} successfully assigned to worker {}", job_id, best_bid.worker_id);
-        });
-
-        Ok(())
-    }
-
-    /// Cancel the bid collection timer for a job
-    ///
-    /// This is useful when a job needs to be cancelled or when enough
-    /// high-quality bids have been received to make an early decision.
-    pub async fn cancel_bid_timer(&self, job_id: &JobId) -> bool {
-        let mut timers = self.bid_timers.write().await;
-        if let Some(cancel_tx) = timers.remove(job_id) {
-            if cancel_tx.send(true).is_ok() {
-                info!("Bid collection timer cancelled for job {}", job_id);
-                return true;
-            }
-        }
-        false
-    }
-
-    /// Get the number of active bid timers
-    pub async fn get_active_bid_timers_count(&self) -> usize {
-        self.bid_timers.read().await.len()
-    }
-
-    /// Get bid collection status for a job
-    pub async fn get_bid_collection_status(&self, job_id: &JobId) -> Option<BidCollectionStatus> {
-        let jobs = self.jobs.read().await;
-        let job = jobs.get(job_id)?;
-
-        let has_active_timer = self.bid_timers.read().await.contains_key(job_id);
-
-        Some(BidCollectionStatus {
-            job_id: job_id.clone(),
-            state: job.state.clone(),
-            bid_count: job.bids.len(),
-            created_at: job.created_at,
-            has_active_timer,
-        })
-    }
-
-    /// Process collected bids and assign job
-    async fn process_bids_and_assign(&self, job_id: JobId) -> Result<()> {
-        let bids = {
-            let jobs = self.jobs.read().await;
-            if let Some(job) = jobs.get(&job_id) {
-                job.bids.clone()
-            } else {
-                return Err(anyhow::anyhow!("Job not found"));
-            }
-        };
-        
-        if bids.is_empty() {
-            warn!("No bids received for job {}", job_id);
-            return Ok(());
-        }
-        
-        // Select best worker
-        let best_bid = self.select_best_worker(&bids).await?;
-        
-        // Create assignment
-        let assignment = JobAssignment {
-            job_id: job_id.clone(),
-            worker_id: best_bid.worker_id.clone(),
-            assignment_id: Uuid::new_v4().to_string(),
-            assigned_at: chrono::Utc::now().timestamp() as u64,
-            deadline: chrono::Utc::now().timestamp() as u64 + best_bid.estimated_completion_time,
-            reward_amount: best_bid.bid_amount,
-        };
-        
-        // Update job state
-        {
-            let mut jobs = self.jobs.write().await;
-            if let Some(job) = jobs.get_mut(&job_id) {
-                job.assignment = Some(assignment.clone());
-                job.state = JobDistributionState::Assigned;
-                job.updated_at = chrono::Utc::now().timestamp() as u64;
-            }
-        }
-        
-        info!("Job {} assigned to worker {}", job_id, best_bid.worker_id);
-        
-        Ok(())
-    }
-
-    /// Select best worker from bids
-    async fn select_best_worker(&self, bids: &[WorkerBid]) -> Result<WorkerBid> {
-        // Filter bids by minimum reputation and health
-        let mut qualified_bids: Vec<_> = bids.iter()
-            .filter(|bid| {
-                bid.reputation_score >= self.config.min_worker_reputation &&
-                bid.health_score >= 0.7 // Minimum health score
-            })
-            .collect();
-        
-        if qualified_bids.is_empty() {
-            return Err(anyhow::anyhow!("No qualified workers found"));
-        }
-        
-        // Sort by composite score (reputation + health + bid competitiveness)
-        qualified_bids.sort_by(|a, b| {
-            let score_a = self.calculate_worker_score(a);
-            let score_b = self.calculate_worker_score(b);
-            score_b.partial_cmp(&score_a).unwrap_or(std::cmp::Ordering::Equal)
-        });
-        
-        Ok(qualified_bids[0].clone())
-    }
-
-    /// Calculate worker selection score
-    fn calculate_worker_score(&self, bid: &WorkerBid) -> f64 {
-        // Composite score based on:
-        // - Reputation (35%)
-        // - Health score (25%)
-        // - Bid competitiveness (25%) 
-        // - Estimated completion time (15%)
-        
-        let reputation_score = bid.reputation_score * 0.35;
-        let health_score = bid.health_score * 0.25;
-        let bid_score = (1.0 / (bid.bid_amount as f64 + 1.0)) * 0.25;
-        let time_score = (1.0 / (bid.estimated_completion_time as f64 + 1.0)) * 0.15;
-        
-        reputation_score + health_score + bid_score + time_score
     }
 
     /// Handle job reassignment after failure
@@ -1335,9 +1462,11 @@ mod tests {
     #[tokio::test]
     async fn test_job_distribution_config() {
         let config = JobDistributionConfig::default();
-        assert_eq!(config.max_workers_per_job, 10);
-        assert_eq!(config.bid_timeout_secs, 30);
         assert!(config.min_worker_reputation > 0.0);
+        assert!(config.min_worker_health > 0.0);
+        assert!(config.blockchain_poll_interval_secs > 0);
+        assert!(config.worker_heartbeat_timeout_secs > 0);
+        assert!(config.max_jobs_per_worker > 0);
     }
 
     #[tokio::test]
@@ -1411,29 +1540,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_worker_score_calculation() {
-        let bid = WorkerBid {
-            job_id: JobId::new(),
-            worker_id: WorkerId::new(),
-            bid_amount: 800,
-            estimated_completion_time: 1800,
-            worker_capabilities: WorkerCapabilities {
-                gpu_memory: 24 * 1024 * 1024 * 1024, // 24 GB
-                cpu_cores: 8,
-                ram: 32 * 1024 * 1024 * 1024, // 32 GB
-                storage: 1000 * 1024 * 1024 * 1024, // 1 TB
-                bandwidth: 1000, // Mbps
-                capability_flags: 0,
-                gpu_model: FieldElement::ZERO,
-                cpu_model: FieldElement::ZERO,
-            },
-            reputation_score: 0.85,
-            health_score: 0.9,
-            bid_id: Uuid::new_v4().to_string(),
-            submitted_at: chrono::Utc::now().timestamp() as u64,
-        };
-
-        // Create a dummy distributor to test the calculation method
+    async fn test_gpu_pool_stats() {
+        // Create a distributor
         let config = JobDistributionConfig::default();
         let blockchain_client = Arc::new(StarknetClient::new("http://localhost:5050".to_string()).expect("Failed to create client"));
         let job_manager = Arc::new(JobManagerContract::new(
@@ -1442,7 +1550,7 @@ mod tests {
         ));
         let (p2p_client, _event_receiver) = NetworkActor::new(crate::network::p2p::P2PConfig::default()).unwrap();
         let p2p_network = Arc::new(p2p_client);
-        
+
         let distributor = JobDistributor::new(
             config,
             blockchain_client,
@@ -1450,8 +1558,35 @@ mod tests {
             p2p_network,
         );
 
-        let score = distributor.calculate_worker_score(&bid);
-        assert!(score > 0.0);
-        assert!(score <= 1.0);
+        // Register a GPU
+        let gpu = RegisteredGpu {
+            gpu_id: "gpu_001".to_string(),
+            worker_id: WorkerId::new(),
+            gpu_type: GpuType::Rtx4090,
+            gpu_count: 1,
+            vram_gb: 24,
+            status: GpuStatus::Available,
+            hourly_rate: 100,
+            reputation_score: 0.9,
+            health_score: 0.95,
+            registered_at: chrono::Utc::now().timestamp() as u64,
+            last_heartbeat: chrono::Utc::now().timestamp() as u64,
+        };
+
+        distributor.register_gpu(gpu).await.unwrap();
+
+        // Check stats
+        let stats = distributor.get_gpu_pool_stats().await;
+        assert_eq!(stats.total_gpus, 1);
+        assert_eq!(stats.available_gpus, 1);
+        assert_eq!(stats.in_use_gpus, 0);
+    }
+
+    #[tokio::test]
+    async fn test_gpu_type_info() {
+        assert_eq!(GpuType::H100.vram_gb(), 80);
+        assert_eq!(GpuType::A100.vram_gb(), 80);
+        assert_eq!(GpuType::Rtx4090.vram_gb(), 24);
+        assert_eq!(GpuType::Rtx4090.display_name(), "NVIDIA RTX 4090");
     }
 }
