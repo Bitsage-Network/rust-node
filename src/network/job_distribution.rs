@@ -147,6 +147,34 @@ pub enum JobDistributionState {
     Timeout,
 }
 
+/// Status of bid collection for a job
+#[derive(Debug, Clone)]
+pub struct BidCollectionStatus {
+    pub job_id: JobId,
+    pub state: JobDistributionState,
+    pub bid_count: usize,
+    pub created_at: u64,
+    pub has_active_timer: bool,
+}
+
+/// Calculate a composite score for a worker bid.
+/// Higher scores are better.
+fn calculate_bid_score(bid: &WorkerBid) -> f64 {
+    // Composite score based on:
+    // - Reputation (35%)
+    // - Health score (25%)
+    // - Bid competitiveness (25%) - lower bids are better
+    // - Estimated completion time (15%) - faster is better
+    let reputation_score = bid.reputation_score * 0.35;
+    let health_score = bid.health_score * 0.25;
+    // Use log scale for bid amount to avoid extreme values
+    let bid_score = (1.0 / (bid.bid_amount as f64 + 1.0).ln().max(0.1)) * 0.25;
+    // Use log scale for completion time as well
+    let time_score = (1.0 / (bid.estimated_completion_time as f64 + 1.0).ln().max(0.1)) * 0.15;
+
+    reputation_score + health_score + bid_score + time_score
+}
+
 /// Blockchain polling statistics
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BlockchainPollStats {
@@ -181,6 +209,8 @@ pub struct JobDistributor {
     last_processed_block: Arc<RwLock<u64>>,
     /// Jobs discovered from blockchain (by event data to avoid duplicates)
     known_blockchain_jobs: Arc<RwLock<std::collections::HashSet<String>>>,
+    /// Active bid collection timers (job_id -> cancel_token)
+    bid_timers: Arc<RwLock<HashMap<JobId, tokio::sync::watch::Sender<bool>>>>,
 }
 
 impl JobDistributor {
@@ -214,6 +244,7 @@ impl JobDistributor {
             last_blockchain_poll: Arc::new(RwLock::new(0)),
             last_processed_block: Arc::new(RwLock::new(0)),
             known_blockchain_jobs: Arc::new(RwLock::new(std::collections::HashSet::new())),
+            bid_timers: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -268,6 +299,7 @@ impl JobDistributor {
             last_blockchain_poll: self.last_blockchain_poll.clone(),
             last_processed_block: self.last_processed_block.clone(),
             known_blockchain_jobs: self.known_blockchain_jobs.clone(),
+            bid_timers: self.bid_timers.clone(),
         }
     }
 
@@ -760,11 +792,199 @@ impl JobDistributor {
     }
 
     /// Start bid collection timer
+    ///
+    /// Spawns a background task that waits for the bid timeout period,
+    /// then processes collected bids and assigns the job to the best worker.
+    /// The timer can be cancelled early via `cancel_bid_timer`.
     async fn start_bid_collection_timer(&self, job_id: JobId) -> Result<()> {
-        // TODO: Implement timer when JobDistributor supports proper async spawning
-        // For now, this is a placeholder that would be handled by the main event loop
-        info!("Bid collection timer started for job {} ({}s timeout)", job_id, self.config.bid_timeout_secs);
+        let timeout_secs = self.config.bid_timeout_secs;
+        info!("Bid collection timer started for job {} ({}s timeout)", job_id, timeout_secs);
+
+        // Create a cancellation channel for this timer
+        let (cancel_tx, mut cancel_rx) = tokio::sync::watch::channel(false);
+
+        // Store the cancel sender so it can be used to cancel early if needed
+        {
+            let mut timers = self.bid_timers.write().await;
+            timers.insert(job_id.clone(), cancel_tx);
+        }
+
+        // Clone what we need for the spawned task
+        let jobs = self.jobs.clone();
+        let bid_timers = self.bid_timers.clone();
+        let p2p_network = self.p2p_network.clone();
+        let event_sender = self.event_sender.clone();
+        let min_reputation = self.config.min_worker_reputation;
+        let job_id_clone = job_id.clone();
+
+        tokio::spawn(async move {
+            let job_id = job_id_clone;
+
+            // Wait for timeout or cancellation
+            let timed_out = tokio::select! {
+                _ = tokio::time::sleep(Duration::from_secs(timeout_secs)) => {
+                    true
+                }
+                _ = cancel_rx.changed() => {
+                    // Timer was cancelled early
+                    info!("Bid collection timer cancelled for job {}", job_id);
+                    false
+                }
+            };
+
+            // Remove from active timers
+            {
+                let mut timers = bid_timers.write().await;
+                timers.remove(&job_id);
+            }
+
+            if !timed_out {
+                // Was cancelled, don't process
+                return;
+            }
+
+            info!("Bid collection timeout reached for job {}, processing bids", job_id);
+
+            // Get bids for this job
+            let (bids, current_state) = {
+                let jobs_guard = jobs.read().await;
+                match jobs_guard.get(&job_id) {
+                    Some(job) => (job.bids.clone(), job.state.clone()),
+                    None => {
+                        warn!("Job {} not found when processing bids", job_id);
+                        return;
+                    }
+                }
+            };
+
+            // Only process if still in CollectingBids state
+            if current_state != JobDistributionState::CollectingBids {
+                warn!("Job {} no longer collecting bids (state: {:?}), skipping assignment",
+                    job_id, current_state);
+                return;
+            }
+
+            if bids.is_empty() {
+                warn!("No bids received for job {}", job_id);
+                // Update state to timeout
+                {
+                    let mut jobs_guard = jobs.write().await;
+                    if let Some(job) = jobs_guard.get_mut(&job_id) {
+                        job.state = JobDistributionState::Timeout;
+                        job.updated_at = chrono::Utc::now().timestamp() as u64;
+                    }
+                }
+                return;
+            }
+
+            // Filter and sort bids
+            let mut qualified_bids: Vec<_> = bids.iter()
+                .filter(|bid| {
+                    bid.reputation_score >= min_reputation && bid.health_score >= 0.7
+                })
+                .cloned()
+                .collect();
+
+            if qualified_bids.is_empty() {
+                warn!("No qualified bids for job {} (min reputation: {})", job_id, min_reputation);
+                {
+                    let mut jobs_guard = jobs.write().await;
+                    if let Some(job) = jobs_guard.get_mut(&job_id) {
+                        job.state = JobDistributionState::Failed;
+                        job.updated_at = chrono::Utc::now().timestamp() as u64;
+                    }
+                }
+                return;
+            }
+
+            // Sort by score (highest first)
+            qualified_bids.sort_by(|a, b| {
+                let score_a = calculate_bid_score(a);
+                let score_b = calculate_bid_score(b);
+                score_b.partial_cmp(&score_a).unwrap_or(std::cmp::Ordering::Equal)
+            });
+
+            let best_bid = qualified_bids[0].clone();
+            info!("Selected worker {} for job {} (bid: {}, score: {:.3})",
+                best_bid.worker_id, job_id, best_bid.bid_amount, calculate_bid_score(&best_bid));
+
+            // Create assignment
+            let assignment = JobAssignment {
+                job_id: job_id.clone(),
+                worker_id: best_bid.worker_id.clone(),
+                assignment_id: Uuid::new_v4().to_string(),
+                assigned_at: chrono::Utc::now().timestamp() as u64,
+                deadline: chrono::Utc::now().timestamp() as u64 + best_bid.estimated_completion_time,
+                reward_amount: best_bid.bid_amount,
+            };
+
+            // Update job with assignment
+            {
+                let mut jobs_guard = jobs.write().await;
+                if let Some(job) = jobs_guard.get_mut(&job_id) {
+                    job.assignment = Some(assignment.clone());
+                    job.state = JobDistributionState::InProgress;
+                    job.updated_at = chrono::Utc::now().timestamp() as u64;
+                }
+            }
+
+            // Broadcast assignment via P2P
+            let p2p_message = crate::network::p2p::P2PMessage::JobAssignment {
+                job_id: job_id.clone(),
+                worker_id: best_bid.worker_id.clone(),
+                assignment_id: assignment.assignment_id.clone(),
+                reward_amount: assignment.reward_amount,
+            };
+
+            if let Err(e) = p2p_network.broadcast_message(p2p_message, "bitsage-jobs").await {
+                error!("Failed to broadcast job assignment: {}", e);
+            }
+
+            // Send assignment event
+            if let Err(e) = event_sender.send(JobDistributionEvent::JobAssigned(assignment)) {
+                error!("Failed to send job assigned event: {}", e);
+            }
+
+            info!("Job {} successfully assigned to worker {}", job_id, best_bid.worker_id);
+        });
+
         Ok(())
+    }
+
+    /// Cancel the bid collection timer for a job
+    ///
+    /// This is useful when a job needs to be cancelled or when enough
+    /// high-quality bids have been received to make an early decision.
+    pub async fn cancel_bid_timer(&self, job_id: &JobId) -> bool {
+        let mut timers = self.bid_timers.write().await;
+        if let Some(cancel_tx) = timers.remove(job_id) {
+            if cancel_tx.send(true).is_ok() {
+                info!("Bid collection timer cancelled for job {}", job_id);
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Get the number of active bid timers
+    pub async fn get_active_bid_timers_count(&self) -> usize {
+        self.bid_timers.read().await.len()
+    }
+
+    /// Get bid collection status for a job
+    pub async fn get_bid_collection_status(&self, job_id: &JobId) -> Option<BidCollectionStatus> {
+        let jobs = self.jobs.read().await;
+        let job = jobs.get(job_id)?;
+
+        let has_active_timer = self.bid_timers.read().await.contains_key(job_id);
+
+        Some(BidCollectionStatus {
+            job_id: job_id.clone(),
+            state: job.state.clone(),
+            bid_count: job.bids.len(),
+            created_at: job.created_at,
+            has_active_timer,
+        })
     }
 
     /// Process collected bids and assign job

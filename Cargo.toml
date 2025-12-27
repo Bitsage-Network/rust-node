@@ -143,6 +143,8 @@ default = []
 cuda = ["cudarc", "half"]
 # GPU acceleration with ROCm (future, for AMD GPUs)
 rocm = []
+# Feature flag for tests with outdated APIs (temporarily disabled)
+broken_tests = []
 
 [[bin]]
 name = "sage-worker"

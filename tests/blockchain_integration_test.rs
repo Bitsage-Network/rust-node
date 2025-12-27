@@ -1,12 +1,12 @@
 #[cfg(test)]
 mod tests {
-    use sage_worker::blockchain::{
+    use bitsage_node::blockchain::{
         client::{StarknetClient, HealthStatus},
         contracts::{JobManagerContract, ContractHealthStatus},
         types::*,
     };
-    use sage_worker::node::coordinator::{JobRequest, JobType as CoordinatorJobType};
-    use sage_worker::types::{JobId, WorkerId};
+    use bitsage_node::node::coordinator::{JobRequest, JobType as CoordinatorJobType};
+    use bitsage_node::types::{JobId, WorkerId};
     use std::sync::Arc;
 
     // Helper to create a test client
@@ -167,7 +167,7 @@ mod tests {
     #[test]
     fn test_function_selectors() {
         // Test that all function selectors are properly computed
-        use sage_worker::blockchain::types::selectors::*;
+        use bitsage_node::blockchain::types::selectors::*;
         
         // These should not panic and should return valid FieldElements
         assert_ne!(*SUBMIT_AI_JOB, starknet::core::types::FieldElement::ZERO);
