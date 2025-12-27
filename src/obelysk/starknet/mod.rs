@@ -19,6 +19,9 @@ pub mod reputation_client;
 // Network configuration, circuit breaker, and metrics
 pub mod network;
 
+// Faucet contract client for testnet token distribution
+pub mod faucet_client;
+
 pub use proof_serializer::{CairoSerializedProof, ProofSerializer};
 pub use starknet_client::{
     StarknetClient, StarknetClientConfig,
@@ -40,5 +43,9 @@ pub use reputation_client::{
 pub use network::{
     StarknetNetwork, CircuitBreaker, CircuitBreakerConfig, CircuitState,
     RpcMetrics, RpcMetricsSnapshot, NetworkContracts,
+};
+// Export faucet types
+pub use faucet_client::{
+    FaucetClient, FaucetClientConfig, FaucetStatus, ClaimInfo, ClaimResult, FaucetConfig,
 };
 

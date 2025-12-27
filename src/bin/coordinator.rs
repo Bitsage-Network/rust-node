@@ -19,9 +19,11 @@ use bitsage_node::{
     api::{
         create_monitoring_router, MonitoringApiState,
         create_submission_router, SubmissionApiState,
+        faucet_routes, FaucetApiState,
     },
     storage::Database,
     blockchain::{client::StarknetClient, contracts::JobManagerContract},
+    obelysk::starknet::{FaucetClient, FaucetClientConfig},
 };
 
 #[derive(Parser)]
@@ -97,18 +99,37 @@ async fn main() -> Result<()> {
     let monitoring_state = MonitoringApiState {
         job_processor: job_processor.clone(),
     };
-    
+
     let submission_state = SubmissionApiState {
         job_processor: job_processor.clone(),
     };
-    
+
     let monitoring_router = create_monitoring_router(monitoring_state);
     let submission_router = create_submission_router(submission_state);
-    
+
+    // Initialize faucet client (testnet only)
+    let faucet_client = Arc::new(
+        FaucetClient::new(FaucetClientConfig {
+            rpc_url: config.blockchain.rpc_url.clone(),
+            faucet_contract: config.blockchain.faucet_contract_address.clone().unwrap_or_default(),
+            sage_token_contract: config.blockchain.sage_token_address.clone(),
+            enabled: config.blockchain.network == "sepolia",
+            ..Default::default()
+        })?
+    );
+
+    let faucet_state = Arc::new(FaucetApiState {
+        faucet_client: faucet_client.clone(),
+    });
+
+    let faucet_router = faucet_routes(faucet_state);
+    info!("✅ Faucet API initialized (enabled: {})", config.blockchain.network == "sepolia");
+
     // Combine routers
     let app = Router::new()
         .nest("/", monitoring_router)
         .nest("/", submission_router)
+        .nest("/", faucet_router)
         .route("/", get(root_handler))
         .layer(CorsLayer::permissive());
     
@@ -123,6 +144,8 @@ async fn main() -> Result<()> {
     info!("📊 Health: http://{}/api/health", addr);
     info!("📈 Stats: http://{}/api/stats", addr);
     info!("📝 Submit job: POST http://{}/api/submit", addr);
+    info!("💧 Faucet status: http://{}/api/faucet/status/{{address}}", addr);
+    info!("💧 Faucet claim: POST http://{}/api/faucet/claim", addr);
     info!("");
     info!("Press Ctrl+C to shutdown...");
     
@@ -153,7 +176,10 @@ async fn root_handler() -> axum::Json<serde_json::Value> {
             "job_status": "/api/jobs/{job_id}",
             "job_result": "/api/jobs/{job_id}/result",
             "job_stream": "/api/jobs/{job_id}/stream",
-            "cancel_job": "POST /api/jobs/{job_id}/cancel"
+            "cancel_job": "POST /api/jobs/{job_id}/cancel",
+            "faucet_status": "/api/faucet/status/{address}",
+            "faucet_claim": "POST /api/faucet/claim",
+            "faucet_config": "/api/faucet/config"
         }
     }))
 }
