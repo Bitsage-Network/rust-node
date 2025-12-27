@@ -669,7 +669,7 @@ mod tests {
         let payload = vec![1u8; 64];  // 64 bytes of input
         let result = executor.execute_with_proof("job-ai", "AIInference", &payload).await;
 
-        assert!(result.is_ok());
+        assert!(result.is_ok(), "AI Inference job failed: {:?}", result.err());
         let result = result.unwrap();
         assert_eq!(result.status, ObelyskJobStatus::Completed);
     }

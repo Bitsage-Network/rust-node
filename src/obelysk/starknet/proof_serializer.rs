@@ -242,16 +242,26 @@ impl ProofSerializer {
     // Hash Serialization
     // =========================================================================
 
-    /// Serialize a Blake2s hash (32 bytes = 8 u32s)
+    /// Serialize a Blake2s hash as a single felt252
+    /// felt252 can hold ~252 bits, so we take the first 31 bytes of the 32-byte hash
+    /// Cairo verifier expects single felt252 values for commitments
     pub fn serialize_blake2s_hash(&mut self, hash: &[u8; 32]) {
-        // Split 32 bytes into 8 u32 chunks (little-endian)
-        for chunk in hash.chunks_exact(4) {
-            let value = u32::from_le_bytes(chunk.try_into().unwrap());
-            self.serialize_u32(value);
+        // Take first 31 bytes (248 bits) to fit in felt252 (~252 bits)
+        // This truncation is safe for commitment comparisons
+        let mut bytes = [0u8; 32];
+        bytes[1..32].copy_from_slice(&hash[0..31]);
+        self.output.push(Felt252(bytes));
+    }
+
+    /// Serialize an array of Blake2s hashes (no length prefix for commitments)
+    /// Cairo verifier expects commitments directly after config, without length prefix
+    pub fn serialize_blake2s_hash_array_no_prefix(&mut self, hashes: &[[u8; 32]]) {
+        for hash in hashes {
+            self.serialize_blake2s_hash(hash);
         }
     }
 
-    /// Serialize an array of Blake2s hashes
+    /// Serialize an array of Blake2s hashes with length prefix (for Merkle paths)
     pub fn serialize_blake2s_hash_array(&mut self, hashes: &[[u8; 32]]) {
         self.serialize_usize(hashes.len());
         for hash in hashes {
@@ -334,9 +344,10 @@ impl ProofSerializer {
     pub fn serialize_commitment_scheme_proof(&mut self, proof: &CommitmentSchemeProofData) {
         // Configuration
         self.serialize_pcs_config(&proof.config);
-        
-        // Commitments (Merkle roots for each tree)
-        self.serialize_blake2s_hash_array(&proof.commitments);
+
+        // Commitments (Merkle roots for each tree) - NO LENGTH PREFIX
+        // Cairo verifier expects: proof_data[4] = trace_commitment, proof_data[5] = composition_commitment
+        self.serialize_blake2s_hash_array_no_prefix(&proof.commitments);
         
         // Sampled values (OODS evaluations)
         self.serialize_sampled_values(&proof.sampled_values);
@@ -346,12 +357,13 @@ impl ProofSerializer {
         
         // Queried values
         self.serialize_queried_values(&proof.queried_values);
-        
-        // Proof of work nonce
-        self.serialize_u64(proof.proof_of_work);
-        
+
         // FRI proof
         self.serialize_fri_proof(&proof.fri_proof);
+
+        // Proof of work nonce - MUST BE LAST
+        // Cairo verifier expects PoW nonce at proof_data[proof_len - 1]
+        self.serialize_u64(proof.proof_of_work);
     }
 
     /// Serialize sampled values (nested structure)
@@ -595,7 +607,24 @@ mod tests {
         let mut serializer = ProofSerializer::new();
         let hash = [0u8; 32];
         serializer.serialize_blake2s_hash(&hash);
-        assert_eq!(serializer.output().len(), 8); // 32 bytes = 8 u32s
+        // Blake2s hash is now serialized as a single felt252
+        assert_eq!(serializer.output().len(), 1);
+    }
+
+    #[test]
+    fn test_serialize_blake2s_hash_truncation() {
+        // Verify that first 31 bytes are preserved
+        let mut hash = [0u8; 32];
+        for i in 0..32 {
+            hash[i] = (i + 1) as u8;
+        }
+        let mut serializer = ProofSerializer::new();
+        serializer.serialize_blake2s_hash(&hash);
+        let felt = &serializer.output()[0];
+        // First byte should be 0 (padding), bytes 1-31 should be hash[0-30]
+        assert_eq!(felt.0[0], 0);
+        assert_eq!(felt.0[1], 1);  // hash[0]
+        assert_eq!(felt.0[31], 31); // hash[30]
     }
 
     #[test]
@@ -604,6 +633,83 @@ mod tests {
         serializer.serialize_m31_array(&[1, 2, 3]);
         // 1 for length + 3 for values
         assert_eq!(serializer.output().len(), 4);
+    }
+
+    /// Integration test: Verify serialized proof format matches Cairo verifier expectations
+    /// Cairo stwo_verifier.cairo expects:
+    /// - [0-3]: PCS config (pow_bits, log_blowup_factor, log_last_layer_degree_bound, n_queries)
+    /// - [4]: trace_commitment (single felt252)
+    /// - [5]: composition_commitment (single felt252)
+    /// - [...]: sampled values, decommitments, queried values, FRI proof
+    /// - [last]: PoW nonce
+    #[test]
+    fn test_cairo_proof_format_compatibility() {
+        // Create minimal valid proof data
+        let trace_commit = [0xABu8; 32];
+        let comp_commit = [0xCDu8; 32];
+
+        let proof = CommitmentSchemeProofData {
+            config: PcsConfigData {
+                pow_bits: 16,
+                fri_config: FriConfigData {
+                    log_blowup_factor: 4,
+                    log_last_layer_degree_bound: 2,
+                    n_queries: 20,
+                },
+            },
+            commitments: vec![trace_commit, comp_commit],
+            sampled_values: SampledValuesData { trees: vec![] },
+            decommitments: vec![],
+            queried_values: vec![],
+            proof_of_work: 0x123456789ABCDEF0,
+            fri_proof: FriProofData {
+                first_layer: FriLayerProofData {
+                    fri_witness: vec![],
+                    decommitment: MerkleDecommitmentData {
+                        hash_witness: vec![],
+                        column_witness: vec![],
+                    },
+                    commitment: [0u8; 32],
+                },
+                inner_layers: vec![],
+                last_layer_poly: vec![],
+                last_layer_log_size: 0,
+            },
+        };
+
+        let mut serializer = ProofSerializer::new();
+        serializer.serialize_commitment_scheme_proof(&proof);
+        let output = serializer.output();
+
+        // Verify Cairo-expected format:
+        // [0] = pow_bits
+        assert_eq!(output[0], Felt252::from_u32(16));
+        // [1] = log_blowup_factor
+        assert_eq!(output[1], Felt252::from_u32(4));
+        // [2] = log_last_layer_degree_bound
+        assert_eq!(output[2], Felt252::from_u32(2));
+        // [3] = n_queries
+        assert_eq!(output[3], Felt252::from_u64(20));
+
+        // [4] = trace_commitment (single felt252, not 8 u32s)
+        // Verify it's a single element (Blake2s hash truncated to felt252)
+        let trace_felt = &output[4];
+        assert_eq!(trace_felt.0[1], 0xAB); // First byte of hash at position 1
+
+        // [5] = composition_commitment
+        let comp_felt = &output[5];
+        assert_eq!(comp_felt.0[1], 0xCD);
+
+        // PoW nonce should be LAST element
+        let last_idx = output.len() - 1;
+        let pow_felt = &output[last_idx];
+        assert_eq!(*pow_felt, Felt252::from_u64(0x123456789ABCDEF0));
+
+        println!("Cairo format verification passed!");
+        println!("  - PCS config at indices [0-3]: ✓");
+        println!("  - Trace commitment at [4]: ✓");
+        println!("  - Composition commitment at [5]: ✓");
+        println!("  - PoW nonce at [{}] (last): ✓", last_idx);
     }
 }
 
