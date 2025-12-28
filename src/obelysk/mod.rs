@@ -28,6 +28,10 @@ pub mod payment_client; // Payment Router contract client (Phase 8) 💰
 pub mod worker_keys;    // Worker keypair management (Phase 8) 🔑
 pub mod proof_compression; // Proof compression for on-chain submission 📦
 pub mod aml_monitor;       // Real-Time AML Monitoring (Phase 9) 🛡️
+pub mod privacy_swap;      // Privacy-Preserving Atomic Swaps (Phase 10) 🔄
+pub mod tee_proof_pipeline; // Unified TEE-GPU Proof Pipeline (Phase 11) 🔥
+pub mod multi_asset_privacy; // Multi-Asset Privacy Layer (Phase 12) 🪙
+pub mod threshold_decryption; // Threshold Decryption Ceremonies (Phase 13) 🔓
 
 // Re-exports for convenience
 pub use vm::{ObelyskVM, OpCode, Instruction, ExecutionTrace};
@@ -43,6 +47,21 @@ pub use starknet::{ProofSerializer, CairoSerializedProof, StarknetClient, Verifi
 pub use proof_aggregation::{
     ProofAggregator, AggregatorConfig, AggregatedProof, ProofCommitment,
     AggregationWitness, AggregationStats, aggregate_proofs, estimate_savings,
+    // Recursive aggregation
+    RecursiveAggregator, RecursiveConfig, RecursiveProof, RecursiveNode,
+    RecursiveAggregationMetadata, VerificationCircuitOutput,
+    MerkleAccumulator, MerkleProof, MerklePathElement,
+    IncrementalAggregator, LeafInclusionProof, RecursiveSavingsEstimate,
+    verify_recursive_proof, generate_inclusion_proof, verify_inclusion_proof,
+    estimate_recursive_gas, estimate_recursive_savings, estimate_gpu_aggregation_time,
+    RECURSION_BRANCHING_FACTOR, MAX_RECURSION_DEPTH, SINGLE_PROOF_VERIFICATION_GAS,
+    // GPU-accelerated aggregation
+    GpuRecursiveConfig, GpuAggregationStats, print_savings_summary,
+    // TEE-GPU private aggregation
+    TeeGpuConfig, TeeGpuAggregator, TeeRecursiveProof, TeeAttestation,
+    TeeGpuStats, TeeTimeEstimate, GpuDeviceInfo, ProofAttestationBinding,
+    PrivacyLevel, TEE_OVERHEAD_PERCENT,
+    verify_tee_recursive_proof, estimate_tee_gpu_time, print_tee_savings_summary,
 };
 pub use elgamal::{
     Felt252, ECPoint, ElGamalCiphertext, EncryptionProof, EncryptedBalance, KeyPair,
@@ -78,4 +97,47 @@ pub use aml_monitor::{
     TransactionAnalysisResult, RecommendedAction,
     StreamingMonitor, StreamingStats, AlertStatistics,
     ComplianceIntegration,
+};
+pub use privacy_swap::{
+    AssetId, ExchangeRate, SwapOrder, OrderStatus, BalanceSufficiencyProof,
+    SwapMatch, MatchStatus, RateComplianceProof, EqualityProof, ZeroProof,
+    AtomicSwapExecution, SwapTransfer, SameValueProof, SwapSignature,
+    SwapManager, SwapError,
+    create_swap_order, create_swap_signature, verify_swap_signature,
+    verify_rate_compliance_proof,
+};
+pub use tee_proof_pipeline::{
+    // Core pipeline
+    TeeGpuProofPipeline, PipelineConfig, PipelineStats,
+    ProofType, ProofSubmission, AggregationResult,
+    // Collector
+    ProofCollector, CollectorConfig,
+    // Global API
+    global_pipeline, submit_proof, aggregate_global, tick_global,
+    // Proof generators with pipeline integration
+    generate_and_submit_encryption_proof, generate_and_submit_balance_proof,
+    generate_and_submit_swap_proof,
+};
+pub use multi_asset_privacy::{
+    // Asset types
+    AssetConfig, AssetEncryptedBalance, MultiAssetAccount,
+    // Transfer types
+    MultiAssetTransfer, BalanceProof, MultiAssetBatchTransfer,
+    // Manager
+    MultiAssetManager,
+    // Cross-asset proofs
+    CrossAssetRatioProof, RatioProof,
+    create_cross_asset_ratio_proof, verify_cross_asset_ratio_proof,
+};
+pub use threshold_decryption::{
+    // Configuration
+    ThresholdConfig,
+    // DKG types
+    PolynomialCommitment, SecretShare, DKGSession, DKGPhase, DKGResult,
+    DKGCoordinator,
+    // Decryption types
+    DecryptionShare, DLEQProof, DecryptionCeremony, CeremonyStatus,
+    DecryptionResult, ThresholdDecryptor,
+    // Participant helper
+    ThresholdParticipant,
 };

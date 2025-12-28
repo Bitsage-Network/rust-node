@@ -10,6 +10,9 @@ pub mod verifier_contract;
 // Proof compression for 30-50% calldata/gas savings
 pub mod proof_compression;
 
+// Verifier optimization for reduced on-chain verification costs
+pub mod verifier_optimization;
+
 // Staking contract client for worker stake verification
 pub mod staking_client;
 
@@ -47,5 +50,25 @@ pub use network::{
 // Export faucet types
 pub use faucet_client::{
     FaucetClient, FaucetClientConfig, FaucetStatus, ClaimInfo, ClaimResult, FaucetConfig,
+};
+// Export verifier optimization types
+pub use verifier_optimization::{
+    // Sparse encoding
+    SparseEncoder, SparseEncodedProof,
+    // Merkle path optimization
+    MerklePathOptimizer, OptimizedMerklePaths, CompactMerklePath,
+    // FRI optimization
+    FriOptimizer, OptimizedFriProof, OptimizedFriLayer,
+    // Cairo hints
+    CairoHintsGenerator, CairoVerifierHints, HintMetadata,
+    // Batch verification
+    BatchOptimizer, BatchVerificationConfig, OptimizedBatch, BatchMetadata,
+    // Gas benchmarking
+    GasBenchmark, GasBreakdown, OptimizationSavings, OptimizationComparison,
+    // Full pipeline
+    OptimizationPipeline, OptimizationPipelineConfig, OptimizedProofPackage, OptimizedBatchPackage,
+    // Constants
+    GAS_PER_FELT, GAS_PER_ZERO_BYTE, GAS_PER_NONZERO_BYTE,
+    BASE_VERIFICATION_GAS, PER_LAYER_GAS, PER_QUERY_GAS, PER_MERKLE_HASH_GAS,
 };
 
