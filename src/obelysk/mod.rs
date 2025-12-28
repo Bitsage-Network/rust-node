@@ -27,6 +27,7 @@ pub mod privacy_client; // Privacy Router contract client (Phase 8) 🔐
 pub mod payment_client; // Payment Router contract client (Phase 8) 💰
 pub mod worker_keys;    // Worker keypair management (Phase 8) 🔑
 pub mod proof_compression; // Proof compression for on-chain submission 📦
+pub mod aml_monitor;       // Real-Time AML Monitoring (Phase 9) 🛡️
 
 // Re-exports for convenience
 pub use vm::{ObelyskVM, OpCode, Instruction, ExecutionTrace};
@@ -67,4 +68,14 @@ pub use proof_compression::{
     ProofCompressor, CompressedProof, CompressionAlgorithm,
     compute_proof_hash, compute_proof_commitment,
     MAX_ONCHAIN_PROOF_SIZE, MAX_UNCOMPRESSED_PROOF_SIZE,
+};
+pub use aml_monitor::{
+    AmlMonitor, AmlMonitorConfig, AmlTransaction, TransactionAmount, TransactionType,
+    SuspiciousPattern, PatternDetection, DetectionFactor,
+    RiskScore, RiskComponents, RiskLevel, RiskFactor,
+    AmlAlert, AlertSeverity, AlertType, AlertStatus, AlertNote,
+    UserBehaviorBaseline, AccountStatus, JurisdictionCode,
+    TransactionAnalysisResult, RecommendedAction,
+    StreamingMonitor, StreamingStats, AlertStatistics,
+    ComplianceIntegration,
 };
