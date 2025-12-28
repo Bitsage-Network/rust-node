@@ -105,7 +105,7 @@ impl Default for SimpleCoordinatorConfig {
         Self {
             environment: "development".to_string(),
             port: 8080,
-            blockchain_rpc_url: "https://starknet-sepolia.public.blastapi.io".to_string(),
+            blockchain_rpc_url: "https://rpc.starknet-testnet.lava.build".to_string(),
             job_manager_contract_address: "0x00bf025663b8a7c7e43393f082b10afe66bd9ddb06fb5e521e3adbcf693094bd".to_string(),
             kafka_bootstrap_servers: "localhost:9092".to_string(),
             p2p_port: 4001,

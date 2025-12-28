@@ -29,9 +29,9 @@ impl StarknetNetwork {
     /// Get the default RPC URL for this network
     pub fn default_rpc_url(&self) -> &'static str {
         match self {
-            StarknetNetwork::Mainnet => "https://starknet-mainnet.public.blastapi.io",
-            StarknetNetwork::Sepolia => "https://starknet-sepolia.public.blastapi.io",
-            StarknetNetwork::Goerli => "https://starknet-goerli.public.blastapi.io",
+            StarknetNetwork::Mainnet => "https://rpc.starknet.lava.build",
+            StarknetNetwork::Sepolia => "https://rpc.starknet-testnet.lava.build",
+            StarknetNetwork::Goerli => "https://rpc.starknet-testnet.lava.build", // Goerli deprecated, use Sepolia
             StarknetNetwork::Devnet => "http://localhost:5050",
             StarknetNetwork::Custom => "",
         }
@@ -426,8 +426,10 @@ mod tests {
 
     #[test]
     fn test_network_rpc_urls() {
-        assert!(StarknetNetwork::Mainnet.default_rpc_url().contains("mainnet"));
-        assert!(StarknetNetwork::Sepolia.default_rpc_url().contains("sepolia"));
+        // Lava mainnet uses rpc.starknet.lava.build (no "mainnet" in URL)
+        assert!(StarknetNetwork::Mainnet.default_rpc_url().contains("starknet.lava"));
+        // Lava sepolia uses rpc.starknet-testnet.lava.build
+        assert!(StarknetNetwork::Sepolia.default_rpc_url().contains("testnet"));
     }
 
     #[tokio::test]

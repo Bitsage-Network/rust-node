@@ -461,7 +461,7 @@ mod tests {
 
     #[test]
     fn test_client_creation() {
-        let client = StarknetClient::new("https://starknet-sepolia.public.blastapi.io".to_string());
+        let client = StarknetClient::new("https://rpc.starknet-testnet.lava.build".to_string());
         assert!(client.is_ok());
     }
 
@@ -474,7 +474,7 @@ mod tests {
     #[tokio::test]
     async fn test_health_check_with_public_rpc() {
         // This test uses a public RPC endpoint - may be slow or fail if endpoint is down
-        let client = StarknetClient::new("https://starknet-sepolia.public.blastapi.io".to_string())
+        let client = StarknetClient::new("https://rpc.starknet-testnet.lava.build".to_string())
             .expect("Failed to create client");
         
         // This test might fail if the public RPC is down, so we'll just test client creation

@@ -34,8 +34,8 @@ impl StarknetNetwork {
     /// Get the RPC URL for this network
     pub fn rpc_url(&self) -> &str {
         match self {
-            StarknetNetwork::Mainnet => "https://starknet-mainnet.public.blastapi.io",
-            StarknetNetwork::Sepolia => "https://starknet-sepolia.public.blastapi.io",
+            StarknetNetwork::Mainnet => "https://rpc.starknet.lava.build",
+            StarknetNetwork::Sepolia => "https://rpc.starknet-testnet.lava.build",
             StarknetNetwork::Devnet { url } => url,
         }
     }
@@ -1111,8 +1111,10 @@ mod tests {
 
     #[test]
     fn test_network_urls() {
-        assert!(StarknetNetwork::Mainnet.rpc_url().contains("mainnet"));
-        assert!(StarknetNetwork::Sepolia.rpc_url().contains("sepolia"));
+        // Lava mainnet uses rpc.starknet.lava.build (no "mainnet" in URL)
+        assert!(StarknetNetwork::Mainnet.rpc_url().contains("starknet.lava"));
+        // Lava sepolia uses rpc.starknet-testnet.lava.build
+        assert!(StarknetNetwork::Sepolia.rpc_url().contains("testnet"));
     }
 
     #[test]

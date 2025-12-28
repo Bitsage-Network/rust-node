@@ -29,7 +29,7 @@ use bitsage_node::types::{JobId, WorkerId};
 async fn create_test_result_collector() -> ResultCollector {
     // Create mock blockchain client
     let blockchain_client = Arc::new(
-        StarknetClient::new("https://starknet-sepolia.public.blastapi.io".to_string())
+        StarknetClient::new("https://rpc.starknet-testnet.lava.build".to_string())
             .expect("Failed to create blockchain client")
     );
     

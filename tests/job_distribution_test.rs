@@ -56,7 +56,7 @@ mod tests {
     }
 
     fn create_test_blockchain_client() -> Arc<StarknetClient> {
-        Arc::new(StarknetClient::new("https://starknet-sepolia.public.blastapi.io".to_string()).unwrap())
+        Arc::new(StarknetClient::new("https://rpc.starknet-testnet.lava.build".to_string()).unwrap())
     }
 
     fn create_test_job_manager() -> Arc<JobManagerContract> {

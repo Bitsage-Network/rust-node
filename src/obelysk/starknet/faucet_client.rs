@@ -35,12 +35,12 @@ pub struct FaucetClientConfig {
 impl Default for FaucetClientConfig {
     fn default() -> Self {
         Self {
-            rpc_url: "https://starknet-sepolia.public.blastapi.io".to_string(),
+            rpc_url: "https://rpc.starknet-testnet.lava.build".to_string(),
             faucet_contract: "0x0".to_string(),
             sage_token_contract: "0x0".to_string(),
             timeout: Duration::from_secs(30),
             enabled: true,
-            claim_amount: 20_000_000_000_000_000_000, // 20 SAGE (18 decimals)
+            claim_amount: 20_000_000_000_000_000, // 0.02 SAGE (18 decimals)
             cooldown_secs: 86400, // 24 hours
         }
     }
@@ -93,7 +93,7 @@ struct RateLimitEntry {
 /// Faucet contract client
 pub struct FaucetClient {
     config: FaucetClientConfig,
-    network: Arc<StarknetNetwork>,
+    network: StarknetNetwork,
     faucet_contract: FieldElement,
     sage_token_contract: FieldElement,
 
@@ -107,7 +107,16 @@ pub struct FaucetClient {
 impl FaucetClient {
     /// Create a new faucet client
     pub fn new(config: FaucetClientConfig) -> Result<Self> {
-        let network = Arc::new(StarknetNetwork::new(&config.rpc_url, config.timeout)?);
+        // Determine network from RPC URL
+        let network = if config.rpc_url.contains("mainnet") {
+            StarknetNetwork::Mainnet
+        } else if config.rpc_url.contains("sepolia") {
+            StarknetNetwork::Sepolia
+        } else if config.rpc_url.contains("localhost") || config.rpc_url.contains("127.0.0.1") {
+            StarknetNetwork::Devnet
+        } else {
+            StarknetNetwork::Custom
+        };
 
         let faucet_contract = FieldElement::from_hex_be(&config.faucet_contract)
             .map_err(|e| anyhow!("Invalid faucet contract address: {}", e))?;

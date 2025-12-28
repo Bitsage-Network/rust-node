@@ -609,7 +609,7 @@ mod tests {
     #[tokio::test]
     async fn test_network_coordinator_creation() {
         let config = NetworkCoordinatorConfig::default();
-        let starknet_client = Arc::new(StarknetClient::new("https://starknet-sepolia.public.blastapi.io".to_string()).unwrap());
+        let starknet_client = Arc::new(StarknetClient::new("https://rpc.starknet-testnet.lava.build".to_string()).unwrap());
         let job_manager_contract = Arc::new(JobManagerContract::new_from_address(
             starknet_client.clone(),
             "0x00bf025663b8a7c7e43393f082b10afe66bd9ddb06fb5e521e3adbcf693094bd",
@@ -627,7 +627,7 @@ mod tests {
     #[tokio::test]
     async fn test_job_announcement() {
         let config = NetworkCoordinatorConfig::default();
-        let starknet_client = Arc::new(StarknetClient::new("https://starknet-sepolia.public.blastapi.io".to_string()).unwrap());
+        let starknet_client = Arc::new(StarknetClient::new("https://rpc.starknet-testnet.lava.build".to_string()).unwrap());
         let job_manager_contract = Arc::new(JobManagerContract::new_from_address(
             starknet_client.clone(),
             "0x00bf025663b8a7c7e43393f082b10afe66bd9ddb06fb5e521e3adbcf693094bd",

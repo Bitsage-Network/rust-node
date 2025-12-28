@@ -58,7 +58,7 @@ mod tests {
 
     fn create_test_blockchain_client() -> Arc<StarknetClient> {
         Arc::new(
-            StarknetClient::new("https://starknet-sepolia.public.blastapi.io".to_string())
+            StarknetClient::new("https://rpc.starknet-testnet.lava.build".to_string())
                 .expect("Failed to create blockchain client")
         )
     }

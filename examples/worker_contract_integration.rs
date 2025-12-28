@@ -91,7 +91,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         // Real submission code (requires deployed contracts)
         let rpc_url = std::env::var("STARKNET_RPC_URL")
-            .unwrap_or_else(|_| "https://starknet-sepolia.public.blastapi.io/rpc/v0_7".to_string());
+            .unwrap_or_else(|_| "https://rpc.starknet-testnet.lava.build".to_string());
         
         let private_key = std::env::var("WORKER_PRIVATE_KEY")
             .expect("WORKER_PRIVATE_KEY not set");

@@ -11,7 +11,7 @@ mod tests {
 
     // Helper to create a test client
     fn create_test_client() -> Arc<StarknetClient> {
-        Arc::new(StarknetClient::new("https://starknet-sepolia.public.blastapi.io".to_string()).unwrap())
+        Arc::new(StarknetClient::new("https://rpc.starknet-testnet.lava.build".to_string()).unwrap())
     }
 
     // Helper to create a test contract
@@ -44,7 +44,7 @@ mod tests {
 
     #[test]
     fn test_starknet_client_creation() {
-        let client = StarknetClient::new("https://starknet-sepolia.public.blastapi.io".to_string());
+        let client = StarknetClient::new("https://rpc.starknet-testnet.lava.build".to_string());
         assert!(client.is_ok());
         
         let client = client.unwrap();

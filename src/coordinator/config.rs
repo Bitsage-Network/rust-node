@@ -605,7 +605,7 @@ impl Default for WorkerMonitoringConfig {
 impl Default for BlockchainConfig {
     fn default() -> Self {
         Self {
-            rpc_url: "https://starknet-sepolia.public.blastapi.io".to_string(),
+            rpc_url: "https://rpc.starknet-testnet.lava.build".to_string(),
             network: "sepolia".to_string(),
             job_manager_address: "0x00bf025663b8a7c7e43393f082b10afe66bd9ddb06fb5e521e3adbcf693094bd".to_string(),
             cdc_pool_address: "0x0000000000000000000000000000000000000000000000000000000000000000".to_string(),
@@ -791,21 +791,21 @@ pub fn generate_default_config(environment: Environment) -> CoordinatorConfig {
     match environment {
         Environment::Development => {
             config.database_url = "postgresql://localhost/sage_dev".to_string();
-            config.blockchain.rpc_url = "https://starknet-sepolia.public.blastapi.io".to_string();
+            config.blockchain.rpc_url = "https://rpc.starknet-testnet.lava.build".to_string();
             config.blockchain.network = "sepolia".to_string();
             config.logging.level = "debug".to_string();
             config.metrics.enable_metrics = false;
         }
         Environment::Staging => {
             config.database_url = "postgresql://localhost/sage_staging".to_string();
-            config.blockchain.rpc_url = "https://starknet-sepolia.public.blastapi.io".to_string();
+            config.blockchain.rpc_url = "https://rpc.starknet-testnet.lava.build".to_string();
             config.blockchain.network = "sepolia".to_string();
             config.logging.level = "info".to_string();
             config.security.enable_authentication = true;
         }
         Environment::Production => {
             config.database_url = "postgresql://sage:password@localhost/sage_prod".to_string();
-            config.blockchain.rpc_url = "https://starknet-mainnet.public.blastapi.io".to_string();
+            config.blockchain.rpc_url = "https://rpc.starknet.lava.build".to_string();
             config.blockchain.network = "mainnet".to_string();
             config.blockchain.faucet_contract_address = None; // No faucet on mainnet
             config.logging.level = "warn".to_string();
@@ -815,7 +815,7 @@ pub fn generate_default_config(environment: Environment) -> CoordinatorConfig {
         }
         Environment::Test => {
             config.database_url = "postgresql://localhost/sage_test".to_string();
-            config.blockchain.rpc_url = "https://starknet-sepolia.public.blastapi.io".to_string();
+            config.blockchain.rpc_url = "https://rpc.starknet-testnet.lava.build".to_string();
             config.blockchain.network = "sepolia".to_string();
             config.logging.level = "error".to_string();
             config.metrics.enable_metrics = false;

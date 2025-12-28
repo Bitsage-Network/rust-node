@@ -350,7 +350,7 @@ mod tests {
     use std::collections::HashMap;
 
     fn create_test_client() -> Arc<StarknetClient> {
-        Arc::new(StarknetClient::new("https://starknet-sepolia.public.blastapi.io".to_string()).unwrap())
+        Arc::new(StarknetClient::new("https://rpc.starknet-testnet.lava.build".to_string()).unwrap())
     }
 
     #[test]

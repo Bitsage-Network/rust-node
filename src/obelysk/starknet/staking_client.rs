@@ -167,7 +167,7 @@ pub struct StakingClientConfig {
 impl Default for StakingClientConfig {
     fn default() -> Self {
         Self {
-            rpc_url: "https://starknet-sepolia.public.blastapi.io".to_string(),
+            rpc_url: "https://rpc.starknet-testnet.lava.build".to_string(),
             staking_contract: "0x0".to_string(),
             timeout: Duration::from_secs(30),
             enabled: true,

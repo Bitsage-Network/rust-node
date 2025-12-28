@@ -19,7 +19,7 @@ use bitsage_node::blockchain::events::*;
 #[command(author, version, about, long_about = None)]
 struct Args {
     /// Starknet RPC URL
-    #[arg(long, default_value = "https://starknet-sepolia.public.blastapi.io")]
+    #[arg(long, default_value = "https://rpc.starknet-testnet.lava.build")]
     rpc_url: String,
     
     /// Database URL

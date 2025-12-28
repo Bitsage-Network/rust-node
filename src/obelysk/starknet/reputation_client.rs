@@ -98,7 +98,7 @@ pub struct ReputationClientConfig {
 impl Default for ReputationClientConfig {
     fn default() -> Self {
         Self {
-            rpc_url: "https://starknet-sepolia.public.blastapi.io".to_string(),
+            rpc_url: "https://rpc.starknet-testnet.lava.build".to_string(),
             reputation_contract: "0x0".to_string(),
             timeout: Duration::from_secs(15),
             enabled: true,
