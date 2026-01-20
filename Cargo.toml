@@ -19,15 +19,15 @@ serde_json = "1.0"
 anyhow = "1.0"
 thiserror = "1.0"
 uuid = { version = "1.6", features = ["v4", "serde"] }
-clap = { version = "4.4", features = ["derive"] }
+clap = { version = "4.4", features = ["derive", "env"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 config = "0.13"
 
 # ===== Async & Networking =====
 reqwest = { version = "0.11", features = ["json"] }
-axum = "0.7"
-tower = "0.4"
+axum = { version = "0.7", features = ["ws"] }
+tower = { version = "0.4", features = ["util"] }
 tower-http = { version = "0.5", features = ["cors", "trace"] }
 tokio-stream = "0.1"
 async-stream = "0.3"
@@ -44,8 +44,9 @@ p256 = { version = "0.13", features = ["ecdsa", "sha256"] }  # ECDSA P-256 for T
 # ===== Obelysk / Stwo ZK Proving =====
 # Note: Stwo is StarkWare's next-gen prover using Circle STARKs over Mersenne-31
 # VENDORED: Using local copy in ../libs/stwo to apply patches for latest nightly compatibility
-stwo-prover = { path = "../libs/stwo/crates/stwo", package = "stwo", features = ["prover", "parallel"] }
-stwo-constraint-framework = { path = "../libs/stwo/crates/constraint-framework", features = ["prover", "parallel"] }
+# The gpu feature provides kernel source, cuda-runtime enables actual CUDA execution
+stwo-prover = { path = "../libs/stwo/crates/stwo", package = "stwo", features = ["prover", "parallel", "gpu"] }
+stwo-constraint-framework = { path = "../libs/stwo/crates/constraint-framework", features = ["prover", "parallel", "gpu"] }
 itertools = "0.12"  # Used for polynomial operations and by Stwo
 num-traits = "0.2"  # Numerical traits
 
@@ -53,12 +54,17 @@ num-traits = "0.2"  # Numerical traits
 # CUDA support for 50-100x speedup on proof generation
 cudarc = { version = "0.11", optional = true, features = ["driver", "nvrtc"] }
 half = { version = "2.3", optional = true }  # f16 support for GPU
+nvml-wrapper = { version = "0.10", optional = true }  # NVIDIA Management Library for GPU metrics
 
 # ... (rest of file)
 
 # ===== Database =====
-sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "postgres", "chrono", "uuid", "rust_decimal"] }
+sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "postgres", "chrono", "uuid", "rust_decimal"] }
 rust_decimal = { version = "1.33", features = ["serde"] }
+rocksdb = "0.22"  # Embedded key-value store for consensus persistence
+
+# ===== Caching =====
+redis = { version = "0.25", features = ["tokio-comp", "connection-manager"], optional = true }
 
 # ===== Starknet =====
 starknet = "0.7"
@@ -67,6 +73,7 @@ starknet-providers = "0.7"
 starknet-contract = "0.7"
 starknet-core = "0.7"
 starknet-crypto = "0.6"
+starknet-curve = "0.4"    # For EC point operations (ProjectivePoint, GENERATOR)
 
 # ===== Utilities =====
 chrono = { version = "=0.4.34", features = ["serde"] }
@@ -75,6 +82,12 @@ parking_lot = "0.12"
 dashmap = "5.5"
 once_cell = "1.19"
 lazy_static = "1.4"
+sys-info = "0.9"  # System information (memory, CPU) for health checks
+dirs = "5.0"  # Home directory detection for config paths
+num_cpus = "1.16"  # CPU core detection
+
+# ===== Monitoring & Metrics =====
+prometheus = "0.13"  # Prometheus metrics collection
 
 # ===== Job Processing =====
 rayon = "1.8"
@@ -120,11 +133,31 @@ parquet = "50.0.0"
 
 # ===== Security (TEE/Crypto) =====
 aes-gcm = "0.10.3"
+aes = "0.8"  # AES-128-CTR for keystore decryption
+ctr = "0.9"  # CTR mode for AES
+scrypt = "0.11"  # scrypt KDF for keystore decryption
+hmac = "0.12"  # HMAC for keystore MAC verification
+chacha20poly1305 = "0.10"  # ChaCha20-Poly1305 AEAD for AE hints (fast decryption)
 rsa = "0.9.6"
 ed25519-dalek = "2.1.1"
 hex = "0.4.3"
+jsonwebtoken = "9.2"  # JWT authentication
+bcrypt = "0.15"  # Password hashing
+
+# ===== Fully Homomorphic Encryption (FHE) =====
+# Zama's tfhe-rs for computing on encrypted data without decryption
+# Enables confidential AI inference where data remains encrypted end-to-end
+tfhe = { version = "0.8", features = ["boolean", "shortint", "integer"], optional = true }
 # sha2 = "0.10.8" # Removed duplicate
 # uuid = { version = "1.6", features = ["v4", "serde"] } # Removed duplicate
+
+# ===== TLS/HTTPS Support =====
+rustls = "0.22"  # Modern TLS implementation
+tokio-rustls = "0.25"  # Async TLS for Tokio
+rustls-pemfile = "2.0"  # PEM file parsing for certificates
+rcgen = "0.12"  # Certificate generation for development/testing
+x509-parser = "0.16"  # X.509 certificate parsing and validation
+time = { version = "0.3", features = ["formatting", "macros"] }  # Time operations for certificates
 
 # ===== Starknet On-Chain Verification =====
 num-bigint = "0.4"  # For felt252 serialization
@@ -134,27 +167,51 @@ lz4_flex = "0.11"   # Fast LZ4 compression
 zstd = "0.13"       # Zstandard compression (best ratio)
 snap = "1.1"        # Snappy compression
 blake3 = "1.5"      # Fast hashing for checksums
+crypto-bigint = { version = "0.5.5", features = ["alloc"] }
 
 [dev-dependencies]
 tokio-test = "0.4"
+criterion = { version = "0.5", features = ["html_reports"] }
+tempfile = "3.8"  # Temporary directories for testing persistence
+
+[[bench]]
+name = "ec_operations"
+harness = false
 
 [features]
-default = []
+default = ["gpu-metrics"]
 # GPU acceleration with CUDA (requires NVIDIA GPU)
 # Usage: cargo build --features cuda
 cuda = ["cudarc", "half"]
+# GPU metrics monitoring with NVML (requires NVIDIA GPU)
+gpu-metrics = ["nvml-wrapper"]
 # GPU acceleration with ROCm (future, for AMD GPUs)
 rocm = []
 # Feature flag for tests with outdated APIs (temporarily disabled)
 broken_tests = []
+# TEE (Trusted Execution Environment) support for secure enclaves
+tee = []
+# Redis caching for dashboard metrics
+redis-cache = ["redis"]
+# Fully Homomorphic Encryption for encrypted compute
+# Usage: cargo build --features fhe
+fhe = ["tfhe"]
 
 [[bin]]
-name = "sage-worker"
+name = "sage-worker-legacy"
 path = "src/bin/worker.rs"
 
 [[bin]]
 name = "sage-coordinator"
-path = "src/bin/coordinator.rs"
+path = "src/bin/unified_coordinator.rs"
+
+[[bin]]
+name = "bitsage-proof"
+path = "src/bin/proof_cli.rs"
+
+[[bin]]
+name = "sage-worker"
+path = "src/bin/sage_worker.rs"
 
 # [patch.crates-io]
 # No patches needed when using stable Rust

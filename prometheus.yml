@@ -1,0 +1,47 @@
+# Prometheus Configuration for BitSage Consensus Monitoring
+#
+# This configuration scrapes metrics from the BitSage coordinator's
+# /metrics endpoint to monitor consensus operations.
+
+global:
+  scrape_interval: 15s  # Scrape metrics every 15 seconds
+  evaluation_interval: 15s  # Evaluate rules every 15 seconds
+
+  external_labels:
+    cluster: 'bitsage-sepolia'
+    environment: 'testnet'
+
+# Alertmanager configuration (optional)
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+          # - 'alertmanager:9093'  # Uncomment if you have Alertmanager
+
+# Load rules for alerting
+rule_files:
+  - 'alerts.yml'
+
+# Scrape configurations
+scrape_configs:
+  # BitSage Coordinator Metrics
+  - job_name: 'bitsage-coordinator'
+    static_configs:
+      - targets: ['localhost:3000']  # Adjust to your coordinator port
+    metrics_path: '/metrics'
+    scrape_interval: 10s
+
+  # Additional coordinators (for multi-node setup)
+  - job_name: 'bitsage-coordinators'
+    static_configs:
+      - targets:
+        - 'coordinator-1:3000'
+        - 'coordinator-2:3000'
+        - 'coordinator-3:3000'
+    labels:
+      service: 'bitsage-coordinator'
+
+  # Prometheus self-monitoring
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']

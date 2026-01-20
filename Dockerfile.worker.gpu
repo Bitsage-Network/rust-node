@@ -1,0 +1,77 @@
+# =============================================================================
+# BitSage GPU Worker - Docker Image with NVIDIA CUDA Support
+# =============================================================================
+# Usage:
+#   docker build -t bitsage/worker:gpu -f Dockerfile.worker.gpu .
+#   docker run --gpus all -e COORDINATOR_URL=... -e WALLET_ADDRESS=... bitsage/worker:gpu
+# =============================================================================
+
+# Build stage
+FROM rust:1.75-bookworm AS builder
+
+WORKDIR /app
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    pkg-config \
+    libssl-dev \
+    protobuf-compiler \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy manifests
+COPY Cargo.toml Cargo.lock ./
+COPY src ./src
+COPY migrations ./migrations
+
+# Build release binary
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/app/target \
+    cargo build --release --bin worker && \
+    cp target/release/worker /worker
+
+# Runtime stage with CUDA
+FROM nvidia/cuda:12.4-runtime-ubuntu22.04
+
+# Install runtime dependencies
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    libssl3 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create non-root user
+RUN useradd -m -s /bin/bash bitsage
+
+# Copy binary from builder
+COPY --from=builder /worker /usr/local/bin/bitsage-worker
+
+# Create config directory
+RUN mkdir -p /etc/bitsage /var/lib/bitsage && \
+    chown -R bitsage:bitsage /etc/bitsage /var/lib/bitsage
+
+# Default configuration
+COPY config/worker.toml /etc/bitsage/worker.toml
+
+# Environment
+ENV RUST_LOG=info
+ENV COORDINATOR_URL=https://coordinator.bitsage.network
+ENV WALLET_ADDRESS=
+ENV WORKER_ID=
+ENV ENABLE_GPU=true
+ENV ENABLE_MULTI_GPU=false
+
+# Expose ports
+# 8081 - HTTP API
+# 4001 - P2P
+EXPOSE 8081 4001
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:8081/health || exit 1
+
+# Switch to non-root user
+USER bitsage
+
+# Entry point
+ENTRYPOINT ["bitsage-worker"]
+CMD ["--config", "/etc/bitsage/worker.toml"]

@@ -1,5 +1,6 @@
 [toolchain]
-channel = "nightly"
+# Pin to specific nightly to match stwo's requirements for array_chunks feature
+channel = "nightly-2025-07-14"
 components = ["rustfmt", "clippy"]
 targets = ["x86_64-unknown-linux-gnu", "x86_64-apple-darwin", "aarch64-apple-darwin"]
 

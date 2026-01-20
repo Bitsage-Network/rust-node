@@ -11,7 +11,7 @@ COPY src ./src
 COPY examples ./examples
 
 # Build the coordinator binary
-RUN cargo build --release --bin ciro-worker
+RUN cargo build --release --bin sage-coordinator
 
 # Runtime stage
 FROM debian:bookworm-slim
@@ -30,7 +30,7 @@ RUN useradd -m -u 1000 bitsage
 WORKDIR /app
 
 # Copy binary from builder
-COPY --from=builder /usr/src/bitsage-node/target/release/ciro-worker /app/coordinator
+COPY --from=builder /usr/src/bitsage-node/target/release/sage-coordinator /app/coordinator
 
 # Copy configuration
 COPY config /app/config

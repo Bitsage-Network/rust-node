@@ -1,0 +1,108 @@
+# Prometheus Alerting Rules for BitSage Consensus
+#
+# These rules define alerts for critical consensus events
+
+groups:
+  - name: consensus_alerts
+    interval: 30s
+    rules:
+      # Low validator count
+      - alert: LowValidatorCount
+        expr: consensus_active_validators < 3
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Low number of active validators"
+          description: "Only {{ $value }} validators are active. Minimum recommended is 3 for BFT safety."
+
+      # No validators
+      - alert: NoValidators
+        expr: consensus_active_validators == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "No active validators"
+          description: "No validators are currently active. Consensus cannot proceed."
+
+      # High fraud detection rate
+      - alert: HighFraudRate
+        expr: rate(consensus_fraud_detected_total[5m]) > 0.1
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "High fraud detection rate"
+          description: "Fraud detection rate is {{ $value }} per second over the last 5 minutes."
+
+      # High consensus timeout rate
+      - alert: HighTimeoutRate
+        expr: rate(consensus_rounds_total{outcome="timeout"}[10m]) > 0.05
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High consensus timeout rate"
+          description: "Consensus timeout rate is {{ $value }} per second. Check validator connectivity."
+
+      # Low consensus approval rate
+      - alert: LowApprovalRate
+        expr: |
+          (
+            rate(consensus_rounds_total{outcome="approved"}[10m]) /
+            (rate(consensus_rounds_total[10m]) + 0.0001)
+          ) < 0.5
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Low consensus approval rate"
+          description: "Only {{ $value | humanizePercentage }} of consensus rounds are being approved."
+
+      # Frequent view changes (leader rotation)
+      - alert: FrequentViewChanges
+        expr: rate(consensus_view_changes_total[5m]) > 0.5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Frequent view changes"
+          description: "View changes occurring at {{ $value }} per second. Possible leader instability."
+
+      # Slow consensus finalization
+      - alert: SlowConsensusFinalization
+        expr: histogram_quantile(0.95, rate(consensus_finalization_duration_seconds_bucket[5m])) > 5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Slow consensus finalization"
+          description: "95th percentile consensus finalization time is {{ $value }}s. Should be under 5s."
+
+      # High persistence failure rate
+      - alert: HighPersistenceFailureRate
+        expr: |
+          (
+            rate(consensus_persistence_operations_total{status="error"}[5m]) /
+            (rate(consensus_persistence_operations_total[5m]) + 0.0001)
+          ) > 0.1
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "High persistence failure rate"
+          description: "{{ $value | humanizePercentage }} of persistence operations are failing."
+
+  - name: system_alerts
+    interval: 30s
+    rules:
+      # Coordinator down
+      - alert: CoordinatorDown
+        expr: up{job="bitsage-coordinator"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Coordinator is down"
+          description: "BitSage coordinator {{ $labels.instance }} has been down for more than 2 minutes."

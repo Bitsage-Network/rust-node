@@ -1,48 +1,72 @@
-# Build stage
+# BitSage Obelysk Worker - TEE-enabled Docker Image
+#
+# This Dockerfile builds the BitSage worker for deployment in TEE environments (Intel TDX/SGX, AMD SEV-SNP).
+# The MRENCLAVE measurement of this image must be whitelisted before workers can accept jobs.
+
 FROM rust:1.75 as builder
 
-WORKDIR /usr/src/bitsage-node
+WORKDIR /build
 
-# Copy manifests
+# Install dependencies
+RUN apt-get update && apt-get install -y \
+    libssl-dev \
+    pkg-config \
+    protobuf-compiler \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy workspace files
 COPY Cargo.toml Cargo.lock ./
+COPY rust-toolchain.toml ./
 
 # Copy source code
 COPY src ./src
-COPY examples ./examples
+COPY benches ./benches
+COPY tests ./tests
 
-# Build the worker binary
-RUN cargo build --release --bin ciro-worker
+# Build in release mode with TEE features enabled
+RUN cargo build --release --bin sage-worker --features tee
 
-# Runtime stage (CUDA support optional)
-FROM nvidia/cuda:12.2.0-runtime-ubuntu22.04
+# Runtime stage (smaller image)
+FROM debian:bookworm-slim
 
 # Install runtime dependencies
 RUN apt-get update && apt-get install -y \
     ca-certificates \
     libssl3 \
-    curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Create app user
-RUN useradd -m -u 1000 bitsage
+# Create non-root user
+RUN useradd -m -u 1000 sage && \
+    mkdir -p /app/data && \
+    chown -R sage:sage /app
 
 WORKDIR /app
 
 # Copy binary from builder
-COPY --from=builder /usr/src/bitsage-node/target/release/ciro-worker /app/worker
-
-# Copy configuration
-COPY config /app/config
+COPY --from=builder /build/target/release/sage-worker /app/sage-worker
 
 # Set ownership
-RUN chown -R bitsage:bitsage /app
+RUN chown sage:sage /app/sage-worker
 
-USER bitsage
+# Switch to non-root user
+USER sage
+
+# Expose metrics port
+EXPOSE 9090
 
 # Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
-    CMD curl -f http://localhost:8081/health || exit 1
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+    CMD ["/app/sage-worker", "--health-check"]
 
-# Run worker
-CMD ["./worker", "--config", "/app/config/worker.toml"]
+# Entry point
+ENTRYPOINT ["/app/sage-worker"]
 
+# Default command (can be overridden)
+CMD ["--config", "/app/config/worker.toml"]
+
+# Labels for metadata
+LABEL org.opencontainers.image.title="BitSage Obelysk Worker"
+LABEL org.opencontainers.image.description="TEE-enabled computation worker for BitSage Network"
+LABEL org.opencontainers.image.vendor="BitSage Network"
+LABEL org.opencontainers.image.version="1.0.0"
+LABEL org.opencontainers.image.licenses="Apache-2.0"
