@@ -1,0 +1,76 @@
+version: '3.8'
+
+services:
+  coordinator:
+    build:
+      context: ../..
+      dockerfile: Dockerfile.coordinator
+    image: ghcr.io/ciro-ai-labs/sage-coordinator:latest
+    container_name: bitsage-coordinator
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      - RUST_LOG=info
+      - DATABASE_URL=postgresql://bitsage:${DB_PASSWORD}@postgres:5432/bitsage
+      - STARKNET_RPC_URL=${STARKNET_RPC_URL:-https://starknet-sepolia-rpc.publicnode.com}
+      - STARKNET_NETWORK=${STARKNET_NETWORK:-sepolia}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - coordinator-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: bitsage-postgres
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=bitsage
+      - POSTGRES_PASSWORD=${DB_PASSWORD}
+      - POSTGRES_DB=bitsage
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ../../migrations:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bitsage"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: bitsage-redis
+    restart: unless-stopped
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  nginx:
+    image: nginx:alpine
+    container_name: bitsage-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./ssl:/etc/nginx/ssl:ro
+      - certbot-data:/var/www/certbot
+    depends_on:
+      - coordinator
+
+volumes:
+  coordinator-data:
+  postgres-data:
+  redis-data:
+  certbot-data:

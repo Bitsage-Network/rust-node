@@ -1,0 +1,82 @@
+# BitSage Event Indexer Configuration
+# This file configures the Starknet event indexer for the dashboard
+
+[indexer]
+# Enable/disable the indexer
+enabled = true
+
+# Starting block (0 = start from latest block)
+start_block = 0
+
+# Polling interval in milliseconds
+poll_interval_ms = 3000
+
+# Maximum events per batch
+batch_size = 100
+
+# Maximum retry attempts for failed operations
+max_retries = 5
+
+# Network stats snapshot interval (in seconds)
+stats_snapshot_interval = 300  # Every 5 minutes
+
+[database]
+# PostgreSQL connection URL (overridden by DATABASE_URL env var)
+url = "postgresql://bitsage:password@localhost:5432/bitsage"
+
+# Connection pool settings
+max_connections = 10
+min_connections = 2
+connection_timeout_secs = 30
+
+[rpc]
+# Starknet RPC URL (overridden by STARKNET_RPC_URL env var)
+url = "https://rpc.starknet-testnet.lava.build"
+
+# Request timeout in milliseconds
+timeout_ms = 30000
+
+# Rate limiting (requests per second)
+rate_limit = 10
+
+# Contracts to index (Sepolia Testnet)
+[contracts]
+job_manager = "0x355b8c5e9dd3310a3c361559b53cfcfdc20b2bf7d5bd87a84a83389b8cbb8d3"
+cdc_pool = "0x1f978cad424f87a6cea8aa27cbcbba10b9a50d41e296ae07e1c635392a2339"
+staking = "0x3287a0af5ab2d74fbf968204ce2291adde008d645d42bc363cb741ebfa941b"
+proof_verifier = "0x17ada59ab642b53e6620ef2026f21eb3f2d1a338d6e85cb61d5bcd8dfbebc8b"
+otc_orderbook = "0x7b2b59d93764ccf1ea85edca2720c37bba7742d05a2791175982eaa59cedef0"
+governance = "0xdf4c3ced8c8eafe33532965fe29081e6f94fb7d54bc976721985c647a7ef92"
+privacy_router = "0x7d1a6c242a4f0573696e117790f431fd60518a000b85fe5ee507456049ffc53"
+reputation = "0x4ef80990256fb016381f57c340a306e37376c1de70fa11147a4f1fc57a834de"
+referral = "0x1d400338a38fca24e67c113bcecac4875ec1b85a00b14e4e541ed224fee59e4"
+faucet = "0x62d3231450645503345e2e022b60a96aceff73898d26668f3389547a61471d3"
+
+# Events to capture per contract
+[events]
+job_manager = ["JobSubmitted", "JobAssigned", "JobCompleted", "JobCancelled", "PaymentReleased"]
+staking = ["Staked", "UnstakeInitiated", "Unstaked", "Slashed", "StakeIncreased"]
+otc_orderbook = ["OrderPlaced", "OrderFilled", "OrderCancelled", "TradeExecuted", "PairAdded"]
+governance = ["ProposalCreated", "VoteCast", "ProposalExecuted", "ProposalCancelled"]
+privacy_router = ["PrivateTransferInitiated", "PrivateTransferCompleted", "StealthAddressRegistered"]
+proof_verifier = ["ProofSubmitted", "ProofVerified", "ProofRejected"]
+reputation = ["ReputationUpdated", "WorkerRegistered", "WorkerSlashed"]
+referral = ["ReferrerRegistered", "ReferralRecorded", "CommissionPaid"]
+faucet = ["Claimed", "ConfigUpdated"]
+
+[logging]
+# Log level for indexer (trace, debug, info, warn, error)
+level = "info"
+
+# Enable detailed event logging
+log_events = true
+
+# Log file path (empty = stdout only)
+file = ""
+
+[metrics]
+# Enable Prometheus metrics
+enabled = true
+
+# Metrics endpoint port
+port = 9100

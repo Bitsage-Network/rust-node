@@ -1,22 +1,52 @@
 # BitSage Coordinator Configuration
 
 [network]
-listen_address = "0.0.0.0:8080"
+listen_address = "0.0.0.0:8090"
 p2p_listen_address = "/ip4/0.0.0.0/tcp/9000"
 max_peers = 100
 enable_mdns = true
 
 [database]
-url = "postgresql://bitsage:bitsage_dev_password@postgres:5432/bitsage"
+# Database URL - Set via DATABASE_URL environment variable for production
+# Example: postgresql://bitsage:your_secure_password@localhost:5432/bitsage
+# The CLI will use DATABASE_URL env var if set, otherwise this default (dev only)
+url = "postgresql://bitsage:${DB_PASSWORD}@localhost:5432/bitsage"
 max_connections = 10
 min_connections = 2
 
 [starknet]
-rpc_url = "http://starknet-devnet:5050"
-network = "devnet"
-# These will be set after deployment
-job_manager_address = "0x0"
-proof_verifier_address = "0x0"
+rpc_url = "https://rpc.starknet-testnet.lava.build"
+network = "sepolia"
+# Deployed contract addresses (redeployed 2025-12-31 with correct owner)
+# Owner: 0x0759a4374389b0e3cfcc59d49310b6bc75bb12bbf8ce550eb5c2f026918bb344
+sage_token_address = "0x072349097c8a802e7f66dc96b95aca84e4d78ddad22014904076c76293a99850"
+proof_verifier_address = "0x17ada59ab642b53e6620ef2026f21eb3f2d1a338d6e85cb61d5bcd8dfbebc8b"
+stwo_verifier_address = "0x52963fe2f1d2d2545cbe18b8230b739c8861ae726dc7b6f0202cc17a369bd7d"
+prover_staking_address = "0x3287a0af5ab2d74fbf968204ce2291adde008d645d42bc363cb741ebfa941b"
+worker_staking_address = "0x28caa5962266f2bf9320607da6466145489fed9dae8e346473ba1e847437613"
+reputation_manager_address = "0x4ef80990256fb016381f57c340a306e37376c1de70fa11147a4f1fc57a834de"
+fraud_proof_address = "0x5d5bc1565e4df7c61c811b0c494f1345fc0f964e154e57e829c727990116b50"
+validator_registry_address = "0x431a8b6afb9b6f3ffa2fa9e58519b64dbe9eb53c6ac8fb69d3dcb8b9b92f5d9"
+collateral_address = "0x4f5405d65d93afb71743e5ac20e4d9ef2667f256f08e61de734992ebd58603"
+optimistic_tee_address = "0x4238502196d7dab552e2af5d15219c8227c9f4dc69f0df1fa2ca9f8cb29eb33"
+obelysk_prover_registry_address = "0x34a02ecafacfa81be6d23ad5b5e061e92c2b8884cfb388f95b57122a492b3e9"
+faucet_address = "0x62d3231450645503345e2e022b60a96aceff73898d26668f3389547a61471d3"
+escrow_address = "0x7d7b5aa04b8eec7676568c8b55acd5682b8f7cb051f69c1876f0e5a6d8edfd4"
+fee_manager_address = "0x74344374490948307360e6a8376d656190773115a4fca4d049366cea7edde39"
+payment_router_address = "0x6a0639e673febf90b6a6e7d3743c81f96b39a3037b60429d479c62c5d20d41"
+privacy_pools_address = "0xd85ad03dcd91a075bef0f4226149cb7e43da795d2c1d33e3227c68bfbb78a7"
+job_manager_address = "0x355b8c5e9dd3310a3c361559b53cfcfdc20b2bf7d5bd87a84a83389b8cbb8d3"
+cdc_pool_address = "0x1f978cad424f87a6cea8aa27cbcbba10b9a50d41e296ae07e1c635392a2339"
+privacy_router_address = "0x7d1a6c242a4f0573696e117790f431fd60518a000b85fe5ee507456049ffc53"
+
+# Account configuration for transaction signing
+# SECURITY: Sensitive values MUST be set via environment variables
+# - DEPLOYER_ADDRESS: Your Starknet account address
+# - DEPLOYER_PRIVATE_KEY: Your account private key (alternative to keystore)
+# - KEYSTORE_PASSWORD: Password for encrypted keystore file
+deployer_address = "0x0759a4374389b0e3cfcc59d49310b6bc75bb12bbf8ce550eb5c2f026918bb344"
+keystore_path = "../BitSage-Cairo-Smart-Contracts/deployment/sepolia_keystore.json"
+# keystore_password loaded from KEYSTORE_PASSWORD env var - NEVER hardcode passwords
 
 [job_processing]
 max_concurrent_jobs = 100
@@ -27,7 +57,66 @@ retry_attempts = 3
 health_check_interval_seconds = 60
 worker_timeout_seconds = 300
 
+[worker_registration]
+# Enable automatic worker registration
+enable_auto_registration = true
+# Require authentication for registration
+require_authentication = false
+# Validate worker capabilities against claimed GPU tier
+enable_capability_validation = true
+# Minimum reputation score for registration (0.0-1.0)
+min_reputation_threshold = 0.5
+
+# MAINNET STAKING SECURITY
+# Require minimum stake for worker registration
+# Set to true for mainnet to enforce economic security
+require_stake = false
+
+# Allow unstaked workers in "probationary" mode
+# Probationary workers can process jobs but receive reduced rewards
+# and have lower priority in job assignment
+allow_probationary_workers = true
+
+# Minimum stake requirements by GPU tier (for reference):
+# - Consumer (RTX 30xx, 40xx, 50xx): 1,000 SAGE
+# - Workstation (A6000, L40S): 2,500 SAGE
+# - DataCenter (A100): 5,000 SAGE
+# - Enterprise (H100, H200, B200, B300): 10,000 SAGE
+# - Frontier (MI300X, Multi-GPU clusters): 25,000 SAGE
+
+[consensus]
+# SageGuard BFT Consensus Configuration
+enable = true
+quorum_percentage = 67
+vote_timeout_seconds = 30
+max_validators = 100
+view_timeout_seconds = 60
+
+# PoC-weighted voting
+enable_poc_weighting = true
+stake_ratio = 0.7
+poc_ratio = 0.3
+
+# Persistence
+persistence_enabled = true
+persistence_db_path = "./data/consensus"
+max_results_history = 10000
+
+# Fraud proof integration
+fraud_proof_enabled = true
+fraud_proof_confidence_threshold = 90
+fraud_proof_auto_challenge = true
+fraud_proof_deposit = "500000000000000000000"  # 500 SAGE
+
 [logging]
 level = "info"
-format = "json"
+format = "Json"
+enable_structured_logging = true
+
+[logging.file]
+enable_file_logging = false
+log_file_path = "/var/log/bitsage/coordinator.log"
+enable_rotation = true
+max_file_size_mb = 100
+max_files = 10
 
