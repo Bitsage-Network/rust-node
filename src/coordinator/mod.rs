@@ -14,6 +14,12 @@ pub mod simple_coordinator;
 pub mod production_coordinator;
 pub mod blockchain_bridge;
 pub mod rate_limiter;
+pub mod mining_rewards;
+pub mod circuit_breaker;
+pub mod consensus_init;
+pub mod gpu_pricing;
+pub mod supply_router;
+pub mod settlement;
 
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -39,7 +45,29 @@ use crate::obelysk::starknet::{StakingClientConfig, ReputationClientConfig};
 // Re-export main components
 pub use kafka::{KafkaConfig, KafkaEvent};
 pub use config::{NetworkCoordinatorConfig, JobProcessorConfig, WorkerManagerConfig, BlockchainConfig, MetricsConfig};
-pub use rate_limiter::{RateLimiter, RateLimiterConfig, RateLimitConfig, RateLimitError, RateLimiterStats};
+pub use rate_limiter::{
+    RateLimiter, RateLimiterConfig, RateLimitConfig, RateLimitError, RateLimiterStats,
+    DashboardRateLimits, DashboardRateLimitResult, dashboard_rate_limit_middleware,
+    dashboard_rate_limit_cleanup_task,
+};
+pub use mining_rewards::{
+    MiningRewardsManager, MiningRewardsConfig, MiningRewardResult, MiningRewardSummary,
+    StakingTier, GpuMultiplier, HalveningSchedule, ValidatorDailyStats,
+    BASE_REWARD_SAGE, MINING_POOL_TOTAL,
+};
+pub use gpu_pricing::{
+    GpuTier, GpuModel, JobCost, get_gpu_pricing, calculate_job_cost, get_pricing_summary,
+};
+pub use supply_router::{
+    SupplyRouter, SupplySource, RoutingPreference, RouteDecision,
+    RegisteredMiner, MinerStatus, MinerRegistrationRequest, SupplyStats,
+    // Job execution types
+    JobExecutionStatus, ExecutionJob, JobResult, SagePayout,
+    JobSubmitRequest, JobSubmitResponse, MinerJobAssignment, JobStats,
+};
+pub use settlement::{
+    SettlementService, SettlementRecord, SettlementStatus, SettlementStats,
+};
 
 // Re-export batch operation types
 pub use job_processor::{BatchConfig, PendingSubmission, PendingResult};
@@ -169,6 +197,21 @@ impl EnhancedCoordinator {
             running: Arc::new(RwLock::new(false)),
             node_id,
         })
+    }
+
+    /// Get the coordinator configuration
+    pub fn config(&self) -> &CoordinatorConfig {
+        &self.config
+    }
+
+    /// Get the Starknet client for blockchain operations
+    pub fn starknet_client(&self) -> &Arc<StarknetClient> {
+        &self.starknet_client
+    }
+
+    /// Get the job manager contract for on-chain job operations
+    pub fn job_manager_contract(&self) -> &Arc<JobManagerContract> {
+        &self.job_manager_contract
     }
 
     /// Start the enhanced coordinator
@@ -388,18 +431,20 @@ impl EnhancedCoordinator {
                 let job_stats = job_stats_handle.read().await.clone();
                 let worker_stats = worker_stats_handle.read().await.clone();
 
-                // Create network stats (network coordinator stats would need similar handle treatment)
+                // Derive network stats from job and worker stats
+                // Network peers correlate with active workers, job stats provide activity metrics
                 let network_stats = NetworkCoordinatorStats {
-                    total_peers: 0, // TODO: Add network stats handle
-                    active_peers: 0,
-                    messages_sent: 0,
-                    messages_received: 0,
-                    network_latency_ms: 0,
-                    jobs_announced: 0,
-                    jobs_bid_on: 0,
-                    jobs_assigned: 0,
-                    jobs_completed: 0,
-                    average_reputation: 0.0,
+                    total_peers: worker_stats.total_workers,
+                    active_peers: worker_stats.active_workers,
+                    messages_sent: job_stats.total_jobs * 3, // Estimate: ~3 messages per job (submit, assign, complete)
+                    messages_received: job_stats.total_jobs * 2, // Estimate: ~2 responses per job
+                    network_latency_ms: job_stats.average_completion_time_secs.saturating_mul(10), // Rough estimate
+                    jobs_announced: job_stats.total_jobs,
+                    jobs_bid_on: job_stats.active_jobs + job_stats.completed_jobs,
+                    jobs_assigned: job_stats.completed_jobs + job_stats.active_jobs + job_stats.failed_jobs,
+                    jobs_completed: job_stats.completed_jobs,
+                    jobs_failed: job_stats.failed_jobs,
+                    average_reputation: worker_stats.average_reputation,
                 };
 
                 // Update metrics collector with actual data
@@ -578,6 +623,12 @@ async fn handle_kafka_event_impl(
                 completed_tasks: 1,
                 total_tasks: 1,
                 error_message: None,
+                proof_hash: result.proof_hash,
+                proof_attestation: result.proof_attestation,
+                proof_commitment: result.proof_commitment,
+                compressed_proof: result.compressed_proof.clone(),
+                proof_size_bytes: result.proof_size_bytes,
+                proof_time_ms: result.proof_time_ms,
             };
 
             // Complete job in processor

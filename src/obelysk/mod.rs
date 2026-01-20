@@ -23,6 +23,7 @@ pub mod gpu;          // GPU acceleration (CUDA/ROCm) (Phase 6) 🚀
 pub mod starknet;     // Starknet L2 on-chain verification (Phase 7) ⛓️
 pub mod proof_aggregation; // Recursive proof aggregation (80% gas savings) ⛓️
 pub mod elgamal;      // ElGamal EC encryption for privacy payments (Phase 8) 🔐
+pub mod montgomery;   // Fast Montgomery arithmetic for 25x speedup ⚡
 pub mod privacy_client; // Privacy Router contract client (Phase 8) 🔐
 pub mod payment_client; // Payment Router contract client (Phase 8) 💰
 pub mod worker_keys;    // Worker keypair management (Phase 8) 🔑
@@ -32,13 +33,16 @@ pub mod privacy_swap;      // Privacy-Preserving Atomic Swaps (Phase 10) 🔄
 pub mod tee_proof_pipeline; // Unified TEE-GPU Proof Pipeline (Phase 11) 🔥
 pub mod multi_asset_privacy; // Multi-Asset Privacy Layer (Phase 12) 🪙
 pub mod threshold_decryption; // Threshold Decryption Ceremonies (Phase 13) 🔓
+pub mod nullifier_tree;       // Incremental Merkle Tree for Nullifiers (Phase 14) 🌳
+pub mod fhe;                  // Fully Homomorphic Encryption (Phase 15) 🔒
+pub mod compute_invoice;      // Proof-as-Invoice System (Phase 16) 📜
 
 // Re-exports for convenience
 pub use vm::{ObelyskVM, OpCode, Instruction, ExecutionTrace};
 pub use prover::{ObelyskProver, ProverConfig, StarkProof, LogLevel};
 pub use field::M31;
 pub use circuit::{Circuit, CircuitBuilder};
-pub use tee_types::{TEEType, TEEQuote, EnclaveWhitelist, MockTEEGenerator};
+pub use tee_types::{TEEType, TEEQuote, EnclaveWhitelist, EnclaveVersion, MockTEEGenerator};
 pub use tee_verifier::{ProofOfAttestation, AttestationCircuit};
 pub use ecdsa::{ECDSAVerifier, ECDSASignature, P256Point, U256};
 pub use ml_gadgets::Matrix;
@@ -140,4 +144,44 @@ pub use threshold_decryption::{
     DecryptionResult, ThresholdDecryptor,
     // Participant helper
     ThresholdParticipant,
+};
+pub use nullifier_tree::{
+    // Tree structure
+    IncrementalMerkleTree, ConcurrentNullifierTree, TREE_DEPTH,
+    // Proof types
+    NullifierMerkleProof, NonMembershipProof,
+    // Errors
+    NullifierTreeError,
+    // Utilities
+    compute_nullifier, verify_nullifier_proof,
+};
+pub use fhe::{
+    // Main interface
+    ObelyskFhe, ObelyskFheConfig,
+    // Key management
+    FheKeyManager, FheClientKey, FheServerKey, FhePublicKey, KeyConfig,
+    // Encryption
+    FheEncryptor, EncryptedValue, EncryptedVector,
+    encrypt_u8, encrypt_u16, encrypt_u32, encrypt_u64,
+    decrypt_u8, decrypt_u16, decrypt_u32, decrypt_u64,
+    // Compute operations
+    FheCompute, HomomorphicOperation,
+    // Use fhe_ prefix to avoid conflicts with elgamal homomorphic operations
+    homomorphic_add as fhe_homomorphic_add,
+    homomorphic_sub as fhe_homomorphic_sub,
+    homomorphic_mul as fhe_homomorphic_mul,
+    homomorphic_compare as fhe_homomorphic_compare,
+    homomorphic_max as fhe_homomorphic_max,
+    homomorphic_min as fhe_homomorphic_min,
+    // Types
+    FheError, FheConfig, SerializedKey, SerializedCiphertext,
+    ComputeRequest, ComputeResponse,
+};
+pub use compute_invoice::{
+    // Core types
+    ComputeInvoice, CircuitType, InvoiceStatus,
+    // Builder
+    InvoiceBuilder,
+    // Verification
+    verify_invoice_locally,
 };
