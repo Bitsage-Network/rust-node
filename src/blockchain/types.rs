@@ -387,6 +387,10 @@ pub mod selectors {
             .expect("Invalid selector name: get_pending_jobs_count");
         pub static ref GET_JOB_BY_INDEX: FieldElement = get_selector_from_name("get_job_by_index")
             .expect("Invalid selector name: get_job_by_index");
+        pub static ref REGISTER_JOB: FieldElement = get_selector_from_name("register_job")
+            .expect("Invalid selector name: register_job");
+        pub static ref COMPLETE_JOB: FieldElement = get_selector_from_name("complete_job")
+            .expect("Invalid selector name: complete_job");
 
         // CDC Pool contract selectors (functions)
         pub static ref REGISTER_WORKER: FieldElement = get_selector_from_name("register_worker")

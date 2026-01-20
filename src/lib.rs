@@ -13,8 +13,6 @@ pub mod storage;
 pub mod utils;
 pub mod ai;
 pub mod coordinator;
-// TODO: coordinator_main is now a separate binary
-// pub mod coordinator_main;
 
 pub mod ingest;
 pub mod security;
@@ -23,6 +21,8 @@ pub mod api;
 pub mod obelysk;  // Obelysk Protocol: Native Stwo integration for zkML
 pub mod pricing;  // GPU-aware proof pricing and marketplace economics
 pub mod validator; // BFT validator consensus for proof validation
+pub mod indexer;  // Starknet event indexer for PostgreSQL
+pub mod gpu;  // GPU monitoring and metrics via NVML
 
 // Re-export commonly used types
 pub use types::{
@@ -68,9 +68,15 @@ pub use obelysk::{
     M31, Matrix,
 };
 
-// Re-export validator consensus
+// Re-export SageGuard consensus
 pub use validator::{
-    ValidatorConsensus, ValidatorInfo, Vote, ConsensusResult, ConsensusConfig,
+    SageGuardConsensus, ValidatorInfo, Vote, ConsensusResult, ConsensusConfig,
+};
+
+// Re-export indexer
+pub use indexer::{
+    Indexer, IndexerConfig, IndexerState, IndexerError,
+    EventListener, EventProcessor, DbWriter,
 };
 
 /// Version information

@@ -34,6 +34,9 @@ use crate::obelysk::{
     ExecutionTrace, StarkProof, M31, Instruction, OpCode,
     ProofCompressor, CompressedProof, CompressionAlgorithm,
     compute_proof_hash, compute_proof_commitment,
+    // TEE-GPU pipeline integration
+    submit_proof,
+    ProofType,
 };
 use crate::obelysk::stwo_adapter::{prove_with_stwo_gpu, is_gpu_available};
 
@@ -54,6 +57,10 @@ pub struct ObelyskExecutorConfig {
     
     /// Enable TEE integration
     pub enable_tee: bool,
+
+    /// Enable TEE-GPU proof pipeline for aggregation
+    /// When enabled, proofs are submitted to the global pipeline for batching
+    pub enable_proof_pipeline: bool,
 }
 
 impl Default for ObelyskExecutorConfig {
@@ -64,6 +71,7 @@ impl Default for ObelyskExecutorConfig {
             multi_gpu: false,
             max_proof_log_size: 24,  // Up to 16M elements
             enable_tee: true,
+            enable_proof_pipeline: true, // Use TEE-GPU pipeline by default
         }
     }
 }
@@ -235,7 +243,22 @@ impl ObelyskExecutor {
         let proof_time_ms = proof_start.elapsed().as_millis() as u64;
         
         info!("  Proof generation: {}ms", proof_time_ms);
-        
+
+        // Step 2.5: Submit to TEE-GPU pipeline for aggregation (if enabled)
+        if self.config.enable_proof_pipeline {
+            let job_id_u64 = job_id.parse::<u64>().unwrap_or(0);
+            let proof_type = self.infer_proof_type(job_type);
+
+            if let Err(e) = submit_proof(proof_type.clone(), proof.clone(), job_id_u64) {
+                tracing::warn!(
+                    "  Failed to submit proof to pipeline: {} (continuing with direct submission)",
+                    e
+                );
+            } else {
+                info!("  Proof submitted to TEE-GPU pipeline (type: {:?})", proof_type);
+            }
+        }
+
         // Step 3: Extract 32-byte attestation
         let proof_attestation = self.extract_attestation(&proof, &output);
 
@@ -434,8 +457,24 @@ impl ObelyskExecutor {
             "ConfidentialVM" => self.generate_confidential_vm_program(payload),
             "Generic" | _ => self.generate_generic_program(payload),
         };
-        
+
         Ok(program)
+    }
+
+    /// Infer the proof type from job type for pipeline submission
+    fn infer_proof_type(&self, job_type: &str) -> ProofType {
+        match job_type {
+            "AIInference" => ProofType::MlInference,
+            "DataPipeline" => ProofType::EtlPipeline,
+            "ElGamalEncryption" => ProofType::ElGamalEncryption,
+            "ElGamalDecryption" => ProofType::ElGamalDecryption,
+            "BalanceSufficiency" => ProofType::BalanceSufficiency,
+            "PrivacySwap" => ProofType::PrivacySwap,
+            "RateCompliance" => ProofType::RateCompliance,
+            "Payment" => ProofType::Payment,
+            "TeeAttestation" => ProofType::TeeAttestation,
+            _ => ProofType::Generic,
+        }
     }
     
     /// Generate AI inference program

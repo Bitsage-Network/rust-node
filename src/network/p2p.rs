@@ -303,10 +303,8 @@ pub struct BitsageBehaviour {
 
 /// P2P network actor that owns the Swarm
 pub struct NetworkActor {
-    /// The libp2p swarm
+    /// The libp2p swarm (use swarm.local_peer_id() to get local peer ID)
     swarm: Swarm<BitsageBehaviour>,
-    /// Local peer ID
-    local_peer_id: PeerId,
     /// Network configuration
     config: P2PConfig,
     /// Command receiver
@@ -375,7 +373,6 @@ impl NetworkActor {
 
         let actor = Self {
             swarm,
-            local_peer_id,
             config,
             command_receiver,
             event_sender,
@@ -722,8 +719,8 @@ pub trait NetworkEventHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::time::{sleep, Duration};
-    use starknet::core::types::FieldElement;
+    
+    
 
     #[tokio::test]
     async fn test_p2p_network_creation() {

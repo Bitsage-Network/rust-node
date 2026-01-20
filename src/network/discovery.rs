@@ -184,6 +184,9 @@ pub struct WorkerDiscovery {
     // Local node's worker ID for self-identification
     local_worker_id: WorkerId,
 
+    // Local node's current load (0.0 to 1.0)
+    local_load: Arc<RwLock<f32>>,
+
     // Internal state
     running: Arc<RwLock<bool>>,
     last_discovery_cycle: Arc<RwLock<u64>>,
@@ -224,6 +227,7 @@ impl WorkerDiscovery {
             event_receiver: Arc::new(RwLock::new(Some(event_receiver))),
             network_event_receiver: Arc::new(RwLock::new(None)),
             local_worker_id: WorkerId::new(),
+            local_load: Arc::new(RwLock::new(0.0)),
             running: Arc::new(RwLock::new(false)),
             last_discovery_cycle: Arc::new(RwLock::new(0)),
             stats: Arc::new(RwLock::new(DiscoveryStats::default())),
@@ -250,10 +254,40 @@ impl WorkerDiscovery {
             event_receiver: Arc::new(RwLock::new(Some(event_receiver))),
             network_event_receiver: Arc::new(RwLock::new(Some(network_event_receiver))),
             local_worker_id,
+            local_load: Arc::new(RwLock::new(0.0)),
             running: Arc::new(RwLock::new(false)),
             last_discovery_cycle: Arc::new(RwLock::new(0)),
             stats: Arc::new(RwLock::new(DiscoveryStats::default())),
         }
+    }
+
+    /// Update the local node's current load
+    pub async fn update_local_load(&self, load: f32) {
+        *self.local_load.write().await = load.clamp(0.0, 1.0);
+    }
+
+    /// Get the local node's current load
+    pub async fn get_local_load(&self) -> f32 {
+        *self.local_load.read().await
+    }
+
+    /// Get the health and reputation system for worker scoring
+    pub fn health_reputation_system(&self) -> &Arc<HealthReputationSystem> {
+        &self.health_reputation_system
+    }
+
+    /// Get the timestamp of the last discovery cycle
+    pub async fn last_discovery_cycle(&self) -> u64 {
+        *self.last_discovery_cycle.read().await
+    }
+
+    /// Update the last discovery cycle timestamp
+    pub async fn update_last_discovery_cycle(&self) {
+        *self.last_discovery_cycle.write().await =
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
     }
 
     /// Set the network event receiver (for cases where it wasn't available at construction)
@@ -290,6 +324,7 @@ impl WorkerDiscovery {
         let discovery_running = Arc::clone(&self.running);
         let discovery_stats = Arc::clone(&self.stats);
         let local_worker_id = self.local_worker_id;
+        let discovery_local_load = Arc::clone(&self.local_load);
 
         let discovery_handle = tokio::spawn(async move {
             Self::run_discovery_loop(
@@ -300,6 +335,7 @@ impl WorkerDiscovery {
                 discovery_running,
                 discovery_stats,
                 local_worker_id,
+                discovery_local_load,
             ).await;
         });
 
@@ -373,6 +409,7 @@ impl WorkerDiscovery {
         running: Arc<RwLock<bool>>,
         stats: Arc<RwLock<DiscoveryStats>>,
         local_worker_id: WorkerId,
+        local_load: Arc<RwLock<f32>>,
     ) {
         info!("Discovery loop started with interval: {}s", config.discovery_interval_secs);
         let mut interval = tokio::time::interval(Duration::from_secs(config.discovery_interval_secs));
@@ -390,11 +427,14 @@ impl WorkerDiscovery {
             let active_count = active_workers.read().await.len();
             debug!("Running discovery round, active workers: {}", active_count);
 
+            // Get current load from system (tracked by coordinator/worker manager)
+            let current_load = *local_load.read().await;
+
             // Create and broadcast worker advertisement (announce ourselves)
             let advertisement = P2PMessage::Heartbeat {
                 worker_id: local_worker_id,
                 timestamp: chrono::Utc::now(),
-                load: 0.5, // TODO: Get actual load from system
+                load: current_load,
             };
 
             if let Err(e) = p2p_network.broadcast_message(advertisement, "bitsage-nodes").await {
@@ -731,8 +771,11 @@ impl WorkerDiscovery {
         self.event_receiver.write().await.take()
     }
 
-    /// Handle discovery message
-    async fn handle_discovery_message(&self, message: DiscoveryMessage) -> Result<()> {
+    /// Handle discovery message from the network
+    ///
+    /// This method processes incoming discovery messages and routes them
+    /// to the appropriate handler based on message type.
+    pub async fn handle_discovery_message(&self, message: DiscoveryMessage) -> Result<()> {
         match message {
             DiscoveryMessage::WorkerAdvertisement { worker_id, capabilities, location, health_metrics, reputation_score, timestamp } => {
                 self.handle_worker_advertisement(worker_id, capabilities, location, health_metrics, reputation_score, timestamp).await?;
@@ -845,10 +888,29 @@ impl WorkerDiscovery {
     async fn handle_discovery_response(&self, requester_id: WorkerId, workers: Vec<WorkerInfo>, _timestamp: u64) -> Result<()> {
         debug!("Handling discovery response for worker {}", requester_id);
         
-        // Process each worker info
-        for worker_info in &workers { // Use slice reference instead of moving
-            // TODO: Process worker info
-            debug!("Processing worker info: {:?}", worker_info);
+        // Process each worker info - add to active workers if not already present
+        {
+            let mut active = self.active_workers.write().await;
+            for worker_info in &workers {
+                // Update or insert worker info
+                if let Some(existing) = active.get_mut(&worker_info.worker_id) {
+                    // Update existing worker with latest info
+                    existing.capabilities = worker_info.capabilities.clone();
+                    existing.health = worker_info.health.clone();
+                    existing.current_load = worker_info.current_load;
+                    existing.last_seen = worker_info.last_seen;
+                    existing.is_available = worker_info.is_available;
+                    debug!("Updated worker info for: {}", worker_info.worker_id);
+                } else {
+                    // Add new worker
+                    active.insert(worker_info.worker_id, worker_info.clone());
+                    debug!("Added new worker from discovery: {}", worker_info.worker_id);
+
+                    // Update stats
+                    let mut stats = self.stats.write().await;
+                    stats.workers_discovered += 1;
+                }
+            }
         }
         
         // Send event to coordinator

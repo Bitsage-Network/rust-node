@@ -20,6 +20,11 @@ impl JobId {
     pub fn as_uuid(&self) -> Uuid {
         self.0
     }
+
+    /// Get as bytes
+    pub fn as_bytes(&self) -> &[u8; 16] {
+        self.0.as_bytes()
+    }
 }
 
 impl fmt::Display for JobId {

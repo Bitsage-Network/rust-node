@@ -18,10 +18,13 @@ use crate::types::JobId;
 pub struct WorkerBridge {
     /// Starknet account for signing transactions
     account: Arc<SingleOwnerAccount<Arc<JsonRpcClient<HttpTransport>>, LocalWallet>>,
-    
+
+    /// Provider for read-only calls
+    provider: Arc<JsonRpcClient<HttpTransport>>,
+
     /// OptimisticTEE contract address
     optimistic_tee_address: FieldElement,
-    
+
     /// Worker ID (felt252)
     worker_id: FieldElement,
 }
@@ -46,9 +49,9 @@ impl WorkerBridge {
             FieldElement::from_hex_be(private_key)?,
         ));
 
-        // Create account
+        // Create account with cloned provider
         let account = Arc::new(SingleOwnerAccount::new(
-            provider,
+            provider.clone(),
             signer,
             account_address,
             chain_id,
@@ -57,6 +60,7 @@ impl WorkerBridge {
 
         Ok(Self {
             account,
+            provider,
             optimistic_tee_address,
             worker_id,
         })
@@ -115,26 +119,134 @@ impl WorkerBridge {
 
     /// Check if a job result has been finalized on-chain
     pub async fn is_result_finalized(&self, job_id: &JobId) -> Result<bool> {
+        use starknet::providers::Provider;
+        use starknet::core::types::BlockId;
+
         let job_id_str = job_id.0.to_string();
         let job_id_low = FieldElement::from_dec_str(&job_id_str)?;
         let job_id_high = FieldElement::ZERO;
 
-        let _call = FunctionCall {
+        let call = FunctionCall {
             contract_address: self.optimistic_tee_address,
             entry_point_selector: get_selector_from_name("get_result_status")?,
             calldata: vec![job_id_low, job_id_high],
         };
 
-        // Note: SingleOwnerAccount doesn't expose provider() directly
-        // For now, return pending status (would need to restructure with provider access)
-        Ok(false) // TODO: Implement proper status query
+        // Use provider to make the read-only call
+        let result = self.provider
+            .call(call, BlockId::Tag(starknet::core::types::BlockTag::Latest))
+            .await;
+
+        match result {
+            Ok(values) => {
+                // Result status: 0 = pending, 1 = submitted, 2 = challenged, 3 = finalized
+                // A result is finalized when status == 3
+                if let Some(status) = values.first() {
+                    Ok(*status == FieldElement::from(3u8))
+                } else {
+                    Ok(false)
+                }
+            }
+            Err(e) => {
+                // If contract call fails (e.g., job doesn't exist), return false
+                tracing::debug!("Failed to query result status for job {}: {}", job_id, e);
+                Ok(false)
+            }
+        }
     }
 
-    /// Fetch a job from on-chain (for workers polling for work)
-    pub async fn poll_job(&self) -> Result<Option<OnChainJob>> {
-        // This would query JobManager contract for available jobs
-        // For now, return None (job assignment happens off-chain via coordinator)
-        Ok(None)
+    /// Fetch available jobs from on-chain (decentralized job discovery)
+    pub async fn poll_pending_jobs(&self, job_manager_address: FieldElement, limit: u64) -> Result<Vec<OnChainJob>> {
+        use starknet::providers::Provider;
+        use starknet::core::types::BlockId;
+
+        let call = FunctionCall {
+            contract_address: job_manager_address,
+            entry_point_selector: get_selector_from_name("get_pending_jobs")?,
+            calldata: vec![
+                FieldElement::ZERO,  // offset
+                FieldElement::from(limit),  // limit
+            ],
+        };
+
+        let result = self.provider
+            .call(call, BlockId::Tag(starknet::core::types::BlockTag::Latest))
+            .await;
+
+        match result {
+            Ok(values) => {
+                // Parse array of JobId values
+                // First element is array length
+                let mut jobs = Vec::new();
+                if values.is_empty() {
+                    return Ok(jobs);
+                }
+
+                let len = values[0].to_string().parse::<usize>().unwrap_or(0);
+                for i in 0..len {
+                    if i + 1 < values.len() {
+                        // Each JobId is a u256 (low, high)
+                        let job_id_low = values[1 + i * 2];
+                        let _job_id_high = if 2 + i * 2 < values.len() {
+                            values[2 + i * 2]
+                        } else {
+                            FieldElement::ZERO
+                        };
+
+                        jobs.push(OnChainJob {
+                            job_id: JobId(uuid::Uuid::new_v4()), // Temporary - need proper conversion
+                            job_type: 0, // Will be fetched with job details
+                            input_hash: job_id_low,
+                            assigned_worker: FieldElement::ZERO,
+                            job_id_felt: job_id_low,
+                        });
+                    }
+                }
+                Ok(jobs)
+            }
+            Err(e) => {
+                tracing::debug!("Failed to fetch pending jobs: {}", e);
+                Ok(Vec::new())
+            }
+        }
+    }
+
+    /// Claim a job on-chain (decentralized - worker claims directly)
+    pub async fn claim_job(&self, job_manager_address: FieldElement, job_id_low: FieldElement, job_id_high: FieldElement) -> Result<FieldElement> {
+        let call = Call {
+            to: job_manager_address,
+            selector: get_selector_from_name("claim_job")?,
+            calldata: vec![job_id_low, job_id_high],
+        };
+
+        let result = self.account
+            .execute(vec![call])
+            .send()
+            .await?;
+
+        Ok(result.transaction_hash)
+    }
+
+    /// Get pending job count
+    pub async fn get_pending_job_count(&self, job_manager_address: FieldElement) -> Result<u64> {
+        use starknet::providers::Provider;
+        use starknet::core::types::BlockId;
+
+        let call = FunctionCall {
+            contract_address: job_manager_address,
+            entry_point_selector: get_selector_from_name("get_pending_job_count")?,
+            calldata: vec![],
+        };
+
+        let result = self.provider
+            .call(call, BlockId::Tag(starknet::core::types::BlockTag::Latest))
+            .await?;
+
+        if let Some(count) = result.first() {
+            Ok(count.to_string().parse::<u64>().unwrap_or(0))
+        } else {
+            Ok(0)
+        }
     }
 }
 
@@ -145,6 +257,7 @@ pub struct OnChainJob {
     pub job_type: u8,
     pub input_hash: FieldElement,
     pub assigned_worker: FieldElement,
+    pub job_id_felt: FieldElement,
 }
 
 /// Helper to convert OVM execution result to hash

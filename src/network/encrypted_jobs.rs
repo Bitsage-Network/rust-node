@@ -115,26 +115,11 @@ impl SharedSecret {
         key.copy_from_slice(&result[..32]);
         EncryptionKey(key)
     }
-
-    /// Derive MAC key from shared secret
-    pub fn derive_mac_key(&self) -> MacKey {
-        let mut hasher = Sha3_256::new();
-        hasher.update(&self.0);
-        hasher.update(b"MAC_KEY");
-        let result = hasher.finalize();
-        let mut key = [0u8; 32];
-        key.copy_from_slice(&result[..32]);
-        MacKey(key)
-    }
 }
 
 /// Symmetric encryption key
 #[derive(Clone)]
 pub struct EncryptionKey([u8; 32]);
-
-/// MAC key for authentication
-#[derive(Clone)]
-pub struct MacKey([u8; 32]);
 
 /// Nonce for encryption
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -554,6 +539,7 @@ impl EncryptedJobManager {
     }
 
     /// Process pending announcements and try to decrypt
+    /// Decrypted jobs are stored in active_jobs for later retrieval
     pub async fn process_pending_announcements(&self) -> Vec<DecryptedJobSpec> {
         let pending = self.pending_announcements.read().await;
         let mut decrypted = Vec::new();
@@ -569,7 +555,27 @@ impl EncryptedJobManager {
             }
         }
 
+        // Store decrypted jobs for later access
+        if !decrypted.is_empty() {
+            let mut active = self.active_jobs.write().await;
+            for spec in &decrypted {
+                active.insert(spec.job_id.clone(), spec.clone());
+            }
+        }
+
         decrypted
+    }
+
+    /// Get an active (decrypted) job by ID
+    pub async fn get_active_job(&self, job_id: &JobId) -> Option<DecryptedJobSpec> {
+        let active = self.active_jobs.read().await;
+        active.get(job_id).cloned()
+    }
+
+    /// Remove a completed job from active jobs
+    pub async fn remove_active_job(&self, job_id: &JobId) -> Option<DecryptedJobSpec> {
+        let mut active = self.active_jobs.write().await;
+        active.remove(job_id)
     }
 
     /// Create encrypted bid for a job

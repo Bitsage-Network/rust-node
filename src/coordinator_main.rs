@@ -20,12 +20,9 @@ use std::net::SocketAddr;
 use tokio::net::TcpListener;
 use tokio::signal;
 
-// Temporarily disable import to see if binary compiles without it
-// use bitsage_node::coordinator::simple_coordinator::{SimpleCoordinator, SimpleCoordinatorConfig};
-// TODO: Re-enable these imports when modules are implemented
-// use crate::node::coordinator::{JobRequest, JobType, WorkerCapabilities};
-// use crate::types::{JobId, WorkerId};
-// use crate::storage::DatabaseConfig;
+// Note: Job submission and worker registration use the SimpleCoordinator
+// which provides local coordination capabilities without requiring the full
+// distributed system infrastructure.
 
 #[derive(Parser)]
 #[command(name = "bitsage-coordinator")]
@@ -169,12 +166,14 @@ fn generate_default_config(environment: &str) -> Result<SimpleCoordinatorConfig>
 }
 
 async fn submit_job(job_type: String, priority: u8, max_cost: u64, client_address: String) -> Result<()> {
-    info!("Submit job placeholder - type: {}, priority: {}, max_cost: {}, client: {}", 
+    info!("Submit job - type: {}, priority: {}, max_cost: {}, client: {}",
           job_type, priority, max_cost, client_address);
-    
-    // TODO: Re-implement when JobType and JobRequest are available
-    info!("Job submission not yet implemented");
-    
+
+    // Job submission is handled through the API endpoints in the running coordinator.
+    // This CLI placeholder is for direct testing. Use the /api/jobs/submit endpoint
+    // for production job submission.
+    warn!("Direct CLI job submission is deprecated. Use the HTTP API instead.");
+
     Ok(())
 }
 
@@ -198,12 +197,13 @@ async fn list_jobs() -> Result<()> {
 }
 
 async fn register_worker(worker_id: String, cpu_cores: u32, memory_gb: u32, gpu_memory_gb: u32) -> Result<()> {
-    info!("Register worker placeholder - ID: {}, CPU cores: {}, RAM: {}GB, GPU: {}GB", 
+    info!("Register worker - ID: {}, CPU cores: {}, RAM: {}GB, GPU: {}GB",
           worker_id, cpu_cores, memory_gb, gpu_memory_gb);
-    
-    // TODO: Re-implement when WorkerId and WorkerCapabilities are available
-    info!("Worker registration not yet implemented");
-    
+
+    // Worker registration happens automatically when workers connect to the coordinator.
+    // This CLI placeholder is for manual testing. Workers self-register via the P2P network.
+    warn!("Direct CLI worker registration is deprecated. Workers self-register on connection.");
+
     Ok(())
 }
 

@@ -44,14 +44,30 @@ impl StarknetClient {
     pub fn new_mainnet(rpc_url: String) -> Result<Self> {
         let url = Url::parse(&rpc_url)
             .context("Failed to parse RPC URL")?;
-        
+
         let provider = JsonRpcClient::new(HttpTransport::new(url));
-        
+
         Ok(Self {
             provider: Arc::new(provider),
             rpc_url,
             chain_id: FieldElement::from_hex_be("0x534e5f4d41494e")?, // Mainnet
         })
+    }
+
+    /// Create a stub client that won't be used (for disabled bridges)
+    /// This avoids panics when creating disabled bridges for testing
+    pub fn new_unchecked(rpc_url: &str) -> Self {
+        // Parse URL with a fallback to localhost if invalid
+        let url = Url::parse(rpc_url)
+            .unwrap_or_else(|_| Url::parse("http://localhost:1").unwrap());
+        let provider = JsonRpcClient::new(HttpTransport::new(url));
+
+        Self {
+            provider: Arc::new(provider),
+            rpc_url: rpc_url.to_string(),
+            // Use a placeholder chain ID - this client should never be used for real calls
+            chain_id: FieldElement::ZERO,
+        }
     }
 
     /// Connect to the Starknet network and verify connection
@@ -461,7 +477,7 @@ mod tests {
 
     #[test]
     fn test_client_creation() {
-        let client = StarknetClient::new("https://rpc.starknet-testnet.lava.build".to_string());
+        let client = StarknetClient::new("https://starknet-sepolia-rpc.publicnode.com".to_string());
         assert!(client.is_ok());
     }
 
@@ -474,7 +490,7 @@ mod tests {
     #[tokio::test]
     async fn test_health_check_with_public_rpc() {
         // This test uses a public RPC endpoint - may be slow or fail if endpoint is down
-        let client = StarknetClient::new("https://rpc.starknet-testnet.lava.build".to_string())
+        let client = StarknetClient::new("https://starknet-sepolia-rpc.publicnode.com".to_string())
             .expect("Failed to create client");
         
         // This test might fail if the public RPC is down, so we'll just test client creation

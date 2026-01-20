@@ -611,6 +611,15 @@ pub struct FallbackAttestor {
 }
 
 impl FallbackAttestor {
+    /// Get the public key for verification purposes
+    pub fn public_key(&self) -> rsa::RsaPublicKey {
+        use rsa::traits::PublicKeyParts;
+        rsa::RsaPublicKey::new(self.mock_key.n().clone(), self.mock_key.e().clone())
+            .expect("valid public key from private key")
+    }
+}
+
+impl FallbackAttestor {
     pub fn new() -> Self {
         let mut rng = rand::rngs::OsRng;
         Self {

@@ -7,18 +7,48 @@
 //! - Health monitoring and heartbeat
 //! - Graceful shutdown handling
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, Context, bail};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{mpsc, RwLock, watch};
 use tracing::{info, warn, error, debug, instrument};
 
 use crate::types::{WorkerId, JobId, WorkerCapabilities, TeeType};
 use crate::compute::job_executor::{JobExecutor, JobExecutionRequest, JobExecutionResult, JobRequirements};
+use crate::obelysk::worker_keys::WorkerKeyManager;
+use crate::obelysk::privacy_client::WorkerPrivacyManager;
+use crate::obelysk::privacy_swap::AssetId;
+use crate::obelysk::proof_compression::CompressedProof;
+
+// ============================================================================
+// Payment Claim Types
+// ============================================================================
+
+/// Pending payment claim with proof data
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingPaymentClaim {
+    /// Job ID
+    pub job_id: u128,
+    /// Payment asset type (SAGE, USDC, etc.)
+    pub asset_id: AssetId,
+    /// Payment amount in base units
+    pub amount: u128,
+    /// Compressed proof for payment verification
+    pub compressed_proof: Option<CompressedProof>,
+    /// Proof hash (Blake3)
+    pub proof_hash: Option<[u8; 32]>,
+    /// Proof attestation
+    pub proof_attestation: Option<[u8; 32]>,
+    /// Proof commitment
+    pub proof_commitment: Option<[u8; 32]>,
+    /// Timestamp when claim was queued
+    pub queued_at: u64,
+}
 
 // ============================================================================
 // Configuration Types
@@ -53,6 +83,27 @@ pub struct WorkerConfig {
     pub registration_retries: u32,
     /// Delay between registration retries (seconds)
     pub registration_retry_delay_secs: u64,
+
+    // ========== Privacy Payment Configuration ==========
+
+    /// Enable privacy payments (requires Starknet RPC)
+    pub enable_privacy_payments: bool,
+    /// Starknet RPC URL for privacy operations
+    pub starknet_rpc_url: Option<String>,
+    /// Private key for Starknet account (hex without 0x prefix)
+    pub starknet_private_key: Option<String>,
+    /// Starknet account address
+    pub starknet_account_address: Option<String>,
+    /// Path to privacy keystore file
+    pub privacy_keystore_path: Option<PathBuf>,
+    /// Secret for key derivation (should be securely stored)
+    pub privacy_key_secret: Option<String>,
+    /// Auto-register privacy account on startup
+    pub auto_register_privacy: bool,
+    /// Payment claim interval in seconds
+    pub payment_claim_interval_secs: u64,
+    /// Max batch size for payment claims
+    pub payment_claim_batch_size: usize,
 }
 
 impl Default for WorkerConfig {
@@ -71,6 +122,16 @@ impl Default for WorkerConfig {
             request_timeout_secs: 30,
             registration_retries: 3,
             registration_retry_delay_secs: 5,
+            // Privacy payment defaults
+            enable_privacy_payments: false,
+            starknet_rpc_url: None,
+            starknet_private_key: None,
+            starknet_account_address: None,
+            privacy_keystore_path: None,
+            privacy_key_secret: None,
+            auto_register_privacy: true,
+            payment_claim_interval_secs: 30,
+            payment_claim_batch_size: 10,
         }
     }
 }
@@ -217,7 +278,6 @@ impl Default for HealthStatus {
 /// Internal job state for tracking active jobs
 #[derive(Debug, Clone)]
 struct ActiveJob {
-    job_id: JobId,
     started_at: Instant,
     job_type: String,
 }
@@ -253,6 +313,18 @@ pub struct Worker {
     // Event channel
     event_sender: mpsc::UnboundedSender<WorkerEvent>,
     event_receiver: Arc<RwLock<Option<mpsc::UnboundedReceiver<WorkerEvent>>>>,
+
+    // Privacy payment management
+    /// Privacy key manager for ElGamal operations
+    key_manager: Option<Arc<WorkerKeyManager>>,
+    /// Privacy manager for claiming encrypted payments (initialized async in start())
+    privacy_manager: Arc<RwLock<Option<Arc<WorkerPrivacyManager>>>>,
+    /// Queue of (job_id, asset_id) pairs pending payment claim
+    pending_payment_claims: Arc<RwLock<VecDeque<PendingPaymentClaim>>>,
+    /// Track claimed payments per asset to avoid duplicates: job_id -> set of claimed assets
+    claimed_payments: Arc<RwLock<HashMap<u128, HashSet<AssetId>>>>,
+    /// Shutdown signal sender for payment claim loop
+    shutdown_tx: Arc<RwLock<Option<watch::Sender<bool>>>>,
 }
 
 impl Worker {
@@ -277,6 +349,29 @@ impl Worker {
         // Create event channel
         let (event_sender, event_receiver) = mpsc::unbounded_channel();
 
+        // Initialize privacy key manager if enabled
+        let key_manager = if config.enable_privacy_payments {
+            let keystore_path = config.privacy_keystore_path.clone()
+                .unwrap_or_else(|| PathBuf::from(format!(".privacy_keys/{}.key", id_string)));
+
+            let secret = config.privacy_key_secret.as_ref()
+                .map(|s| s.as_bytes().to_vec())
+                .unwrap_or_else(|| id_string.as_bytes().to_vec());
+
+            match WorkerKeyManager::load_or_generate(&id_string, &secret, &keystore_path) {
+                Ok(manager) => {
+                    info!("🔐 Privacy key manager initialized for worker {}", id_string);
+                    Some(Arc::new(manager))
+                }
+                Err(e) => {
+                    warn!("Failed to initialize privacy key manager: {}", e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         Ok(Self {
             id,
             id_string,
@@ -292,6 +387,12 @@ impl Worker {
             last_heartbeat: Arc::new(RwLock::new(None)),
             event_sender,
             event_receiver: Arc::new(RwLock::new(Some(event_receiver))),
+            // Privacy fields
+            key_manager,
+            privacy_manager: Arc::new(RwLock::new(None)), // Initialized async in start()
+            pending_payment_claims: Arc::new(RwLock::new(VecDeque::new())),
+            claimed_payments: Arc::new(RwLock::new(HashMap::new())),
+            shutdown_tx: Arc::new(RwLock::new(None)),
         })
     }
 
@@ -364,9 +465,10 @@ impl Worker {
     /// Start the worker
     ///
     /// This method:
-    /// 1. Registers with the coordinator
-    /// 2. Spawns background tasks for heartbeat and health monitoring
-    /// 3. Enters the main job polling loop
+    /// 1. Initializes privacy payment system if enabled
+    /// 2. Registers with the coordinator
+    /// 3. Spawns background tasks for heartbeat, health monitoring, and payment claims
+    /// 4. Enters the main job polling loop
     #[instrument(skip(self), fields(worker_id = %self.id_string))]
     pub async fn start(&self) -> Result<()> {
         // Check if already running
@@ -382,6 +484,13 @@ impl Worker {
             *self.started_at.write().await = Some(Instant::now());
             self.stats.write().await.started_at = Some(Utc::now());
         }
+
+        // Initialize privacy payment system if enabled
+        let payment_claim_handle = if self.config.enable_privacy_payments {
+            self.initialize_privacy_payments().await
+        } else {
+            None
+        };
 
         // Register with coordinator
         self.register_with_retries().await?;
@@ -401,9 +510,17 @@ impl Worker {
         // Main job polling loop
         let poll_result = self.run_polling_loop().await;
 
+        // Signal shutdown for payment claim loop
+        if let Some(tx) = self.shutdown_tx.write().await.take() {
+            let _ = tx.send(true);
+        }
+
         // Cancel background tasks
         heartbeat_handle.abort();
         health_handle.abort();
+        if let Some(handle) = payment_claim_handle {
+            handle.abort();
+        }
 
         // Unregister from coordinator
         if let Err(e) = self.unregister_from_coordinator().await {
@@ -417,6 +534,105 @@ impl Worker {
         info!("🛑 Worker {} stopped", self.id_string);
 
         poll_result
+    }
+
+    /// Initialize privacy payment system
+    ///
+    /// Creates the PrivacyRouterClient and WorkerPrivacyManager,
+    /// registers the privacy account, and spawns the payment claim loop.
+    async fn initialize_privacy_payments(&self) -> Option<tokio::task::JoinHandle<()>> {
+        let key_manager = match &self.key_manager {
+            Some(km) => km.clone(),
+            None => {
+                warn!("Privacy payments enabled but no key manager available");
+                return None;
+            }
+        };
+
+        // Check required config (rpc_url reserved for future multi-network support)
+        let (_rpc_url, private_key, account_address) = match (
+            &self.config.starknet_rpc_url,
+            &self.config.starknet_private_key,
+            &self.config.starknet_account_address,
+        ) {
+            (Some(rpc), Some(pk), Some(addr)) => (rpc.clone(), pk.clone(), addr.clone()),
+            _ => {
+                warn!("Privacy payments enabled but Starknet config incomplete");
+                info!("Required: starknet_rpc_url, starknet_private_key, starknet_account_address");
+                return None;
+            }
+        };
+
+        // Parse account address
+        let account_fe = match starknet::core::types::FieldElement::from_hex_be(&account_address) {
+            Ok(fe) => fe,
+            Err(e) => {
+                error!("Invalid Starknet account address: {}", e);
+                return None;
+            }
+        };
+
+        // Create privacy router client
+        info!("🔐 Initializing privacy payment system...");
+        let privacy_client = match crate::obelysk::privacy_client::PrivacyRouterClient::for_sepolia(
+            &private_key,
+            account_fe,
+        ).await {
+            Ok(client) => client,
+            Err(e) => {
+                error!("Failed to create privacy client: {}", e);
+                return None;
+            }
+        };
+
+        // Create privacy manager
+        let privacy_manager = Arc::new(WorkerPrivacyManager::new(
+            privacy_client,
+            key_manager.keypair().secret_key,
+        ));
+
+        // Store privacy manager
+        *self.privacy_manager.write().await = Some(privacy_manager.clone());
+
+        // Auto-register privacy account if configured
+        if self.config.auto_register_privacy {
+            match privacy_manager.register().await {
+                Ok(tx) => info!("✅ Registered privacy account: {:?}", tx),
+                Err(e) => {
+                    let error_msg = e.to_string();
+                    if error_msg.contains("already registered") {
+                        debug!("Privacy account already registered");
+                    } else {
+                        warn!("Failed to register privacy account: {}", e);
+                    }
+                }
+            }
+        }
+
+        // Create shutdown channel and spawn payment claim loop
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        *self.shutdown_tx.write().await = Some(shutdown_tx);
+
+        let pending_claims = self.pending_payment_claims.clone();
+        let claimed = self.claimed_payments.clone();
+        let claim_interval = self.config.payment_claim_interval_secs;
+        let batch_size = self.config.payment_claim_batch_size;
+
+        let handle = tokio::spawn(async move {
+            Self::run_payment_claim_loop(
+                privacy_manager,
+                pending_claims,
+                claimed,
+                shutdown_rx,
+                claim_interval,
+                batch_size,
+            ).await;
+        });
+
+        info!("💰 Payment claim loop started (interval: {}s, batch: {})",
+              claim_interval, batch_size);
+
+        Some(handle)
     }
 
     /// Stop the worker gracefully
@@ -501,11 +717,27 @@ impl Worker {
         // Build capabilities payload in coordinator format
         let capabilities_payload = self.build_capabilities_payload();
 
-        let payload = serde_json::json!({
+        // Build base payload
+        let mut payload = serde_json::json!({
             "worker_id": self.id_string,
             "capabilities": capabilities_payload,
             "wallet_address": self.config.wallet_address,
         });
+
+        // Include privacy public key and signature if key manager is available
+        if let Some(ref key_manager) = self.key_manager {
+            let timestamp = chrono::Utc::now().timestamp() as u64;
+            let signature = key_manager.sign_registration(timestamp);
+            let public_key = key_manager.public_key();
+
+            // Add privacy fields to payload
+            if let Some(obj) = payload.as_object_mut() {
+                obj.insert("privacy_public_key".to_string(), serde_json::to_value(&public_key)?);
+                obj.insert("privacy_key_signature".to_string(), serde_json::to_value(&signature)?);
+            }
+
+            debug!("Including privacy public key in registration");
+        }
 
         debug!("Sending registration request to {}", url);
 
@@ -521,6 +753,15 @@ impl Worker {
             let error_text = response.text().await
                 .unwrap_or_else(|_| "Unknown error".to_string());
             bail!("Registration failed with status {}: {}", status, error_text);
+        }
+
+        // Log whether privacy was enabled
+        let response_json: serde_json::Value = response.json().await
+            .unwrap_or_else(|_| serde_json::json!({}));
+        if response_json.get("privacy_enabled").and_then(|v| v.as_bool()).unwrap_or(false) {
+            info!("Registered with coordinator (privacy payments enabled)");
+        } else {
+            info!("Registered with coordinator");
         }
 
         Ok(())
@@ -644,20 +885,26 @@ impl Worker {
     /// Send heartbeat to coordinator
     #[instrument(skip(self), fields(worker_id = %self.id_string))]
     pub async fn send_heartbeat(&self) -> Result<()> {
-        let url = format!("{}/api/workers/{}/heartbeat",
-            self.config.coordinator_url, self.id_string);
+        let url = format!("{}/api/workers/heartbeat",
+            self.config.coordinator_url);
 
         let current_load = self.calculate_current_load().await;
-        let active_job_ids: Vec<String> = self.active_jobs.read().await
-            .keys()
-            .map(|id| id.to_string())
+        let active_jobs_info: Vec<serde_json::Value> = self.active_jobs.read().await
+            .iter()
+            .map(|(id, job)| {
+                serde_json::json!({
+                    "job_id": id.to_string(),
+                    "job_type": job.job_type,
+                    "running_secs": job.started_at.elapsed().as_secs(),
+                })
+            })
             .collect();
 
         let payload = serde_json::json!({
             "worker_id": self.id_string,
             "current_load": current_load,
-            "active_jobs": active_job_ids.len(),
-            "active_job_ids": active_job_ids,
+            "active_jobs": active_jobs_info.len(),
+            "active_job_details": active_jobs_info,
             "timestamp": Utc::now().to_rfc3339(),
             "health": self.health_status.read().await.clone(),
         });
@@ -739,12 +986,13 @@ impl Worker {
         let coordinator_url = self.config.coordinator_url.clone();
         let http_client = self.http_client.clone();
         let worker_id = self.id_string.clone();
+        let pending_payment_claims = self.pending_payment_claims.clone();
+        let enable_privacy_payments = self.config.enable_privacy_payments;
 
         // Track active job
         {
             let mut jobs = futures::executor::block_on(active_jobs.write());
             jobs.insert(job_id, ActiveJob {
-                job_id,
                 started_at: Instant::now(),
                 job_type: job_type.clone(),
             });
@@ -775,6 +1023,43 @@ impl Worker {
                     {
                         let mut stats = stats.write().await;
                         stats.record_success(execution_time_ms, result.result_data.len() as u64);
+                    }
+
+                    // Queue job for payment claim if privacy payments enabled
+                    if enable_privacy_payments {
+                        if let Some(job_id_u128) = Self::parse_job_id_to_u128(&job_id_str) {
+                            // Extract payment asset from job metadata, default to SAGE
+                            let asset_id = job.get("payment_token")
+                                .and_then(|v| v.as_str())
+                                .map(|s| Self::parse_asset_id_from_string(s))
+                                .unwrap_or(AssetId::SAGE);
+
+                            // Extract payment amount from job metadata (default to 100 SAGE if not specified)
+                            let amount = job.get("payment_amount")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(100_000_000_000_000_000) as u128; // 0.1 SAGE default
+
+                            // Create payment claim with proof data
+                            let claim = PendingPaymentClaim {
+                                job_id: job_id_u128,
+                                asset_id,
+                                amount,
+                                compressed_proof: result.compressed_proof.clone(),
+                                proof_hash: result.proof_hash,
+                                proof_attestation: result.proof_attestation,
+                                proof_commitment: result.proof_commitment,
+                                queued_at: std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap()
+                                    .as_secs(),
+                            };
+
+                            pending_payment_claims.write().await.push_back(claim);
+                            info!("💰 Queued job {} for payment claim (asset: {}, with_proof: {})",
+                                  job_id_u128,
+                                  asset_id.name(),
+                                  result.proof_hash.is_some());
+                        }
                     }
 
                     // Report completion
@@ -917,22 +1202,30 @@ impl Worker {
                     break;
                 }
 
-                // Calculate current load
-                let current_jobs = active_jobs.read().await.len() as f32;
+                // Calculate current load and gather job details
+                let jobs_guard = active_jobs.read().await;
+                let current_jobs = jobs_guard.len() as f32;
                 let current_load = current_jobs / max_concurrent as f32;
 
-                let active_job_ids: Vec<String> = active_jobs.read().await
-                    .keys()
-                    .map(|id| id.to_string())
+                let active_jobs_info: Vec<serde_json::Value> = jobs_guard
+                    .iter()
+                    .map(|(id, job)| {
+                        serde_json::json!({
+                            "job_id": id.to_string(),
+                            "job_type": job.job_type,
+                            "running_secs": job.started_at.elapsed().as_secs(),
+                        })
+                    })
                     .collect();
+                drop(jobs_guard);
 
-                let url = format!("{}/api/workers/{}/heartbeat", coordinator_url, worker_id);
+                let url = format!("{}/api/workers/heartbeat", coordinator_url);
 
                 let payload = serde_json::json!({
                     "worker_id": worker_id,
                     "current_load": current_load,
-                    "active_jobs": active_job_ids.len(),
-                    "active_job_ids": active_job_ids,
+                    "active_jobs": active_jobs_info.len(),
+                    "active_job_details": active_jobs_info,
                     "timestamp": Utc::now().to_rfc3339(),
                     "health": health_status.read().await.clone(),
                 });
@@ -1033,6 +1326,204 @@ impl Worker {
         if let Err(e) = self.event_sender.send(event) {
             debug!("Failed to send event: {}", e);
         }
+    }
+
+    // ========================================================================
+    // Privacy Payment Methods
+    // ========================================================================
+
+    /// Parse job ID string to u128 for payment system
+    ///
+    /// Attempts to parse as UUID and convert to u128, or as direct u128.
+    fn parse_job_id_to_u128(job_id_str: &str) -> Option<u128> {
+        // Try parsing as UUID first
+        if let Ok(uuid) = job_id_str.parse::<uuid::Uuid>() {
+            return Some(uuid.as_u128());
+        }
+
+        // Try parsing as hex
+        if job_id_str.starts_with("0x") {
+            if let Ok(val) = u128::from_str_radix(&job_id_str[2..], 16) {
+                return Some(val);
+            }
+        }
+
+        // Try parsing as decimal
+        job_id_str.parse::<u128>().ok()
+    }
+
+    /// Parse asset ID from string (from job metadata)
+    ///
+    /// Accepts various formats:
+    /// - Token names: "SAGE", "sage", "USDC", "STRK", "BTC"
+    /// - Numeric IDs: "0", "1", "2", "3"
+    fn parse_asset_id_from_string(s: &str) -> AssetId {
+        match s.to_uppercase().as_str() {
+            "SAGE" | "0" => AssetId::SAGE,
+            "USDC" | "1" => AssetId::USDC,
+            "STRK" | "2" => AssetId::STRK,
+            "BTC" | "WBTC" | "3" => AssetId::BTC,
+            "ETH" | "4" => AssetId::ETH,
+            _ => {
+                warn!("Unknown payment token '{}', defaulting to SAGE", s);
+                AssetId::SAGE
+            }
+        }
+    }
+
+    /// Run the payment claim loop in the background
+    ///
+    /// This loop periodically checks for pending payments and claims them.
+    /// Supports multi-asset payments where each payment is identified by (job_id, asset_id).
+    async fn run_payment_claim_loop(
+        privacy_manager: Arc<WorkerPrivacyManager>,
+        pending_claims: Arc<RwLock<VecDeque<PendingPaymentClaim>>>,
+        claimed: Arc<RwLock<HashMap<u128, HashSet<AssetId>>>>,
+        mut shutdown_rx: watch::Receiver<bool>,
+        claim_interval_secs: u64,
+        batch_size: usize,
+    ) {
+        let mut interval = tokio::time::interval(Duration::from_secs(claim_interval_secs));
+
+        loop {
+            tokio::select! {
+                _ = interval.tick() => {
+                    Self::process_pending_claims(
+                        &privacy_manager,
+                        &pending_claims,
+                        &claimed,
+                        batch_size,
+                    ).await;
+                }
+                _ = shutdown_rx.changed() => {
+                    if *shutdown_rx.borrow() {
+                        info!("💰 Payment claim loop shutting down");
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Process pending payment claims with proof verification
+    ///
+    /// Claims payments using proof-gated submission. Each claim includes
+    /// the compressed proof which is verified on-chain before payment release.
+    /// Falls back to non-proof claims if proof data is missing (for backwards compatibility).
+    async fn process_pending_claims(
+        manager: &WorkerPrivacyManager,
+        pending: &RwLock<VecDeque<PendingPaymentClaim>>,
+        claimed: &RwLock<HashMap<u128, HashSet<AssetId>>>,
+        batch_size: usize,
+    ) {
+        // Collect batch of pending claims
+        let batch: Vec<PendingPaymentClaim> = {
+            let mut pending_guard = pending.write().await;
+            let mut batch = Vec::with_capacity(batch_size);
+
+            while batch.len() < batch_size {
+                if let Some(claim) = pending_guard.pop_front() {
+                    // Skip if already claimed for this asset
+                    let already_claimed = claimed.read().await
+                        .get(&claim.job_id)
+                        .map(|assets| assets.contains(&claim.asset_id))
+                        .unwrap_or(false);
+
+                    if !already_claimed {
+                        batch.push(claim);
+                    }
+                } else {
+                    break;
+                }
+            }
+            batch
+        };
+
+        if batch.is_empty() {
+            return;
+        }
+
+        info!("💰 Processing {} pending payment claims (with proofs)", batch.len());
+
+        // Process claims individually with proof verification
+        // Note: Batch claiming with proofs requires aggregated proof, not yet implemented
+        for claim in batch {
+            // Try proof-gated claim if proof data is available
+            let result = if let Some(ref compressed_proof) = claim.compressed_proof {
+                info!("🔐 Claiming payment for job {} with proof verification", claim.job_id);
+                manager.claim_payment_with_proof(
+                    claim.job_id,
+                    claim.asset_id,
+                    claim.amount,
+                    compressed_proof
+                ).await
+            } else {
+                // Fall back to regular claim if no proof (backwards compatibility)
+                warn!("⚠️ No proof data for job {}, using legacy claim", claim.job_id);
+                manager.claim_payment_for_asset(claim.job_id, claim.asset_id).await
+            };
+
+            match result {
+                Ok(tx_hash) => {
+                    info!("✅ Claimed {} payment for job {}: tx={:?} (proof_verified: {})",
+                          claim.asset_id.name(),
+                          claim.job_id,
+                          tx_hash,
+                          claim.compressed_proof.is_some());
+                    claimed.write().await
+                        .entry(claim.job_id)
+                        .or_insert_with(HashSet::new)
+                        .insert(claim.asset_id);
+                }
+                Err(e) => {
+                    let error_msg = e.to_string();
+                    if error_msg.contains("already claimed") || error_msg.contains("Payment already claimed") {
+                        debug!("Payment for job {} ({}) already claimed", claim.job_id, claim.asset_id.name());
+                        claimed.write().await
+                            .entry(claim.job_id)
+                            .or_insert_with(HashSet::new)
+                            .insert(claim.asset_id);
+                    } else if error_msg.contains("not found") || error_msg.contains("no payment") {
+                        warn!("No {} payment found for job {} (may not be ready yet)",
+                              claim.asset_id.name(), claim.job_id);
+                        // Re-queue for retry
+                        pending.write().await.push_back(claim.clone());
+                    } else if error_msg.contains("Proof verification failed") || error_msg.contains("Invalid proof") {
+                        warn!("❌ Proof verification failed for job {}: {}",
+                              claim.job_id, e);
+                        // Do not re-queue - proof is invalid
+                    } else {
+                        warn!("Failed to claim {} payment for job {}: {}",
+                              claim.asset_id.name(), claim.job_id, e);
+                        // Re-queue for retry
+                        pending.write().await.push_back(claim.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    /// Get count of pending payment claims
+    pub async fn pending_payment_count(&self) -> usize {
+        self.pending_payment_claims.read().await.len()
+    }
+
+    /// Get count of claimed payments (total across all jobs and assets)
+    pub async fn claimed_payment_count(&self) -> usize {
+        self.claimed_payments.read().await
+            .values()
+            .map(|assets| assets.len())
+            .sum()
+    }
+
+    /// Check if privacy payments are enabled
+    pub fn is_privacy_payments_enabled(&self) -> bool {
+        self.config.enable_privacy_payments && self.key_manager.is_some()
+    }
+
+    /// Get worker's privacy public key (if enabled)
+    pub fn privacy_public_key(&self) -> Option<crate::obelysk::elgamal::ECPoint> {
+        self.key_manager.as_ref().map(|km| km.public_key())
     }
 }
 

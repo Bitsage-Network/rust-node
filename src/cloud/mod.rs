@@ -2,12 +2,23 @@
 //!
 //! This module provides a unified interface for provisioning and managing
 //! GPU compute resources across multiple cloud providers.
+//!
+//! ## Modules:
+//! - `providers` - Legacy provider abstraction (AWS, Azure, GCP, IBM)
+//! - `provider_integration` - New aggregated provider layer (Brev, Shadeform, Lambda, etc.)
+//! - `gpu_manager` - GPU lifecycle management
 
 pub mod providers;
 pub mod gpu_manager;
+pub mod provider_integration;
 
 pub use providers::{CloudProvider, ProviderType, GpuInstance, GpuSpec};
 pub use gpu_manager::CloudGpuManager;
+pub use provider_integration::{
+    CloudProvider as AggregatedProvider,
+    ProviderManager, ProviderConfig, CloudGpuInstance, ProvisionedInstance,
+    InstanceStatus, InstanceAvailability, GpuInterconnect, ShadeformClient,
+};
 
 use serde::{Deserialize, Serialize};
 

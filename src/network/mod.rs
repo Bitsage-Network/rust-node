@@ -121,8 +121,18 @@ impl NetworkCoordinator {
             health_reputation_system.clone(),
         ));
         
-        // Create gossip protocol
-        let node_id = NodeId::new(); // TODO: Get actual node ID
+        // Create gossip protocol with deterministic node ID from keypair
+        let node_id = if let Some(keypair) = &config.p2p.keypair {
+            // Derive node ID from keypair for consistency across restarts
+            use sha2::{Sha256, Digest};
+            let hash = Sha256::digest(keypair);
+            let uuid = uuid::Uuid::from_slice(&hash[..16])
+                .unwrap_or_else(|_| uuid::Uuid::new_v4());
+            NodeId::from(uuid)
+        } else {
+            // Generate a new random node ID if no keypair configured
+            NodeId::new()
+        };
         let gossip_protocol = Arc::new(GossipProtocol::new(
             config.gossip.clone(),
             p2p_client.clone(),
@@ -141,6 +151,16 @@ impl NetworkCoordinator {
             running: Arc::new(RwLock::new(false)),
             event_receiver: Arc::new(Mutex::new(Some(event_receiver))),
         })
+    }
+
+    /// Get the network configuration
+    pub fn config(&self) -> &NetworkConfig {
+        &self.config
+    }
+
+    /// Get the P2P network client for direct network operations
+    pub fn p2p_client(&self) -> &NetworkClient {
+        &self.p2p_client
     }
 
     /// Start all network components

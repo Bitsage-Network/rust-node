@@ -102,7 +102,7 @@ impl WorkerResult {
     }
 
     /// Calculate SHA256 hash of result data
-    fn calculate_hash(data: &[u8]) -> String {
+    pub(crate) fn calculate_hash(data: &[u8]) -> String {
         let mut hasher = Sha256::new();
         hasher.update(data);
         format!("{:x}", hasher.finalize())
@@ -244,10 +244,31 @@ impl ResultCollector {
         }
     }
 
+    /// Get the blockchain client for on-chain verification
+    pub fn blockchain_client(&self) -> &Arc<StarknetClient> {
+        &self.blockchain_client
+    }
+
+    /// Get the job manager contract for job state updates
+    pub fn job_manager(&self) -> &Arc<JobManagerContract> {
+        &self.job_manager
+    }
+
+    /// Get the P2P network client for result broadcasting
+    pub fn p2p_network(&self) -> &Arc<NetworkClient> {
+        &self.p2p_network
+    }
+
+    /// Take the event receiver for processing collection events
+    /// Can only be called once - subsequent calls return None
+    pub async fn take_event_receiver(&self) -> Option<mpsc::UnboundedReceiver<ResultCollectionEvent>> {
+        self.event_receiver.write().await.take()
+    }
+
     /// Start the result collection system
     pub async fn start(&self) -> Result<()> {
         info!("Starting P2P Result Collection System...");
-        
+
         {
             let mut running = self.running.write().await;
             if *running {
@@ -256,8 +277,110 @@ impl ResultCollector {
             *running = true;
         }
 
-        // TODO: Start background tasks when properly wrapped in Arc
-        // For now, these will be called manually from the main loop
+        // Start background timeout checker task
+        let running_clone = self.running.clone();
+        let active_collections = self.active_collections.clone();
+        let event_sender = self.event_sender.clone();
+        let collection_timeout = self.config.collection_timeout_secs;
+
+        tokio::spawn(async move {
+            loop {
+                {
+                    let running = running_clone.read().await;
+                    if !*running {
+                        break;
+                    }
+                }
+
+                // Check for timed out collections
+                let now = Instant::now();
+                let mut timed_out_jobs = Vec::new();
+
+                {
+                    let collections = active_collections.read().await;
+                    for (job_id, collection) in collections.iter() {
+                        if collection.state == CollectionState::Collecting
+                            && now > collection.timeout_deadline
+                        {
+                            timed_out_jobs.push(job_id.clone());
+                        }
+                    }
+                }
+
+                // Mark timed out collections
+                for job_id in timed_out_jobs {
+                    {
+                        let mut collections = active_collections.write().await;
+                        if let Some(collection) = collections.get_mut(&job_id) {
+                            if collection.state == CollectionState::Collecting {
+                                warn!("Collection timeout for job: {}", job_id);
+                                collection.state = CollectionState::Timeout;
+                                collection.completed_at = Some(Instant::now());
+                            }
+                        }
+                    }
+
+                    if let Err(e) = event_sender.send(ResultCollectionEvent::CollectionTimeout(job_id.clone())) {
+                        error!("Failed to send timeout event for job {}: {}", job_id, e);
+                    }
+                }
+
+                sleep(Duration::from_secs(collection_timeout / 10)).await;
+            }
+            debug!("Timeout checker task stopped");
+        });
+
+        // Start background cleanup task
+        let running_cleanup = self.running.clone();
+        let active_collections_cleanup = self.active_collections.clone();
+        let completed_results_cleanup = self.completed_results.clone();
+        let cleanup_max_age = self.config.blockchain_confirmation_timeout_secs * 2;
+
+        tokio::spawn(async move {
+            loop {
+                {
+                    let running = running_cleanup.read().await;
+                    if !*running {
+                        break;
+                    }
+                }
+
+                // Clean up old completed collections from active map
+                let cutoff = Instant::now() - Duration::from_secs(cleanup_max_age);
+                {
+                    let mut collections = active_collections_cleanup.write().await;
+                    let before_count = collections.len();
+                    collections.retain(|_, collection| {
+                        match collection.completed_at {
+                            Some(completed_at) => completed_at > cutoff,
+                            None => true, // Keep active collections
+                        }
+                    });
+                    let removed = before_count - collections.len();
+                    if removed > 0 {
+                        debug!("Cleaned up {} old collections", removed);
+                    }
+                }
+
+                // Limit size of completed results cache
+                {
+                    let mut completed = completed_results_cleanup.write().await;
+                    const MAX_COMPLETED_CACHE: usize = 1000;
+                    if completed.len() > MAX_COMPLETED_CACHE {
+                        // Keep only the most recent entries
+                        let mut entries: Vec<_> = completed.drain().collect();
+                        entries.sort_by(|a, b| b.1.created_at.cmp(&a.1.created_at));
+                        entries.truncate(MAX_COMPLETED_CACHE);
+                        *completed = entries.into_iter().collect();
+                        debug!("Trimmed completed results cache to {} entries", MAX_COMPLETED_CACHE);
+                    }
+                }
+
+                // Run cleanup every 5 minutes
+                sleep(Duration::from_secs(300)).await;
+            }
+            debug!("Cleanup task stopped");
+        });
 
         info!("Result collection system started successfully");
         Ok(())

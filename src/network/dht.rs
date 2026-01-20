@@ -31,7 +31,7 @@ use sha3::{Digest, Sha3_256};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{mpsc, RwLock, Mutex};
+use tokio::sync::{mpsc, RwLock};
 use tracing::{info, debug};
 
 use crate::types::{JobId, WorkerId};
@@ -333,6 +333,36 @@ pub struct DhtJobEntry {
     pub status: DhtJobStatus,
 }
 
+impl DhtJobEntry {
+    /// Create a new job entry with default expiration
+    pub fn new(
+        job_id: JobId,
+        data: Vec<u8>,
+        publisher: NodeId,
+        required_capabilities: u64,
+        max_reward: u128,
+    ) -> Self {
+        let now = chrono::Utc::now().timestamp() as u64;
+        Self {
+            job_id,
+            data,
+            publisher,
+            created_at: now,
+            expires_at: now + JOB_EXPIRY_SECS,
+            required_capabilities,
+            max_reward,
+            assigned_worker: None,
+            status: DhtJobStatus::Available,
+        }
+    }
+
+    /// Check if job has expired
+    pub fn is_expired(&self) -> bool {
+        let now = chrono::Utc::now().timestamp() as u64;
+        now > self.expires_at
+    }
+}
+
 /// Job status in DHT
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum DhtJobStatus {
@@ -485,14 +515,14 @@ pub struct DhtNode {
     job_store: Arc<RwLock<HashMap<JobId, DhtJobEntry>>>,
     /// Worker capability index (capabilities_hash -> peers)
     worker_index: Arc<RwLock<HashMap<u64, HashSet<NodeId>>>>,
-    /// Pending RPC requests
-    pending_requests: Arc<Mutex<HashMap<u64, tokio::sync::oneshot::Sender<DhtMessage>>>>,
     /// Message sender for outgoing messages
     message_tx: mpsc::UnboundedSender<(String, DhtMessage)>,
     /// Statistics
     stats: Arc<RwLock<DhtStats>>,
     /// Running flag
     running: Arc<RwLock<bool>>,
+    // Note: Request-response tracking for RPCs can be added when needed
+    // using oneshot channels keyed by request_id
 }
 
 impl DhtNode {
@@ -509,7 +539,6 @@ impl DhtNode {
             routing_table: Arc::new(RwLock::new(routing_table)),
             job_store: Arc::new(RwLock::new(HashMap::new())),
             worker_index: Arc::new(RwLock::new(HashMap::new())),
-            pending_requests: Arc::new(Mutex::new(HashMap::new())),
             message_tx,
             stats: Arc::new(RwLock::new(DhtStats::default())),
             running: Arc::new(RwLock::new(false)),
@@ -1066,7 +1095,7 @@ mod tests {
             data: vec![1, 2, 3],
             publisher: node.node_id(),
             created_at: chrono::Utc::now().timestamp() as u64,
-            expires_at: chrono::Utc::now().timestamp() as u64 + 3600,
+            expires_at: chrono::Utc::now().timestamp() as u64 + JOB_EXPIRY_SECS,
             required_capabilities: 0xFF,
             max_reward: 1000,
             assigned_worker: None,

@@ -9,7 +9,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
-use tracing::{info, warn};
+use tokio::time::{sleep, Duration};
+use tracing::{info, warn, debug};
 
 use crate::types::WorkerId;
 use crate::blockchain::types::WorkerCapabilities;
@@ -210,7 +211,7 @@ impl HealthReputationSystem {
 
     pub async fn start(&self) -> Result<()> {
         info!("Starting Health Reputation System...");
-        
+
         {
             let mut running = self.running.write().await;
             if *running {
@@ -219,8 +220,94 @@ impl HealthReputationSystem {
             *running = true;
         }
 
-        // Start background tasks
-        // TODO: Implement background monitoring tasks
+        // Start reputation decay background task
+        let running_decay = self.running.clone();
+        let reputations = self.worker_reputations.clone();
+        let decay_config = self.config.decay_config.clone();
+        let update_interval = self.config.reputation_update_interval_secs;
+
+        tokio::spawn(async move {
+            loop {
+                {
+                    let running = running_decay.read().await;
+                    if !*running {
+                        break;
+                    }
+                }
+
+                // Apply reputation decay to inactive workers
+                let now = chrono::Utc::now().timestamp() as u64;
+                let inactivity_threshold_secs = decay_config.inactivity_threshold_hours * 3600;
+
+                {
+                    let mut reps = reputations.write().await;
+                    for (worker_id, reputation) in reps.iter_mut() {
+                        // Use last_seen timestamp for inactivity check
+                        let last_active = reputation.last_seen.timestamp() as u64;
+                        let inactive_secs = now.saturating_sub(last_active);
+
+                        // Skip if within grace period or recently active
+                        if inactive_secs < inactivity_threshold_secs {
+                            continue;
+                        }
+
+                        // Calculate decay
+                        let inactive_days = inactive_secs as f64 / 86400.0;
+                        let decay = if decay_config.use_exponential_decay {
+                            1.0 - (1.0 - decay_config.daily_decay_rate).powf(inactive_days)
+                        } else {
+                            decay_config.daily_decay_rate * inactive_days
+                        };
+
+                        let new_score = (reputation.reputation_score * (1.0 - decay)).max(decay_config.decay_floor);
+                        if new_score < reputation.reputation_score {
+                            debug!("Applying reputation decay to worker {}: {:.3} -> {:.3}",
+                                worker_id, reputation.reputation_score, new_score);
+                            reputation.reputation_score = new_score;
+                        }
+                    }
+                }
+
+                sleep(Duration::from_secs(update_interval)).await;
+            }
+            debug!("Reputation decay task stopped");
+        });
+
+        // Start stale health cleanup task
+        let running_cleanup = self.running.clone();
+        let health_status = self.worker_health_status.clone();
+        let health_check_interval = self.config.health_check_interval_secs;
+
+        tokio::spawn(async move {
+            loop {
+                {
+                    let running = running_cleanup.read().await;
+                    if !*running {
+                        break;
+                    }
+                }
+
+                // Remove health status for workers that haven't reported in 5x the check interval
+                let stale_threshold = health_check_interval * 5;
+
+                {
+                    let mut status = health_status.write().await;
+                    // Ensure the map doesn't grow unbounded
+                    const MAX_TRACKED_WORKERS: usize = 10000;
+                    if status.len() > MAX_TRACKED_WORKERS {
+                        let excess = status.len() - MAX_TRACKED_WORKERS;
+                        let keys_to_remove: Vec<_> = status.keys().take(excess).cloned().collect();
+                        for key in keys_to_remove {
+                            status.remove(&key);
+                        }
+                        debug!("Cleaned up {} stale health entries", excess);
+                    }
+                }
+
+                sleep(Duration::from_secs(stale_threshold)).await;
+            }
+            debug!("Health cleanup task stopped");
+        });
 
         info!("Health reputation system started successfully");
         Ok(())

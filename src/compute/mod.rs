@@ -16,11 +16,13 @@ pub mod data_executor;
 pub mod model_executor;
 pub mod job_executor;
 pub mod obelysk_executor;
+pub mod job_estimation;
 
 pub use executor::ComputeExecutor;
 pub use job_executor::{JobExecutor, JobExecutionRequest, JobExecutionResult};
 pub use obelysk_executor::{
-    ObelyskExecutor, ObelyskExecutorConfig, ObelyskJobResult, 
+    ObelyskExecutor, ObelyskExecutorConfig, ObelyskJobResult,
     ObelyskJobStatus, ExecutionMetrics, TeeAttestation,
     BatchObelyskExecutor,
 };
+pub use job_estimation::{JobEstimator, JobEstimate, PricingConfig};

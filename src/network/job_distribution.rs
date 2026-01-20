@@ -38,25 +38,57 @@ use crate::network::encrypted_jobs::{
 use crate::types::{JobId, WorkerId};
 
 /// GPU types available in the marketplace
+///
+/// Organized by NVIDIA architecture generations:
+/// - Blackwell (B-series): B200, B100 - Latest generation, 192GB HBM3e
+/// - Hopper (H-series): H200, H100 - High-performance LLM training/inference
+/// - Lovelace (L-series): L40S, L40, L4 - Energy-efficient inference
+/// - Ampere (A-series): A100, A40, A10 - Established data center workhorses
+/// - Turing (T-series): T4 - Entry-level inference
+/// - Consumer GPUs: RTX 4090/4080/3090 - Sometimes used for smaller workloads
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum GpuType {
-    /// NVIDIA H100 - 80GB HBM3
+    // === Blackwell Architecture (2024+) ===
+    /// NVIDIA B200 - 192GB HBM3e, Frontier-scale AI, multi-trillion parameter models
+    B200,
+    /// NVIDIA B100 - 192GB HBM3e, Next-gen AI training, inference, HPC
+    B100,
+
+    // === Hopper Architecture (2022-2024) ===
+    /// NVIDIA H200 - 141GB HBM3e, Ultra-large models, long-context inference
+    H200,
+    /// NVIDIA H100 - 80GB HBM3, Advanced LLM training & inference, FP8
     H100,
-    /// NVIDIA A100 - 40GB/80GB HBM2e
-    A100,
-    /// NVIDIA RTX 4090 - 24GB GDDR6X
-    Rtx4090,
-    /// NVIDIA RTX 4080 - 16GB GDDR6X
-    Rtx4080,
-    /// NVIDIA RTX 3090 - 24GB GDDR6X
-    Rtx3090,
-    /// NVIDIA A10 - 24GB GDDR6
-    A10,
-    /// NVIDIA L40 - 48GB GDDR6
+
+    // === Lovelace Architecture (2022-2023) ===
+    /// NVIDIA L40S - 48GB GDDR6, Improved L40 for inference
+    L40S,
+    /// NVIDIA L40 - 48GB GDDR6, Mid-range data center inference
     L40,
-    /// NVIDIA L4 - 24GB GDDR6
+    /// NVIDIA L4 - 24GB GDDR6, Energy-efficient inference
     L4,
-    /// Other/Unknown GPU
+
+    // === Ampere Architecture (2020-2022) ===
+    /// NVIDIA A100 - 40GB/80GB HBM2e, High-performance LLM training & inference
+    A100,
+    /// NVIDIA A40 - 48GB GDDR6, Data center visualization and inference
+    A40,
+    /// NVIDIA A10 - 24GB GDDR6, Mid-range inference, AI training
+    A10,
+
+    // === Turing Architecture (2018-2020) ===
+    /// NVIDIA T4 - 16GB GDDR6, Entry-level inference
+    T4,
+
+    // === Consumer GPUs (not recommended for production) ===
+    /// NVIDIA RTX 4090 - 24GB GDDR6X (Consumer/Gaming)
+    Rtx4090,
+    /// NVIDIA RTX 4080 - 16GB GDDR6X (Consumer/Gaming)
+    Rtx4080,
+    /// NVIDIA RTX 3090 - 24GB GDDR6X (Consumer/Gaming)
+    Rtx3090,
+
+    /// Other/Unknown GPU with custom identifier
     Other(u32),
 }
 
@@ -64,14 +96,26 @@ impl GpuType {
     /// Get the typical VRAM in GB for this GPU type
     pub fn vram_gb(&self) -> u32 {
         match self {
+            // Blackwell
+            GpuType::B200 => 192,
+            GpuType::B100 => 192,
+            // Hopper
+            GpuType::H200 => 141,
             GpuType::H100 => 80,
-            GpuType::A100 => 80,
+            // Lovelace
+            GpuType::L40S => 48,
+            GpuType::L40 => 48,
+            GpuType::L4 => 24,
+            // Ampere
+            GpuType::A100 => 80, // Can be 40GB or 80GB, assume 80GB
+            GpuType::A40 => 48,
+            GpuType::A10 => 24,
+            // Turing
+            GpuType::T4 => 16,
+            // Consumer
             GpuType::Rtx4090 => 24,
             GpuType::Rtx4080 => 16,
             GpuType::Rtx3090 => 24,
-            GpuType::A10 => 24,
-            GpuType::L40 => 48,
-            GpuType::L4 => 24,
             GpuType::Other(_) => 0,
         }
     }
@@ -79,16 +123,47 @@ impl GpuType {
     /// Get display name for the GPU
     pub fn display_name(&self) -> &str {
         match self {
+            // Blackwell
+            GpuType::B200 => "NVIDIA B200",
+            GpuType::B100 => "NVIDIA B100",
+            // Hopper
+            GpuType::H200 => "NVIDIA H200",
             GpuType::H100 => "NVIDIA H100",
+            // Lovelace
+            GpuType::L40S => "NVIDIA L40S",
+            GpuType::L40 => "NVIDIA L40",
+            GpuType::L4 => "NVIDIA L4",
+            // Ampere
             GpuType::A100 => "NVIDIA A100",
+            GpuType::A40 => "NVIDIA A40",
+            GpuType::A10 => "NVIDIA A10",
+            // Turing
+            GpuType::T4 => "NVIDIA T4",
+            // Consumer
             GpuType::Rtx4090 => "NVIDIA RTX 4090",
             GpuType::Rtx4080 => "NVIDIA RTX 4080",
             GpuType::Rtx3090 => "NVIDIA RTX 3090",
-            GpuType::A10 => "NVIDIA A10",
-            GpuType::L40 => "NVIDIA L40",
-            GpuType::L4 => "NVIDIA L4",
             GpuType::Other(_) => "Other GPU",
         }
+    }
+
+    /// Get the GPU architecture generation
+    pub fn architecture(&self) -> &str {
+        match self {
+            GpuType::B200 | GpuType::B100 => "Blackwell",
+            GpuType::H200 | GpuType::H100 => "Hopper",
+            GpuType::L40S | GpuType::L40 | GpuType::L4 => "Lovelace",
+            GpuType::A100 | GpuType::A40 | GpuType::A10 => "Ampere",
+            GpuType::T4 => "Turing",
+            GpuType::Rtx4090 | GpuType::Rtx4080 => "Ada Lovelace",
+            GpuType::Rtx3090 => "Ampere",
+            GpuType::Other(_) => "Unknown",
+        }
+    }
+
+    /// Check if this is a data center GPU (recommended for production)
+    pub fn is_datacenter(&self) -> bool {
+        !matches!(self, GpuType::Rtx4090 | GpuType::Rtx4080 | GpuType::Rtx3090 | GpuType::Other(_))
     }
 }
 
@@ -278,15 +353,15 @@ pub struct GpuPoolStats {
     pub available_by_type: HashMap<String, usize>,
 }
 
-/// GPU allocation request
+/// GPU allocation request - direct selection, what you pay is what you get
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GpuAllocationRequest {
+    /// Job ID this allocation is for
     pub job_id: JobId,
-    pub required_gpu_type: Option<GpuType>,
-    pub min_vram_gb: Option<u32>,
-    pub min_gpu_count: Option<u32>,
-    pub max_hourly_rate: Option<u128>,
-    pub preferred_worker_id: Option<WorkerId>,
+    /// Exact GPU type requested (required)
+    pub gpu_type: GpuType,
+    /// Specific worker ID if user wants a particular provider
+    pub worker_id: Option<WorkerId>,
 }
 
 /// Blockchain polling statistics
@@ -790,14 +865,48 @@ impl JobDistributor {
             jobs.insert(announcement.job_id.clone(), job);
         }
 
-        // Try to allocate a GPU immediately
+        // Extract GPU type from job requirements - direct selection required
+        // GPU model encodings organized by architecture:
+        // Blackwell: 1-2, Hopper: 3-4, Lovelace: 5-7, Ampere: 8-10, Turing: 11, Consumer: 12-14
+        let gpu_type = if announcement.required_capabilities.gpu_model != starknet::core::types::FieldElement::ZERO {
+            let model_val: u64 = announcement.required_capabilities.gpu_model.try_into().unwrap_or(0);
+            match model_val {
+                // Blackwell (newest, highest performance)
+                1 => Some(GpuType::B200),
+                2 => Some(GpuType::B100),
+                // Hopper
+                3 => Some(GpuType::H200),
+                4 => Some(GpuType::H100),
+                // Lovelace
+                5 => Some(GpuType::L40S),
+                6 => Some(GpuType::L40),
+                7 => Some(GpuType::L4),
+                // Ampere
+                8 => Some(GpuType::A100),
+                9 => Some(GpuType::A40),
+                10 => Some(GpuType::A10),
+                // Turing
+                11 => Some(GpuType::T4),
+                // Consumer (not recommended for production)
+                12 => Some(GpuType::Rtx4090),
+                13 => Some(GpuType::Rtx4080),
+                14 => Some(GpuType::Rtx3090),
+                // Unknown model
+                other => Some(GpuType::Other(other as u32)),
+            }
+        } else {
+            // No GPU type specified - cannot allocate
+            warn!("Job {} has no GPU type specified, cannot allocate", announcement.job_id);
+            return Ok(());
+        };
+
+        let gpu_type = gpu_type.unwrap();
+
+        // Try to allocate a GPU - direct selection, what you pay is what you get
         let allocation_request = GpuAllocationRequest {
             job_id: announcement.job_id.clone(),
-            required_gpu_type: None, // TODO: Extract from job spec
-            min_vram_gb: Some((announcement.required_capabilities.gpu_memory / (1024 * 1024 * 1024)) as u32),
-            min_gpu_count: None,
-            max_hourly_rate: Some(announcement.max_reward),
-            preferred_worker_id: None,
+            gpu_type,
+            worker_id: None, // No specific worker preference from blockchain announcement
         };
 
         match self.allocate_gpu(allocation_request).await {
@@ -853,84 +962,52 @@ impl JobDistributor {
         Ok(())
     }
 
-    /// Allocate an available GPU for a job
+    /// Allocate an available GPU for a job - direct selection only
+    ///
+    /// User selects exact GPU type, optionally a specific worker.
+    /// No routing, no scoring - what you pay is what you get.
     ///
     /// Returns (gpu_id, worker_id) if allocation successful, None if no GPU available
     pub async fn allocate_gpu(&self, request: GpuAllocationRequest) -> Result<Option<(String, WorkerId)>> {
         let mut pool = self.gpu_pool.write().await;
 
-        // Find eligible GPUs
-        let mut candidates: Vec<_> = pool.values()
-            .filter(|gpu| {
+        // Find matching GPU - exact type match required
+        let matching_gpu = pool.values()
+            .find(|gpu| {
                 // Must be available
                 if gpu.status != GpuStatus::Available {
                     return false;
                 }
 
-                // Check reputation
-                if gpu.reputation_score < self.config.min_worker_reputation {
+                // Must match exact GPU type
+                if gpu.gpu_type != request.gpu_type {
                     return false;
                 }
 
-                // Check health
-                if gpu.health_score < self.config.min_worker_health {
-                    return false;
-                }
-
-                // Check VRAM requirement
-                if let Some(min_vram) = request.min_vram_gb {
-                    if gpu.vram_gb < min_vram {
-                        return false;
-                    }
-                }
-
-                // Check GPU type requirement
-                if let Some(required_type) = &request.required_gpu_type {
-                    if &gpu.gpu_type != required_type {
-                        return false;
-                    }
-                }
-
-                // Check hourly rate
-                if let Some(max_rate) = request.max_hourly_rate {
-                    if gpu.hourly_rate > max_rate {
-                        return false;
-                    }
-                }
-
-                // Check preferred worker
-                if let Some(ref preferred) = request.preferred_worker_id {
-                    if &gpu.worker_id != preferred {
+                // If specific worker requested, must match
+                if let Some(ref worker_id) = request.worker_id {
+                    if &gpu.worker_id != worker_id {
                         return false;
                     }
                 }
 
                 true
-            })
-            .collect();
+            });
 
-        if candidates.is_empty() {
+        let Some(gpu) = matching_gpu else {
             return Ok(None);
-        }
+        };
 
-        // Sort by score: reputation (40%) + health (30%) + lower rate (30%)
-        candidates.sort_by(|a, b| {
-            let score_a = a.reputation_score * 0.4 + a.health_score * 0.3
-                + (1.0 / (a.hourly_rate as f64 + 1.0).ln().max(0.1)) * 0.3;
-            let score_b = b.reputation_score * 0.4 + b.health_score * 0.3
-                + (1.0 / (b.hourly_rate as f64 + 1.0).ln().max(0.1)) * 0.3;
-            score_b.partial_cmp(&score_a).unwrap_or(std::cmp::Ordering::Equal)
-        });
-
-        // Allocate the best candidate
-        let best = candidates[0];
-        let gpu_id = best.gpu_id.clone();
-        let worker_id = best.worker_id.clone();
+        let gpu_id = gpu.gpu_id.clone();
+        let worker_id = gpu.worker_id.clone();
 
         // Mark as in use
         if let Some(gpu) = pool.get_mut(&gpu_id) {
             gpu.status = GpuStatus::InUse;
         }
+
+        info!("GPU {} ({}) allocated to job {} via worker {}",
+            gpu_id, request.gpu_type.display_name(), request.job_id, worker_id);
 
         // Emit allocation event
         let _ = self.event_sender.send(JobDistributionEvent::GpuAllocated {

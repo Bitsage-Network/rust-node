@@ -91,6 +91,14 @@ pub struct ContractAddresses {
     pub linear_vesting: FieldElement,
     pub milestone_vesting: FieldElement,
     pub burn_manager: FieldElement,
+    // DEV2: Trading, Governance & Privacy contracts
+    pub otc_orderbook: FieldElement,
+    pub privacy_router: FieldElement,
+    pub privacy_pools: FieldElement,
+    pub prover_staking: FieldElement,
+    pub worker_staking: FieldElement,
+    pub proof_gated_payment: FieldElement,
+    pub optimistic_tee: FieldElement,
 }
 
 /// Main blockchain event indexer
@@ -448,6 +456,14 @@ impl EventIndexer {
             self.contracts.linear_vesting,
             self.contracts.milestone_vesting,
             self.contracts.burn_manager,
+            // DEV2: Trading, Governance & Privacy contracts
+            self.contracts.otc_orderbook,
+            self.contracts.privacy_router,
+            self.contracts.privacy_pools,
+            self.contracts.prover_staking,
+            self.contracts.worker_staking,
+            self.contracts.proof_gated_payment,
+            self.contracts.optimistic_tee,
         ] {
             match fetch_for_address(self, addr, block_number, block_timestamp).await {
                 Ok(n) if n > 0 => {
@@ -524,6 +540,14 @@ impl EventIndexer {
             self.contracts.linear_vesting,
             self.contracts.milestone_vesting,
             self.contracts.burn_manager,
+            // DEV2: Trading, Governance & Privacy contracts
+            self.contracts.otc_orderbook,
+            self.contracts.privacy_router,
+            self.contracts.privacy_pools,
+            self.contracts.prover_staking,
+            self.contracts.worker_staking,
+            self.contracts.proof_gated_payment,
+            self.contracts.optimistic_tee,
         ] {
             match fetch_for_address_range(self, addr, from_block, to_block).await {
                 Ok(n) => total += n,
@@ -593,8 +617,8 @@ impl EventIndexer {
 
         debug!("🔍 Processing transaction: 0x{:x}", tx_hash);
 
-        // Get transaction receipt to access events
-        let receipt = match self.client.provider().get_transaction_receipt(tx_hash).await {
+        // Get transaction receipt to access events (with retries for reliability)
+        let receipt = match self.get_tx_receipt_retry(tx_hash).await {
             Ok(receipt) => receipt,
             Err(e) => {
                 debug!("❌ Could not get receipt for tx 0x{:x}: {}", tx_hash, e);
@@ -677,7 +701,15 @@ impl EventIndexer {
         *address == self.contracts.simple_events ||
         *address == self.contracts.linear_vesting ||
         *address == self.contracts.milestone_vesting ||
-        *address == self.contracts.burn_manager
+        *address == self.contracts.burn_manager ||
+        // DEV2: Trading, Governance & Privacy contracts
+        *address == self.contracts.otc_orderbook ||
+        *address == self.contracts.privacy_router ||
+        *address == self.contracts.privacy_pools ||
+        *address == self.contracts.prover_staking ||
+        *address == self.contracts.worker_staking ||
+        *address == self.contracts.proof_gated_payment ||
+        *address == self.contracts.optimistic_tee
     }
 
     /// Process and store a single event
@@ -742,38 +774,131 @@ impl EventIndexer {
             "milestone_vesting"
         } else if event.from_address == self.contracts.burn_manager {
             "burn_manager"
+        // DEV2: Trading, Governance & Privacy contracts
+        } else if event.from_address == self.contracts.otc_orderbook {
+            "otc_orderbook"
+        } else if event.from_address == self.contracts.privacy_router {
+            "privacy_router"
+        } else if event.from_address == self.contracts.privacy_pools {
+            "privacy_pools"
+        } else if event.from_address == self.contracts.prover_staking {
+            "prover_staking"
+        } else if event.from_address == self.contracts.worker_staking {
+            "worker_staking"
+        } else if event.from_address == self.contracts.proof_gated_payment {
+            "proof_gated_payment"
+        } else if event.from_address == self.contracts.optimistic_tee {
+            "optimistic_tee"
         } else {
             "unknown"
         };
 
-        // For SimpleEvents and ReputationManager, apply explicit labels
-        let event_type = if contract_type == "simple_events" && !event.keys.is_empty() {
-            "TestEvent"
-        } else if contract_type == "reputation_manager" && !event.keys.is_empty() {
-            // Label RM events for visibility; we can refine by key later if needed
-            "AdminAdjusted"
-        } else if contract_type == "sage_token" {
-            // Common ERC20 events
-            if !event.keys.is_empty() {
-                match format!("0x{:x}", event.keys[0]).as_str() {
-                    "0x99cd8bde557814842a3121e8ddfd433a539b8c9f14bf31ebf108d12e6196e9" => "Transfer",
-                    "0x134692b230b9e1ffa39098904722134159652b09c5bc41d88d6698779d228ff" => "Approval",
-                    _ => "TokenEvent"
-                }
-            } else {
-                "TokenEvent"
-            }
-        } else if contract_type == "linear_vesting" {
-            if !event.keys.is_empty() { "VestingEvent" } else { "VestingEvent" }
-        } else if contract_type == "milestone_vesting" {
-            if !event.keys.is_empty() { "MilestoneEvent" } else { "MilestoneEvent" }
-        } else if contract_type == "burn_manager" {
-            if !event.keys.is_empty() { "BurnEvent" } else { "BurnEvent" }
-        } else {
-            "GenericEvent"
-        };
+        // Classify event type based on contract and event key signature
+        let event_type = self.classify_event_type(event, contract_type);
 
         (event_type.to_string(), contract_type.to_string())
+    }
+
+    /// Classify specific event type based on event key selector
+    /// Note: Event classification uses data length heuristics as a fallback when
+    /// event key selectors are not recognized. In production, we should compute
+    /// actual starknet_keccak selectors for each Cairo event.
+    fn classify_event_type(&self, event: &Event, contract_type: &str) -> &'static str {
+        if event.keys.is_empty() {
+            return "GenericEvent";
+        }
+
+        let key_hex = format!("0x{:x}", event.keys[0]);
+        let data_len = event.data.len();
+
+        match contract_type {
+            // Original contracts
+            "simple_events" => "TestEvent",
+            "reputation_manager" => "AdminAdjusted",
+            "sage_token" => match key_hex.as_str() {
+                "0x99cd8bde557814842a3121e8ddfd433a539b8c9f14bf31ebf108d12e6196e9" => "Transfer",
+                "0x134692b230b9e1ffa39098904722134159652b09c5bc41d88d6698779d228ff" => "Approval",
+                _ => "TokenEvent"
+            },
+            "linear_vesting" => "VestingEvent",
+            "milestone_vesting" => "MilestoneEvent",
+            "burn_manager" => "BurnEvent",
+
+            // DEV2: OTC Orderbook events
+            // Uses data length heuristics - exact selectors should be added when available
+            "otc_orderbook" => {
+                if data_len >= 9 { "TradeExecuted" }
+                else if data_len >= 6 { "OrderPlaced" }
+                else if data_len >= 3 { "OrderCancelled" }
+                else if data_len == 2 { "PairAdded" }
+                else { "OrderbookEvent" }
+            },
+
+            // DEV2: Governance Treasury events
+            "governance_treasury" => {
+                if data_len >= 8 { "ProposalCreated" }
+                else if data_len >= 5 { "DelegateChanged" }
+                else if data_len >= 3 { "VoteCast" }
+                else if data_len == 2 { "ProposalExecuted" }
+                else if data_len == 1 { "ProposalCancelled" }
+                else { "GovernanceEvent" }
+            },
+
+            // DEV2: Privacy Router events (Obelysk)
+            "privacy_router" => {
+                if data_len >= 7 { "PrivateTransferExecuted" }
+                else if data_len == 6 { "PrivateWithdraw" }
+                else if data_len == 5 { "PrivateDeposit" }
+                else if data_len == 4 { "AccountRegistered" }
+                else if data_len == 3 { "WorkerPaymentReceived" }
+                else { "PrivacyEvent" }
+            },
+
+            // DEV2: Privacy Pools events
+            "privacy_pools" => {
+                if data_len >= 5 { "AssociationSetAdded" }
+                else if data_len == 4 { "PoolWithdraw" }
+                else if data_len == 3 { "PoolDeposit" }
+                else if data_len == 2 { "MerkleRootUpdated" }
+                else { "PoolEvent" }
+            },
+
+            // DEV2: Prover Staking events
+            "prover_staking" => {
+                if data_len >= 4 { "RewardClaimed" }
+                else if data_len == 3 { "ProverStaked" }  // or Unstaked - requires key check
+                else if data_len == 2 { "ProverSlashed" }
+                else { "StakingEvent" }
+            },
+
+            // DEV2: Worker Staking events
+            "worker_staking" => {
+                if data_len >= 4 { "RewardDistributed" }
+                else if data_len == 3 { "WorkerStaked" }  // or Unstaked - requires key check
+                else if data_len == 2 { "WorkerSlashed" }
+                else { "WorkerStakingEvent" }
+            },
+
+            // DEV2: Proof Gated Payment events
+            "proof_gated_payment" => {
+                if data_len >= 6 { "PaymentReleased" }
+                else if data_len == 5 { "PaymentInitiated" }
+                else if data_len == 4 { "ProofSubmitted" }
+                else if data_len == 3 { "PaymentRefunded" }
+                else { "PaymentEvent" }
+            },
+
+            // DEV2: Optimistic TEE events
+            "optimistic_tee" => {
+                if data_len >= 5 { "ChallengeResolved" }
+                else if data_len == 4 { "AttestationSubmitted" }
+                else if data_len == 3 { "ChallengeInitiated" }
+                else if data_len == 2 { "TEERegistered" }
+                else { "TEEEvent" }
+            },
+
+            _ => "GenericEvent"
+        }
     }
 
     /// Get indexer statistics
