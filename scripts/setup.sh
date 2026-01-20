@@ -1,6 +1,7 @@
 #!/bin/bash
-# BitSage Worker Setup Script for NVIDIA Brev
-# This script automatically sets up a BitSage worker on Brev cloud instances
+# BitSage Worker Setup Script
+# Works with any NVIDIA GPU on any cloud provider or bare metal
+# Supports: AWS, GCP, Azure, Lambda Labs, Shadeform, CoreWeave, etc.
 
 set -e
 

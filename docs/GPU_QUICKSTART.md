@@ -20,7 +20,7 @@ Get your GPU earning SAGE tokens in under 5 minutes.
 
 ```bash
 # Interactive wizard - handles everything automatically
-curl -sSL https://raw.githubusercontent.com/Ciro-AI-Labs/bitsage-network/main/rust-node/scripts/install.sh | bash
+curl -sSL https://raw.githubusercontent.com/Bitsage-Network/rust-node/main/rust-node/scripts/install.sh | bash
 ```
 
 The wizard will:
@@ -38,7 +38,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 source ~/.cargo/env
 
 # Clone and build
-git clone https://github.com/Ciro-AI-Labs/bitsage-network
+git clone https://github.com/Bitsage-Network/rust-node
 cd bitsage-network/rust-node
 cargo build --release --features cuda
 
@@ -188,7 +188,7 @@ RUST_LOG=debug sage-worker start
 
 - **Discord**: https://discord.gg/bitsage
 - **Docs**: [Full Validator Guide](./VALIDATOR_DEPLOYMENT.md)
-- **GitHub**: https://github.com/Ciro-AI-Labs/bitsage-network/issues
+- **GitHub**: https://github.com/Bitsage-Network/rust-node/issues
 
 ---
 

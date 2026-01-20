@@ -95,7 +95,7 @@ usermod -aG docker bitsage
 
 # Clone repository
 cd /home/bitsage
-git clone https://github.com/Ciro-AI-Labs/bitsage-network || (cd bitsage-network && git pull)
+git clone https://github.com/Bitsage-Network/rust-node || (cd bitsage-network && git pull)
 cd bitsage-network/rust-node
 
 # Build coordinator

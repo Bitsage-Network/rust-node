@@ -1,9 +1,13 @@
 #!/bin/bash
 # =============================================================================
-# BitSage GPU Worker - One-Click Deployment for NVIDIA Brev
+# BitSage GPU Worker - One-Click Deployment
 # =============================================================================
-# Usage: curl -sSL https://raw.githubusercontent.com/bitsage-network/rust-node/main/scripts/brev_deploy.sh | bash
-# Or: ./brev_deploy.sh
+# Works with any NVIDIA GPU (H100, A100, L40, 4090, etc.)
+# Supports any cloud provider: AWS, GCP, Azure, Lambda Labs, Shadeform, etc.
+#
+# Usage:
+#   curl -sSL https://raw.githubusercontent.com/Bitsage-Network/rust-node/main/scripts/deploy.sh | bash
+#   Or: ./scripts/deploy.sh
 # =============================================================================
 
 set -e

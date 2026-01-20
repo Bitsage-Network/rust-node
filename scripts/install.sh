@@ -31,8 +31,8 @@ BOLD='\033[1m'
 VERSION="1.0.0"
 INSTALL_DIR="$HOME/.bitsage"
 BIN_DIR="$INSTALL_DIR/bin"
-REPO_URL="https://github.com/Ciro-AI-Labs/bitsage-network"
-RELEASE_URL="https://github.com/Ciro-AI-Labs/bitsage-network/releases/latest/download"
+REPO_URL="https://github.com/Bitsage-Network/rust-node"
+RELEASE_URL="https://github.com/Bitsage-Network/rust-node/releases/latest/download"
 
 # Coordinator URLs
 MAINNET_COORDINATOR="https://coordinator.bitsage.network"
@@ -434,7 +434,7 @@ print_summary() {
     echo -e "  ${CYAN}Need help?${NC}"
     echo -e "    Documentation: https://docs.bitsage.network"
     echo -e "    Discord:       https://discord.gg/bitsage"
-    echo -e "    GitHub:        https://github.com/Ciro-AI-Labs/bitsage-network"
+    echo -e "    GitHub:        https://github.com/Bitsage-Network/rust-node"
     echo ""
 }
 

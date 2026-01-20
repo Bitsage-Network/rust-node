@@ -9,7 +9,7 @@ High-performance Rust node for the BitSage Network, featuring **Obelysk Protocol
 **Run a single command to install and start earning SAGE tokens:**
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/Ciro-AI-Labs/bitsage-network/main/rust-node/scripts/install.sh | bash
+curl -sSL https://raw.githubusercontent.com/Bitsage-Network/rust-node/main/rust-node/scripts/install.sh | bash
 ```
 
 This interactive wizard will:
@@ -39,7 +39,7 @@ This interactive wizard will:
 
 ```bash
 # Clone the repository
-git clone https://github.com/Ciro-AI-Labs/bitsage-network
+git clone https://github.com/Bitsage-Network/rust-node
 cd bitsage-network/rust-node
 
 # Build the worker

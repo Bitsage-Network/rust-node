@@ -9,7 +9,7 @@ Complete guide for deploying a GPU validator (worker) on the BitSage Network.
 **The fastest way to get started:**
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/Ciro-AI-Labs/bitsage-network/main/rust-node/scripts/install.sh | bash
+curl -sSL https://raw.githubusercontent.com/Bitsage-Network/rust-node/main/rust-node/scripts/install.sh | bash
 ```
 
 This wizard handles everything automatically. For manual installation or more control, continue reading.
@@ -218,7 +218,7 @@ This script:
 
 ```bash
 # Clone repository
-git clone https://github.com/Ciro-AI-Labs/bitsage-network
+git clone https://github.com/Bitsage-Network/rust-node
 cd bitsage-network/rust-node
 
 # Build with GPU support
@@ -758,7 +758,7 @@ Yes! Supported providers:
 - **Discord**: https://discord.gg/bitsage
 - **Twitter**: [@bitsagenetwork](https://twitter.com/bitsagenetwork)
 - **Email**: support@bitsage.network
-- **GitHub Issues**: https://github.com/Ciro-AI-Labs/bitsage-network/issues
+- **GitHub Issues**: https://github.com/Bitsage-Network/rust-node/issues
 
 ---
 
