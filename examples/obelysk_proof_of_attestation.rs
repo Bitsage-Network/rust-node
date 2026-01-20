@@ -8,7 +8,7 @@
 // 4. Verify proof
 
 use bitsage_node::obelysk::{
-    TEEType, TEEQuote, MockTEEGenerator, EnclaveWhitelist,
+    TEEType, MockTEEGenerator, EnclaveWhitelist,
     ProofOfAttestation,
 };
 

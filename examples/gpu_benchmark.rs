@@ -11,7 +11,7 @@
 //   - FFT 1M elements: ~50x speedup
 //   - Full proof (large): ~30-50x speedup
 
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use anyhow::Result;
 
 // Import Obelysk components

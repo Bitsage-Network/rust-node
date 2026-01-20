@@ -1,7 +1,7 @@
 // Obelysk ETL Verification Example
 // Demonstrates verifiable SQL execution with DataFusion + OVM
 
-use bitsage_node::obelysk::{ObelyskVM, ETLBridge, M31};
+use bitsage_node::obelysk::{ObelyskVM, ETLBridge};
 use datafusion::arrow::array::Int32Array;
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::arrow::record_batch::RecordBatch;

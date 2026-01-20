@@ -10,9 +10,7 @@
 //   cargo run --example gpu_m31_test --features cuda --release
 
 use anyhow::Result;
-use bitsage_node::obelysk::field::M31;
-use bitsage_node::obelysk::gpu::{GpuBackend, GpuBackendType};
-use std::time::Instant;
+use bitsage_node::obelysk::gpu::GpuBackendType;
 
 fn main() -> Result<()> {
     println!("╔══════════════════════════════════════════════════════════════════════╗");

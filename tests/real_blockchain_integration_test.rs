@@ -5,11 +5,11 @@ mod real_blockchain_tests {
         contracts::JobManagerContract,
         types::*,
     };
-    use bitsage_node::node::coordinator::{JobRequest, JobType as CoordinatorJobType};
-    use bitsage_node::types::{JobId, WorkerId};
+    
+    
     use starknet::core::types::FieldElement;
     use std::sync::Arc;
-    use tokio::time::{sleep, Duration};
+    
 
     // REAL DEPLOYED CONTRACT ADDRESS ON STARKNET SEPOLIA
     const REAL_JOB_MANAGER_ADDRESS: &str = "0x00bf025663b8a7c7e43393f082b10afe66bd9ddb06fb5e521e3adbcf693094bd";

@@ -4,7 +4,7 @@
 // Shows how TEE quotes are created and validated
 
 use bitsage_node::obelysk::{
-    TEEType, TEEQuote, MockTEEGenerator, EnclaveWhitelist,
+    TEEType, MockTEEGenerator, EnclaveWhitelist,
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
