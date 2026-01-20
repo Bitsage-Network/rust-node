@@ -2,10 +2,27 @@
 //!
 //! Token bucket rate limiting for job and proof submissions to prevent abuse
 //! and ensure fair resource distribution across the BitSage network.
+//!
+//! Features:
+//! - Per-client rate limiting for jobs
+//! - Per-worker rate limiting for proofs
+//! - Per-IP API rate limiting
+//! - Axum middleware for automatic enforcement
+//! - Dashboard-specific endpoint limits
 
 use anyhow::{anyhow, Result};
+use axum::{
+    body::Body,
+    extract::ConnectInfo,
+    http::{Request, StatusCode},
+    middleware::Next,
+    response::{IntoResponse, Response},
+    Json,
+};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
+use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{debug, warn};
 
@@ -438,6 +455,206 @@ pub struct RateLimiterStats {
     pub active_proof_buckets: usize,
     pub active_faucet_buckets: usize,
     pub active_api_buckets: usize,
+}
+
+// ============================================================================
+// Dashboard-Specific Rate Limits
+// ============================================================================
+
+/// Dashboard endpoint rate limits (requests per minute)
+pub struct DashboardRateLimits {
+    /// Per-endpoint custom limits
+    endpoint_limits: DashMap<String, u32>,
+    /// Per-IP+endpoint buckets
+    buckets: DashMap<String, DashboardBucket>,
+    /// Whether rate limiting is enabled
+    enabled: bool,
+}
+
+#[derive(Debug, Clone)]
+struct DashboardBucket {
+    tokens: f64,
+    max_tokens: f64,
+    refill_rate: f64,
+    last_refill: Instant,
+}
+
+impl DashboardBucket {
+    fn new(rpm: u32) -> Self {
+        Self {
+            tokens: rpm as f64,
+            max_tokens: (rpm as f64 * 1.5), // 1.5x burst
+            refill_rate: rpm as f64 / 60.0,
+            last_refill: Instant::now(),
+        }
+    }
+
+    fn try_consume(&mut self) -> bool {
+        let now = Instant::now();
+        let elapsed = now.duration_since(self.last_refill).as_secs_f64();
+        self.tokens = (self.tokens + elapsed * self.refill_rate).min(self.max_tokens);
+        self.last_refill = now;
+
+        if self.tokens >= 1.0 {
+            self.tokens -= 1.0;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn remaining(&self) -> u32 {
+        self.tokens.floor() as u32
+    }
+}
+
+impl DashboardRateLimits {
+    /// Create dashboard rate limits with default configuration
+    pub fn new(enabled: bool) -> Self {
+        let endpoint_limits = DashMap::new();
+
+        // Dashboard endpoints - higher limits for real-time data
+        endpoint_limits.insert("/api/validator/status".into(), 200);
+        endpoint_limits.insert("/api/validator/gpus".into(), 120);
+        endpoint_limits.insert("/api/validator/rewards".into(), 60);
+        endpoint_limits.insert("/api/validator/history".into(), 30);
+        endpoint_limits.insert("/api/network/stats".into(), 120);
+        endpoint_limits.insert("/api/network/workers".into(), 60);
+        endpoint_limits.insert("/api/jobs/analytics".into(), 60);
+        endpoint_limits.insert("/api/jobs/recent".into(), 120);
+        endpoint_limits.insert("/api/contracts".into(), 300);
+
+        // Worker endpoints - frequent heartbeats allowed
+        endpoint_limits.insert("/api/worker/heartbeat".into(), 120);
+        endpoint_limits.insert("/api/worker/uptime".into(), 60);
+        endpoint_limits.insert("/api/worker/gpu-metrics".into(), 30);
+        endpoint_limits.insert("/api/worker/status".into(), 120);
+
+        // Database-backed endpoints
+        endpoint_limits.insert("/api/db/jobs".into(), 60);
+        endpoint_limits.insert("/api/db/proofs".into(), 60);
+        endpoint_limits.insert("/api/db/staking".into(), 60);
+        endpoint_limits.insert("/api/db/earnings".into(), 60);
+
+        // Trading/Governance - moderate limits
+        endpoint_limits.insert("/api/trading/orderbook".into(), 120);
+        endpoint_limits.insert("/api/trading/orders".into(), 30);
+        endpoint_limits.insert("/api/governance/proposals".into(), 30);
+
+        // WebSocket - limit connection rate
+        endpoint_limits.insert("/ws".into(), 10);
+
+        Self {
+            endpoint_limits,
+            buckets: DashMap::new(),
+            enabled,
+        }
+    }
+
+    /// Check rate limit for a request
+    pub fn check(&self, ip: &str, path: &str) -> DashboardRateLimitResult {
+        if !self.enabled {
+            return DashboardRateLimitResult::Allowed { remaining: 999 };
+        }
+
+        // Get limit for this endpoint (default 60 rpm)
+        let rpm = self.endpoint_limits.get(path).map(|v| *v).unwrap_or(60);
+
+        // Create bucket key
+        let key = format!("{}:{}", ip, path);
+        let mut bucket = self.buckets.entry(key).or_insert_with(|| DashboardBucket::new(rpm));
+
+        if bucket.try_consume() {
+            DashboardRateLimitResult::Allowed {
+                remaining: bucket.remaining(),
+            }
+        } else {
+            DashboardRateLimitResult::Limited {
+                retry_after_secs: 60,
+                limit: rpm,
+            }
+        }
+    }
+
+    /// Cleanup old buckets
+    pub fn cleanup(&self) {
+        let cutoff = Instant::now() - Duration::from_secs(300);
+        self.buckets.retain(|_, bucket| bucket.last_refill > cutoff);
+    }
+
+    /// Set custom limit for an endpoint
+    pub fn set_limit(&self, path: &str, rpm: u32) {
+        self.endpoint_limits.insert(path.to_string(), rpm);
+    }
+}
+
+/// Dashboard rate limit check result
+#[derive(Debug, Clone)]
+pub enum DashboardRateLimitResult {
+    Allowed { remaining: u32 },
+    Limited { retry_after_secs: u64, limit: u32 },
+}
+
+/// Rate limit error response for API
+#[derive(Debug, Serialize)]
+pub struct RateLimitResponse {
+    pub error: String,
+    pub retry_after_secs: u64,
+    pub limit: u32,
+}
+
+/// Axum middleware for dashboard rate limiting
+pub async fn dashboard_rate_limit_middleware(
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    request: Request<Body>,
+    next: Next,
+) -> Response {
+    // Get rate limiter from extensions
+    let rate_limiter = match request.extensions().get::<Arc<DashboardRateLimits>>() {
+        Some(limiter) => limiter.clone(),
+        None => return next.run(request).await,
+    };
+
+    let ip = addr.ip().to_string();
+    let path = request.uri().path().to_string();
+
+    match rate_limiter.check(&ip, &path) {
+        DashboardRateLimitResult::Allowed { remaining } => {
+            let mut response = next.run(request).await;
+
+            // Add rate limit headers
+            if let Ok(val) = remaining.to_string().parse() {
+                response.headers_mut().insert("X-RateLimit-Remaining", val);
+            }
+
+            response
+        }
+        DashboardRateLimitResult::Limited { retry_after_secs, limit } => {
+            warn!(ip = %ip, path = %path, "Dashboard rate limit exceeded");
+
+            let error_response = RateLimitResponse {
+                error: "Rate limit exceeded".to_string(),
+                retry_after_secs,
+                limit,
+            };
+
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                [("Retry-After", retry_after_secs.to_string())],
+                Json(error_response),
+            ).into_response()
+        }
+    }
+}
+
+/// Background cleanup task for dashboard rate limiter
+pub async fn dashboard_rate_limit_cleanup_task(limiter: Arc<DashboardRateLimits>) {
+    let mut interval = tokio::time::interval(Duration::from_secs(60));
+    loop {
+        interval.tick().await;
+        limiter.cleanup();
+        debug!("Dashboard rate limiter cleanup completed");
+    }
 }
 
 #[cfg(test)]

@@ -3,7 +3,7 @@
 //! Comprehensive worker management system for the Bitsage Network coordinator,
 //! handling worker registration, health monitoring, and capability management.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -17,9 +17,46 @@ use crate::storage::Database;
 use crate::network::NetworkCoordinator;
 use crate::coordinator::config::WorkerManagerConfig;
 use crate::obelysk::starknet::{
-    StakingClient, StakingClientConfig, GpuTier,
+    StakingClient, StakingClientConfig, GpuTier, StakeStatus, WorkerTier,
     ReputationClient, ReputationClientConfig,
 };
+use crate::obelysk::elgamal::{ECPoint, Felt252, verify_schnorr_proof, hash_felts};
+use crate::obelysk::worker_keys::RegistrationSignature;
+
+// ============================================================================
+// Worker Registration with Privacy Key
+// ============================================================================
+
+/// Request to register a worker with optional privacy public key
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkerRegistrationRequest {
+    /// Core worker information
+    pub worker_info: WorkerInfo,
+
+    /// Optional ElGamal public key for encrypted payments
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub privacy_public_key: Option<ECPoint>,
+
+    /// Signature proving ownership of the privacy key
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub privacy_key_signature: Option<RegistrationSignature>,
+}
+
+/// Verify that a registration signature proves ownership of the public key
+fn verify_registration_signature(
+    public_key: &ECPoint,
+    signature: &RegistrationSignature,
+) -> bool {
+    // Reconstruct the message that was signed
+    let message = hash_felts(&[
+        public_key.x,
+        public_key.y,
+        Felt252::from_u64(signature.timestamp),
+    ]);
+
+    // Verify the Schnorr proof
+    verify_schnorr_proof(public_key, &signature.proof, &[message])
+}
 
 /// Worker manager events
 #[derive(Debug, Clone)]
@@ -306,6 +343,48 @@ impl WorkerManager {
         Ok(worker_id)
     }
 
+    /// Register a worker with privacy key verification
+    ///
+    /// This method accepts a `WorkerRegistrationRequest` which includes:
+    /// - Core worker information
+    /// - Optional ElGamal public key for encrypted payments
+    /// - Signature proving ownership of the privacy key
+    ///
+    /// If a privacy key and signature are provided, the signature is verified
+    /// before the worker is registered.
+    pub async fn register_worker_with_privacy(
+        &self,
+        request: WorkerRegistrationRequest,
+    ) -> Result<WorkerId> {
+        let mut worker_info = request.worker_info;
+
+        // Verify and attach privacy public key if provided
+        if let Some(ref public_key) = request.privacy_public_key {
+            if let Some(ref signature) = request.privacy_key_signature {
+                // Verify the signature proves ownership of the key
+                if !verify_registration_signature(public_key, signature) {
+                    anyhow::bail!("Invalid privacy key signature - worker does not own this key");
+                }
+
+                // Check timestamp is recent (within 5 minutes)
+                let now = chrono::Utc::now().timestamp() as u64;
+                if signature.timestamp > now || now - signature.timestamp > 300 {
+                    anyhow::bail!("Privacy key signature timestamp is stale or in the future");
+                }
+
+                // Attach the verified public key to worker info
+                worker_info.privacy_public_key = Some(public_key.clone());
+                info!("Worker {} registered with privacy public key", worker_info.node_id);
+            } else {
+                // Public key provided without signature - reject
+                anyhow::bail!("Privacy public key provided without ownership signature");
+            }
+        }
+
+        // Delegate to standard registration
+        self.register_worker(worker_info).await
+    }
+
     /// Unregister a worker
     pub async fn unregister_worker(&self, worker_id: WorkerId) -> Result<()> {
         info!("Unregistering worker {}", worker_id);
@@ -354,6 +433,89 @@ impl WorkerManager {
             Ok(Some(worker_details.health))
         } else {
             Ok(None)
+        }
+    }
+
+    /// Get worker stake status from blockchain
+    ///
+    /// Queries the staking contract to get the worker's current stake status.
+    /// Returns StakeStatus::None if the worker has no stake or if the query fails.
+    pub async fn get_worker_stake_status(&self, wallet_address: &str) -> Result<StakeStatus> {
+        self.staking_client.get_stake_status(wallet_address).await
+    }
+
+    /// Verify worker meets minimum stake requirements for a job
+    ///
+    /// Used for high-value jobs that require a minimum stake level.
+    /// Returns Ok(true) if worker meets requirements, Ok(false) if not.
+    pub async fn verify_worker_stake_for_job(
+        &self,
+        worker_id: WorkerId,
+        min_gpu_tier: GpuTier,
+        min_stake_amount: Option<u128>,
+    ) -> Result<bool> {
+        // Get worker details
+        let workers = self.active_workers.read().await;
+        let worker = workers.get(&worker_id)
+            .ok_or_else(|| anyhow::anyhow!("Worker {} not found", worker_id))?;
+
+        // Get wallet address
+        let wallet = worker.info.wallet_address.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Worker {} has no wallet address", worker_id))?;
+
+        // Fetch stake status
+        let stake_status = self.staking_client.get_stake_status(wallet).await
+            .unwrap_or(StakeStatus::None);
+
+        match stake_status {
+            StakeStatus::Staked { gpu_tier, amount } => {
+                // Check GPU tier meets minimum
+                let tier_ok = match (&gpu_tier, &min_gpu_tier) {
+                    (GpuTier::Frontier, _) => true,
+                    (GpuTier::Enterprise, GpuTier::Enterprise | GpuTier::DataCenter | GpuTier::Workstation | GpuTier::Consumer) => true,
+                    (GpuTier::DataCenter, GpuTier::DataCenter | GpuTier::Workstation | GpuTier::Consumer) => true,
+                    (GpuTier::Workstation, GpuTier::Workstation | GpuTier::Consumer) => true,
+                    (GpuTier::Consumer, GpuTier::Consumer) => true,
+                    _ => false,
+                };
+
+                // Check stake amount meets minimum
+                let amount_ok = min_stake_amount.map_or(true, |min| amount >= min);
+
+                if !tier_ok {
+                    info!(
+                        worker_id = %worker_id,
+                        worker_tier = ?gpu_tier,
+                        required_tier = ?min_gpu_tier,
+                        "Worker GPU tier does not meet job requirements"
+                    );
+                }
+
+                if !amount_ok {
+                    info!(
+                        worker_id = %worker_id,
+                        stake_amount = amount,
+                        required_amount = ?min_stake_amount,
+                        "Worker stake amount does not meet job requirements"
+                    );
+                }
+
+                Ok(tier_ok && amount_ok)
+            }
+            StakeStatus::Unstaking { .. } => {
+                info!(
+                    worker_id = %worker_id,
+                    "Worker is unstaking, not eligible for stake-required jobs"
+                );
+                Ok(false)
+            }
+            StakeStatus::None => {
+                info!(
+                    worker_id = %worker_id,
+                    "Worker has no stake, not eligible for stake-required jobs"
+                );
+                Ok(false)
+            }
         }
     }
 
@@ -489,11 +651,12 @@ impl WorkerManager {
         })
     }
 
-    /// Calculate worker selection score using on-chain reputation
+    /// Calculate worker selection score using on-chain reputation and stake
     async fn calculate_worker_score(&self, worker: &WorkerDetails) -> f64 {
-        // Get on-chain reputation if worker has wallet address
-        let on_chain_reputation = if let Some(ref wallet) = worker.info.wallet_address {
-            match self.reputation_client.get_reputation(wallet).await {
+        // Get on-chain reputation and stake status if worker has wallet address
+        let (on_chain_reputation, stake_status) = if let Some(ref wallet) = worker.info.wallet_address {
+            // Fetch reputation
+            let rep = match self.reputation_client.get_reputation(wallet).await {
                 Ok(rep) => {
                     // Check if worker is eligible based on reputation
                     if !rep.is_eligible() {
@@ -515,9 +678,32 @@ impl WorkerManager {
                     );
                     None
                 }
-            }
+            };
+
+            // Fetch stake status for worker selection weighting
+            let stake = match self.staking_client.get_stake_status(wallet).await {
+                Ok(status) => {
+                    debug!(
+                        worker_id = %worker.id,
+                        wallet = %wallet,
+                        stake_status = ?status,
+                        "Fetched worker stake status"
+                    );
+                    status
+                }
+                Err(e) => {
+                    debug!(
+                        worker_id = %worker.id,
+                        error = %e,
+                        "Failed to fetch stake status, assuming no stake"
+                    );
+                    StakeStatus::None
+                }
+            };
+
+            (rep, stake)
         } else {
-            None
+            (None, StakeStatus::None)
         };
 
         // Calculate base reputation score
@@ -543,16 +729,42 @@ impl WorkerManager {
         // Experience factor: slight bonus for workers with more completed jobs
         let experience_bonus = ((worker.total_jobs_completed as f64).ln() + 1.0) / 10.0;
 
-        // Calculate final score
-        let score = reputation_score * (0.5 + load_factor * 0.4 + experience_bonus * 0.1);
+        // Stake bonus: workers with active stake get priority
+        // Higher tier = higher bonus (incentivizes staking)
+        let stake_bonus = match &stake_status {
+            StakeStatus::Staked { gpu_tier, amount: _ } => {
+                // Tier-based bonus: Consumer=0.1, Workstation=0.15, DataCenter=0.2, Enterprise=0.25, Frontier=0.3
+                match gpu_tier {
+                    GpuTier::Consumer => 0.10,
+                    GpuTier::Workstation => 0.15,
+                    GpuTier::DataCenter => 0.20,
+                    GpuTier::Enterprise => 0.25,
+                    GpuTier::Frontier => 0.30,
+                }
+            }
+            StakeStatus::Unstaking { .. } => {
+                // Unstaking workers get reduced bonus (still have stake locked)
+                0.05
+            }
+            StakeStatus::None => {
+                // No stake = no bonus (but still eligible in work-first model)
+                0.0
+            }
+        };
+
+        // Calculate final score with stake bonus applied
+        let base_score = reputation_score * (0.5 + load_factor * 0.4 + experience_bonus * 0.1);
+        let score = base_score * (1.0 + stake_bonus);
 
         debug!(
             worker_id = %worker.id,
             reputation_score = reputation_score,
             load_factor = load_factor,
             experience_bonus = experience_bonus,
+            stake_bonus = stake_bonus,
+            stake_status = ?stake_status,
             final_score = score,
-            "Calculated worker score"
+            "Calculated worker score with stake verification"
         );
 
         score
@@ -772,7 +984,12 @@ impl WorkerManager {
         Ok(())
     }
 
-    /// Validate worker info including on-chain stake verification
+    /// Validate worker info - Work-First Model (no mandatory staking)
+    ///
+    /// Workers can join the network without staking. Trust is established through:
+    /// 1. STWO proof verification (cryptographic proof of correct computation)
+    /// 2. Reputation built from successful job completions
+    /// 3. Optional staking for premium benefits (priority jobs, validator voting)
     async fn validate_worker_info(&self, worker_info: &WorkerInfo) -> Result<()> {
         // Check if worker already exists
         let workers = self.active_workers.read().await;
@@ -781,37 +998,116 @@ impl WorkerManager {
         }
         drop(workers); // Release lock before async call
 
-        // Verify on-chain stake requirement
+        // Wallet address required for receiving payments (Starknet wallet: ArgentX, Braavos, etc.)
         let wallet_address = worker_info.wallet_address.as_ref()
             .ok_or_else(|| anyhow::anyhow!(
-                "Wallet address required for registration. Workers must stake SAGE tokens to participate."
+                "Wallet address required for registration. Provide your Starknet wallet address \
+                (ArgentX, Braavos, or MetaMask Snaps) to receive SAGE token payments."
             ))?;
+
+        // Validate wallet address format
+        if !wallet_address.starts_with("0x") || wallet_address.len() < 10 {
+            return Err(anyhow::anyhow!(
+                "Invalid Starknet wallet address format: {}",
+                wallet_address
+            ));
+        }
 
         // Determine GPU tier from worker capabilities
         let gpu_tier = GpuTier::from_gpu_model(&worker_info.capabilities.gpu_model);
 
-        // Check if worker has sufficient stake on-chain
-        let is_eligible = self.staking_client
-            .verify_stake(wallet_address, gpu_tier)
+        // Query on-chain staking status
+        let stake_status = self.staking_client
+            .get_stake_status(wallet_address)
             .await
-            .context("Failed to verify stake on-chain")?;
+            .unwrap_or_else(|e| {
+                warn!(
+                    wallet = %wallet_address,
+                    error = %e,
+                    "Could not query stake status from on-chain contract"
+                );
+                StakeStatus::None
+            });
 
-        if !is_eligible {
-            let min_stake = gpu_tier.min_stake_display();
-            return Err(anyhow::anyhow!(
-                "Insufficient stake for {} tier GPU ({}). Minimum stake required: {}. \
-                Please stake SAGE tokens at the staking contract before registering.",
-                gpu_tier,
-                worker_info.capabilities.gpu_model,
-                min_stake
-            ));
+        // MAINNET SECURITY: Enforce minimum stake if configured
+        if self.config.registration.require_stake {
+            let min_stake = gpu_tier.min_stake();
+            match &stake_status {
+                StakeStatus::Staked { amount, gpu_tier: staked_tier } => {
+                    // Verify stake amount meets GPU tier minimum
+                    if *amount < min_stake {
+                        return Err(anyhow::anyhow!(
+                            "Insufficient stake for {} GPU tier. Required: {} SAGE, Found: {} SAGE. \
+                             Please stake additional tokens at https://app.bitsage.network/stake",
+                            gpu_tier,
+                            min_stake / 1_000_000_000_000_000_000,
+                            amount / 1_000_000_000_000_000_000
+                        ));
+                    }
+                    // Verify staked tier matches declared GPU
+                    if *staked_tier != gpu_tier {
+                        warn!(
+                            wallet = %wallet_address,
+                            declared_tier = ?gpu_tier,
+                            staked_tier = ?staked_tier,
+                            "Worker GPU tier mismatch - using staked tier"
+                        );
+                    }
+                    info!(
+                        wallet = %wallet_address,
+                        stake_amount = amount / 1_000_000_000_000_000_000,
+                        gpu_tier = ?staked_tier,
+                        "Worker stake verified on-chain"
+                    );
+                }
+                StakeStatus::Unstaking { amount, available_at } => {
+                    return Err(anyhow::anyhow!(
+                        "Cannot register: stake is being unstaked ({} SAGE). \
+                         Wait until {} or re-stake at https://app.bitsage.network/stake",
+                        amount / 1_000_000_000_000_000_000,
+                        available_at
+                    ));
+                }
+                StakeStatus::None => {
+                    if self.config.registration.allow_probationary_workers {
+                        warn!(
+                            wallet = %wallet_address,
+                            gpu_tier = ?gpu_tier,
+                            min_stake = gpu_tier.min_stake_display(),
+                            "Worker registered in PROBATIONARY mode (no stake). \
+                             Reduced rewards until stake is deposited."
+                        );
+                    } else {
+                        return Err(anyhow::anyhow!(
+                            "Stake required for {} GPU tier. Minimum: {}. \
+                             Stake SAGE tokens at https://app.bitsage.network/stake",
+                            gpu_tier,
+                            gpu_tier.min_stake_display()
+                        ));
+                    }
+                }
+            }
         }
+
+        // Check existing reputation (new workers start at 0)
+        let reputation = self.reputation_client
+            .get_reputation(wallet_address)
+            .await
+            .map(|r| r.score)
+            .unwrap_or(0);
+
+        // Determine worker tier based on stake and reputation
+        let worker_tier = WorkerTier::from_stake_and_reputation(&stake_status, reputation);
 
         info!(
             wallet = %wallet_address,
-            gpu_tier = %gpu_tier,
+            gpu_tier = ?gpu_tier,
             gpu_model = %worker_info.capabilities.gpu_model,
-            "Worker stake verified successfully"
+            stake_status = ?stake_status,
+            reputation = reputation,
+            worker_tier = ?worker_tier,
+            require_stake = self.config.registration.require_stake,
+            "Worker validation complete"
         );
 
         // Validate capabilities if enabled
@@ -858,10 +1154,112 @@ impl WorkerManager {
         WorkerId::new()
     }
 
-    /// Extract worker tags
-    fn extract_worker_tags(&self, _worker_info: &WorkerInfo) -> Vec<String> {
-        // TODO: Implement tag extraction based on capabilities, location, etc.
-        vec!["worker".to_string()]
+    /// Extract worker tags based on capabilities, hardware, and features
+    fn extract_worker_tags(&self, worker_info: &WorkerInfo) -> Vec<String> {
+        let mut tags = vec!["worker".to_string()];
+        let caps = &worker_info.capabilities;
+
+        // GPU tier tags
+        if caps.gpu_count > 0 {
+            tags.push("gpu".to_string());
+            if caps.gpu_memory_gb >= 80 {
+                tags.push("gpu-tier-4".to_string()); // H100/A100-80GB class
+            } else if caps.gpu_memory_gb >= 40 {
+                tags.push("gpu-tier-3".to_string()); // A100-40GB class
+            } else if caps.gpu_memory_gb >= 16 {
+                tags.push("gpu-tier-2".to_string()); // RTX 4090/A6000 class
+            } else if caps.gpu_memory_gb >= 8 {
+                tags.push("gpu-tier-1".to_string()); // RTX 3080/4070 class
+            }
+
+            // Multi-GPU tag
+            if caps.gpu_count >= 4 {
+                tags.push("multi-gpu-4+".to_string());
+            } else if caps.gpu_count >= 2 {
+                tags.push("multi-gpu".to_string());
+            }
+        } else {
+            tags.push("cpu-only".to_string());
+        }
+
+        // TEE support tags
+        match caps.tee_type {
+            TeeType::CpuOnly => tags.push("tee-cpu".to_string()), // Intel TDX / AMD SEV
+            TeeType::Full => {
+                tags.push("tee-full".to_string()); // Full confidential computing
+                tags.push("tee-cpu".to_string());
+            }
+            TeeType::None => {}
+        }
+        if caps.gpu_tee_support {
+            tags.push("gpu-tee".to_string()); // NVIDIA CC support
+        }
+
+        // Precision support tags
+        if caps.supports_fp16 {
+            tags.push("fp16".to_string());
+        }
+        if caps.supports_int8 {
+            tags.push("int8".to_string());
+        }
+
+        // Framework tags
+        for framework in &caps.supported_frameworks {
+            let framework_lower = framework.to_lowercase();
+            if framework_lower.contains("pytorch") || framework_lower.contains("torch") {
+                tags.push("pytorch".to_string());
+            }
+            if framework_lower.contains("tensorflow") || framework_lower.contains("tf") {
+                tags.push("tensorflow".to_string());
+            }
+            if framework_lower.contains("onnx") {
+                tags.push("onnx".to_string());
+            }
+            if framework_lower.contains("triton") {
+                tags.push("triton".to_string());
+            }
+        }
+
+        // Job type capability tags
+        for job_type in &caps.supported_job_types {
+            let job_lower = job_type.to_lowercase();
+            if job_lower.contains("inference") {
+                tags.push("inference".to_string());
+            }
+            if job_lower.contains("training") {
+                tags.push("training".to_string());
+            }
+            if job_lower.contains("proof") || job_lower.contains("zk") {
+                tags.push("zk-prover".to_string());
+            }
+        }
+
+        // High-memory tag
+        if caps.ram_gb >= 128 {
+            tags.push("high-ram".to_string());
+        }
+
+        // High-storage tag
+        if caps.disk_gb >= 2000 {
+            tags.push("high-storage".to_string());
+        }
+
+        // Docker support
+        if caps.docker_enabled {
+            tags.push("docker".to_string());
+        }
+
+        // Reputation-based tags
+        if worker_info.reputation >= 0.95 {
+            tags.push("premium".to_string());
+        } else if worker_info.reputation >= 0.8 {
+            tags.push("trusted".to_string());
+        }
+
+        // Deduplicate tags
+        tags.sort();
+        tags.dedup();
+        tags
     }
 
     /// Calculate max load for worker based on capabilities
@@ -1124,13 +1522,23 @@ impl WorkerManager {
     pub async fn has_event_receiver(&self) -> bool {
         self.event_receiver.read().await.is_some()
     }
+
+    /// Get the database reference
+    pub fn database(&self) -> &Arc<Database> {
+        &self.database
+    }
+
+    /// Get the network coordinator reference
+    pub fn network_coordinator(&self) -> &Arc<NetworkCoordinator> {
+        &self.network_coordinator
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{WorkerId, NodeId, TeeType};
-    use crate::node::coordinator::WorkerInfo;
+    use crate::types::WorkerId;
+    
 
     #[tokio::test]
     async fn test_worker_manager_creation() {

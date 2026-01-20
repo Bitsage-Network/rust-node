@@ -243,15 +243,29 @@ pub struct WorkerManagerConfig {
 pub struct WorkerRegistrationConfig {
     /// Enable automatic worker registration
     pub enable_auto_registration: bool,
-    
+
     /// Require worker authentication
     pub require_authentication: bool,
-    
+
     /// Worker capability validation
     pub enable_capability_validation: bool,
-    
+
     /// Worker reputation threshold
     pub min_reputation_threshold: f64,
+
+    /// Require minimum stake for worker registration (mainnet security)
+    /// When enabled, workers must have staked SAGE tokens matching their GPU tier
+    #[serde(default)]
+    pub require_stake: bool,
+
+    /// Allow workers to register without stake in "probationary" mode
+    /// They can work but receive reduced rewards until they stake
+    #[serde(default = "default_allow_probationary")]
+    pub allow_probationary_workers: bool,
+}
+
+fn default_allow_probationary() -> bool {
+    true // Allow unstaked workers by default for accessibility
 }
 
 /// Worker monitoring configuration
@@ -582,11 +596,20 @@ impl Default for WorkerManagerConfig {
 
 impl Default for WorkerRegistrationConfig {
     fn default() -> Self {
+        // MAINNET SECURITY: Check if we're in development mode
+        let is_dev = std::env::var("BITSAGE_ENV")
+            .map(|v| v.to_lowercase() == "development" || v.to_lowercase() == "dev")
+            .unwrap_or(false);
+
         Self {
             enable_auto_registration: true,
-            require_authentication: false,
+            // SECURITY: Auth required by default, can disable for local dev only
+            require_authentication: !is_dev,
             enable_capability_validation: true,
             min_reputation_threshold: 0.5,
+            // SECURITY: Stake required by default for mainnet security
+            require_stake: !is_dev,
+            allow_probationary_workers: is_dev, // Only allow unstaked workers in dev
         }
     }
 }
@@ -604,21 +627,79 @@ impl Default for WorkerMonitoringConfig {
 
 impl Default for BlockchainConfig {
     fn default() -> Self {
+        // SECURITY: Load from environment variables with validation
+        let is_production = std::env::var("BITSAGE_ENV")
+            .map(|v| v.to_lowercase() == "production" || v.to_lowercase() == "mainnet")
+            .unwrap_or(false);
+
+        let network = std::env::var("STARKNET_NETWORK").unwrap_or_else(|_| {
+            if is_production { "mainnet".to_string() } else { "sepolia".to_string() }
+        });
+
+        // Use mainnet RPC by default for production, testnet for dev
+        let default_rpc = if is_production || network == "mainnet" {
+            "https://starknet-mainnet.g.alchemy.com/starknet/version/rpc/v0_7/YOUR_API_KEY"
+        } else {
+            "https://starknet-sepolia-rpc.publicnode.com"
+        };
+        let rpc_url = std::env::var("STARKNET_RPC_URL").unwrap_or_else(|_| default_rpc.to_string());
+
+        // Load contract addresses from environment (required in production)
+        let zero_addr = "0x0000000000000000000000000000000000000000000000000000000000000000";
+
+        let job_manager_address = std::env::var("JOB_MANAGER_ADDRESS")
+            .unwrap_or_else(|_| "0x00bf025663b8a7c7e43393f082b10afe66bd9ddb06fb5e521e3adbcf693094bd".to_string());
+        let cdc_pool_address = std::env::var("CDC_POOL_ADDRESS")
+            .unwrap_or_else(|_| zero_addr.to_string());
+        let sage_token_address = std::env::var("SAGE_TOKEN_ADDRESS")
+            .unwrap_or_else(|_| zero_addr.to_string());
+        let staking_contract_address = std::env::var("STAKING_CONTRACT_ADDRESS")
+            .unwrap_or_else(|_| zero_addr.to_string());
+        let reputation_contract_address = std::env::var("REPUTATION_CONTRACT_ADDRESS")
+            .unwrap_or_else(|_| zero_addr.to_string());
+        let faucet_contract_address = std::env::var("FAUCET_CONTRACT_ADDRESS").ok();
+
+        // CRITICAL: Validate addresses in production
+        if is_production {
+            let critical_addresses = [
+                ("JOB_MANAGER_ADDRESS", &job_manager_address),
+                ("CDC_POOL_ADDRESS", &cdc_pool_address),
+                ("SAGE_TOKEN_ADDRESS", &sage_token_address),
+                ("STAKING_CONTRACT_ADDRESS", &staking_contract_address),
+            ];
+            for (name, addr) in critical_addresses {
+                if addr == zero_addr || addr.is_empty() {
+                    panic!(
+                        "CRITICAL: {} is not set or is zero address. \
+                         All contract addresses must be configured for production. \
+                         Set the {} environment variable.",
+                        name, name
+                    );
+                }
+            }
+            if rpc_url.contains("YOUR_API_KEY") {
+                panic!(
+                    "CRITICAL: STARKNET_RPC_URL contains placeholder API key. \
+                     Set a valid RPC URL for production."
+                );
+            }
+        }
+
         Self {
-            rpc_url: "https://rpc.starknet-testnet.lava.build".to_string(),
-            network: "sepolia".to_string(),
-            job_manager_address: "0x00bf025663b8a7c7e43393f082b10afe66bd9ddb06fb5e521e3adbcf693094bd".to_string(),
-            cdc_pool_address: "0x0000000000000000000000000000000000000000000000000000000000000000".to_string(),
-            sage_token_address: "0x0000000000000000000000000000000000000000000000000000000000000000".to_string(),
-            staking_contract_address: "0x0000000000000000000000000000000000000000000000000000000000000000".to_string(),
-            reputation_contract_address: "0x0000000000000000000000000000000000000000000000000000000000000000".to_string(),
-            faucet_contract_address: Some("0x0000000000000000000000000000000000000000000000000000000000000000".to_string()),
+            rpc_url,
+            network,
+            job_manager_address,
+            cdc_pool_address,
+            sage_token_address,
+            staking_contract_address,
+            reputation_contract_address,
+            faucet_contract_address,
             enable_staking_verification: true,
             enable_reputation_queries: true,
             monitoring: BlockchainMonitoringConfig::default(),
             gas_optimization: GasOptimizationConfig::default(),
-            signer_private_key: "".to_string(),
-            signer_account_address: "".to_string(),
+            signer_private_key: std::env::var("SIGNER_PRIVATE_KEY").unwrap_or_default(),
+            signer_account_address: std::env::var("SIGNER_ACCOUNT_ADDRESS").unwrap_or_default(),
         }
     }
 }
@@ -702,9 +783,31 @@ impl Default for LogFileConfig {
 
 impl Default for SecurityConfig {
     fn default() -> Self {
+        // Check if we're in production mode - enable security by default
+        let is_production = std::env::var("BITSAGE_ENV")
+            .map(|v| v.to_lowercase() == "production" || v.to_lowercase() == "mainnet")
+            .unwrap_or(false);
+
+        // In production, authentication is required unless explicitly disabled
+        let enable_auth = if is_production {
+            // Allow explicit disable for special cases, but warn
+            let disabled = std::env::var("BITSAGE_DISABLE_AUTH")
+                .map(|v| v == "true" || v == "1")
+                .unwrap_or(false);
+            if disabled {
+                tracing::warn!("⚠️  SECURITY WARNING: Authentication disabled in production mode!");
+            }
+            !disabled
+        } else {
+            // In development, default to disabled but allow enabling
+            std::env::var("BITSAGE_ENABLE_AUTH")
+                .map(|v| v == "true" || v == "1")
+                .unwrap_or(false)
+        };
+
         Self {
-            enable_authentication: false,
-            enable_authorization: false,
+            enable_authentication: enable_auth,
+            enable_authorization: enable_auth,
             api_keys: ApiKeyConfig::default(),
             rate_limiting: RateLimitingConfig::default(),
             tls: TlsConfig::default(),
@@ -791,21 +894,24 @@ pub fn generate_default_config(environment: Environment) -> CoordinatorConfig {
     match environment {
         Environment::Development => {
             config.database_url = "postgresql://localhost/sage_dev".to_string();
-            config.blockchain.rpc_url = "https://rpc.starknet-testnet.lava.build".to_string();
+            config.blockchain.rpc_url = "https://starknet-sepolia-rpc.publicnode.com".to_string();
             config.blockchain.network = "sepolia".to_string();
             config.logging.level = "debug".to_string();
             config.metrics.enable_metrics = false;
         }
         Environment::Staging => {
             config.database_url = "postgresql://localhost/sage_staging".to_string();
-            config.blockchain.rpc_url = "https://rpc.starknet-testnet.lava.build".to_string();
+            config.blockchain.rpc_url = "https://starknet-sepolia-rpc.publicnode.com".to_string();
             config.blockchain.network = "sepolia".to_string();
             config.logging.level = "info".to_string();
             config.security.enable_authentication = true;
         }
         Environment::Production => {
-            config.database_url = "postgresql://sage:password@localhost/sage_prod".to_string();
-            config.blockchain.rpc_url = "https://rpc.starknet.lava.build".to_string();
+            // DATABASE_URL is REQUIRED in production - never use hardcoded credentials
+            config.database_url = std::env::var("DATABASE_URL")
+                .expect("CRITICAL: DATABASE_URL environment variable is required in production. Never hardcode database credentials!");
+            config.blockchain.rpc_url = std::env::var("STARKNET_RPC_URL")
+                .unwrap_or_else(|_| "https://starknet-mainnet-rpc.publicnode.com".to_string());
             config.blockchain.network = "mainnet".to_string();
             config.blockchain.faucet_contract_address = None; // No faucet on mainnet
             config.logging.level = "warn".to_string();
@@ -815,7 +921,7 @@ pub fn generate_default_config(environment: Environment) -> CoordinatorConfig {
         }
         Environment::Test => {
             config.database_url = "postgresql://localhost/sage_test".to_string();
-            config.blockchain.rpc_url = "https://rpc.starknet-testnet.lava.build".to_string();
+            config.blockchain.rpc_url = "https://starknet-sepolia-rpc.publicnode.com".to_string();
             config.blockchain.network = "sepolia".to_string();
             config.logging.level = "error".to_string();
             config.metrics.enable_metrics = false;
@@ -838,10 +944,16 @@ mod tests {
 
     #[test]
     fn test_production_config() {
+        // Set required environment variables for production config
+        std::env::set_var("DATABASE_URL", "postgresql://test:test@localhost/sage_test");
+
         let config = generate_default_config(Environment::Production);
         assert_eq!(config.environment, Environment::Production);
         assert!(config.security.enable_authentication);
         assert!(config.metrics.enable_metrics);
+
+        // Clean up
+        std::env::remove_var("DATABASE_URL");
     }
 
     #[test]

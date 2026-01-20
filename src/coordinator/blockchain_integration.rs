@@ -689,6 +689,23 @@ impl BlockchainIntegration {
     /// Distribute rewards for a completed job
     pub async fn distribute_rewards(&self, job_id: JobId) -> Result<String> {
         info!("Distributing rewards for job {} on blockchain", job_id);
+
+        // Get job details to retrieve the actual payment amount
+        let payment_amount = match self.job_manager_contract.get_job(job_id).await {
+            Ok(Some(details)) => {
+                // Extract payment_amount from job details (this is the escrowed payment)
+                details.payment_amount
+            }
+            Ok(None) => {
+                debug!("Job {} not found on chain, using 0 as payment amount", job_id);
+                0
+            }
+            Err(e) => {
+                debug!("Failed to get job details for {}: {}, using 0 as payment amount", job_id, e);
+                0
+            }
+        };
+
         let private_key = starknet::core::types::FieldElement::from_hex_be(&self.config.signer_private_key)
             .context("Failed to parse signer private key")?;
         let account_address = starknet::core::types::FieldElement::from_hex_be(&self.config.signer_account_address)
@@ -711,10 +728,10 @@ impl BlockchainIntegration {
             hash_str.clone(),
             transaction_info,
         );
-        // Send event
+        // Send event with actual payment amount
         if let Err(e) = self.event_sender.send(BlockchainEvent::PaymentDistributed(
             job_id,
-            0, // TODO: actual amount
+            payment_amount,
         )) {
             error!("Failed to send payment distributed event: {}", e);
         }

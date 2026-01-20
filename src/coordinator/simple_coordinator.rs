@@ -19,6 +19,7 @@
 //! ```
 
 #![deprecated(since = "0.2.0", note = "Use EnhancedCoordinator instead")]
+#![allow(deprecated)] // Allow use of own deprecated types within this deprecated module
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -105,7 +106,7 @@ impl Default for SimpleCoordinatorConfig {
         Self {
             environment: "development".to_string(),
             port: 8080,
-            blockchain_rpc_url: "https://rpc.starknet-testnet.lava.build".to_string(),
+            blockchain_rpc_url: "https://starknet-sepolia-rpc.publicnode.com".to_string(),
             job_manager_contract_address: "0x00bf025663b8a7c7e43393f082b10afe66bd9ddb06fb5e521e3adbcf693094bd".to_string(),
             kafka_bootstrap_servers: "localhost:9092".to_string(),
             p2p_port: 4001,
@@ -310,8 +311,28 @@ impl SimpleCoordinator {
     }
 
     async fn update_job_stats(&self) {
-        // TODO: Implement job statistics update
-        debug!("Updating job statistics");
+        let state = self.state.read().await;
+
+        let total_jobs = state.jobs.len();
+        let pending_jobs = state.jobs.values().filter(|j| j.status == JobStatus::Pending).count();
+        let running_jobs = state.jobs.values().filter(|j| j.status == JobStatus::Running).count();
+        let completed_jobs = state.jobs.values().filter(|j| j.status == JobStatus::Completed).count();
+        let failed_jobs = state.jobs.values().filter(|j| j.status == JobStatus::Failed).count();
+
+        debug!(
+            "Job statistics - Total: {}, Pending: {}, Running: {}, Completed: {}, Failed: {}",
+            total_jobs, pending_jobs, running_jobs, completed_jobs, failed_jobs
+        );
+    }
+
+    /// Get the Starknet client reference
+    pub fn starknet_client(&self) -> &Arc<StarknetClient> {
+        &self.starknet_client
+    }
+
+    /// Get the job manager contract reference
+    pub fn job_manager_contract(&self) -> &Arc<JobManagerContract> {
+        &self.job_manager_contract
     }
 }
 

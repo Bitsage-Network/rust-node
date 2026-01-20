@@ -28,6 +28,9 @@ use crate::coordinator::worker_manager::WorkerManager;
 use crate::coordinator::blockchain_bridge::{
     BlockchainBridge, BatchJobSubmission, BatchResultSubmission, BatchSubmissionResult,
 };
+use crate::coordinator::mining_rewards::MiningRewardsManager;
+use crate::obelysk::starknet::{GpuTier, StakeStatus};
+use crate::obelysk::payment_client::PaymentRouterClient;
 
 /// Job processor events
 #[derive(Debug, Clone)]
@@ -181,6 +184,12 @@ pub struct JobProcessor {
     blockchain_bridge: Option<Arc<BlockchainBridge>>,
     batch_config: BatchConfig,
 
+    // Mining rewards manager for per-job reward distribution
+    mining_rewards: Option<Arc<MiningRewardsManager>>,
+
+    // Payment client for proof-gated payments
+    payment_client: Option<Arc<PaymentRouterClient>>,
+
     // Batch queues for blockchain submissions
     pending_job_submissions: Arc<Mutex<Vec<PendingSubmission>>>,
     pending_result_submissions: Arc<Mutex<Vec<PendingResult>>>,
@@ -229,6 +238,8 @@ impl JobProcessor {
             worker_manager: None,
             blockchain_bridge: None,
             batch_config: BatchConfig::default(),
+            mining_rewards: None,
+            payment_client: None,
             pending_job_submissions: Arc::new(Mutex::new(Vec::new())),
             pending_result_submissions: Arc::new(Mutex::new(Vec::new())),
             pending_reward_distributions: Arc::new(Mutex::new(Vec::new())),
@@ -256,6 +267,18 @@ impl JobProcessor {
     /// Configure batch processing
     pub fn set_batch_config(&mut self, config: BatchConfig) {
         self.batch_config = config;
+    }
+
+    /// Set the mining rewards manager for per-job reward distribution
+    pub fn set_mining_rewards(&mut self, mining_rewards: Arc<MiningRewardsManager>) {
+        self.mining_rewards = Some(mining_rewards);
+        info!("Mining rewards manager configured for per-job distributions");
+    }
+
+    /// Set the payment client for proof-gated payments
+    pub fn set_payment_client(&mut self, payment_client: Arc<PaymentRouterClient>) {
+        self.payment_client = Some(payment_client);
+        info!("Payment client configured for proof-gated payments");
     }
 
     /// Create with worker manager
@@ -486,29 +509,123 @@ impl JobProcessor {
         }
     }
 
-    /// Complete job
+    /// Complete job and distribute mining rewards
     pub async fn complete_job(&self, job_id: JobId, result: CoordinatorJobResult) -> Result<()> {
         info!("Completing job {}", job_id);
-        
-        let mut jobs = self.active_jobs.write().await;
-        if let Some(job_info) = jobs.get_mut(&job_id) {
-            job_info.status = JobStatus::Completed;
-            job_info.execution_state = JobExecutionState::Completed(result.clone());
-            job_info.completed_at = Some(chrono::Utc::now().timestamp() as u64);
-            
-            // Update statistics
-            self.update_stats_job_completed().await;
-            
-            // Send event
-            if let Err(e) = self.event_sender.send(JobEvent::JobCompleted(job_id, result)) {
-                error!("Failed to send job completed event: {}", e);
+
+        let worker_id: Option<WorkerId>;
+
+        {
+            let mut jobs = self.active_jobs.write().await;
+            if let Some(job_info) = jobs.get_mut(&job_id) {
+                job_info.status = JobStatus::Completed;
+                job_info.execution_state = JobExecutionState::Completed(result.clone());
+                job_info.completed_at = Some(chrono::Utc::now().timestamp() as u64);
+                worker_id = job_info.assigned_worker;
+            } else {
+                return Err(anyhow::anyhow!("Job {} not found", job_id));
             }
-            
-            info!("Job {} completed successfully", job_id);
-            Ok(())
-        } else {
-            Err(anyhow::anyhow!("Job {} not found", job_id))
         }
+
+        // Distribute mining rewards if configured
+        if let (Some(mining_manager), Some(worker_manager), Some(wid)) =
+            (&self.mining_rewards, &self.worker_manager, worker_id)
+        {
+            if let Some(worker_details) = worker_manager.get_worker(wid).await {
+                if let Some(wallet_address) = &worker_details.info.wallet_address {
+                    // Determine GPU tier from worker capabilities
+                    let gpu_tier = GpuTier::from_gpu_model(&worker_details.capabilities.gpu_model);
+
+                    // Get stake status from worker manager
+                    let stake_status = worker_manager
+                        .get_worker_stake_status(wallet_address)
+                        .await
+                        .unwrap_or(StakeStatus::None);
+
+                    // Calculate and distribute mining reward
+                    match mining_manager.calculate_reward(wallet_address, gpu_tier, &stake_status).await {
+                        Ok(reward_result) => {
+                            if reward_result.awarded_wei > 0 {
+                                info!(
+                                    "Mining reward for job {}: {} SAGE to worker {} (tier: {:?}, capped: {})",
+                                    job_id,
+                                    reward_result.awarded_sage,
+                                    wid,
+                                    reward_result.stake_tier,
+                                    reward_result.was_capped
+                                );
+
+                                // MAINNET: Submit proof-gated payment on-chain
+                                if let Some(payment_client) = &self.payment_client {
+                                    if let Some(compressed_proof) = &result.compressed_proof {
+                                        // Convert JobId (UUID) to u128 for contract call
+                                        let job_id_bytes = job_id.as_bytes();
+                                        let job_id_u128 = u128::from_be_bytes([
+                                            job_id_bytes[0], job_id_bytes[1], job_id_bytes[2], job_id_bytes[3],
+                                            job_id_bytes[4], job_id_bytes[5], job_id_bytes[6], job_id_bytes[7],
+                                            job_id_bytes[8], job_id_bytes[9], job_id_bytes[10], job_id_bytes[11],
+                                            job_id_bytes[12], job_id_bytes[13], job_id_bytes[14], job_id_bytes[15],
+                                        ]);
+                                        match payment_client.submit_payment_with_proof(
+                                            wallet_address,
+                                            job_id_u128,
+                                            reward_result.awarded_wei,
+                                            compressed_proof,
+                                        ).await {
+                                            Ok(payment_result) => {
+                                                info!(
+                                                    "✅ Proof-gated payment submitted: {} SAGE to {} (tx: {:?})",
+                                                    reward_result.awarded_sage,
+                                                    wallet_address,
+                                                    payment_result.tx_hash
+                                                );
+                                            }
+                                            Err(e) => {
+                                                error!(
+                                                    "❌ Failed to submit proof-gated payment for job {}: {}",
+                                                    job_id, e
+                                                );
+                                                // Add to pending reward distributions for retry
+                                                let mut pending = self.pending_reward_distributions.lock().await;
+                                                pending.push(format!("{}:{}:{}", wallet_address, job_id, reward_result.awarded_wei));
+                                            }
+                                        }
+                                    } else {
+                                        warn!(
+                                            "⚠️ No compressed proof in job result, skipping on-chain payment for job {}",
+                                            job_id
+                                        );
+                                    }
+                                } else {
+                                    debug!(
+                                        "Payment client not configured, reward calculated but not submitted on-chain"
+                                    );
+                                }
+                            } else if reward_result.was_capped {
+                                debug!(
+                                    "Worker {} hit daily mining cap ({:?} tier), no reward for job {}",
+                                    wid, reward_result.stake_tier, job_id
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            warn!("Failed to calculate mining reward for job {}: {}", job_id, e);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Update statistics
+        self.update_stats_job_completed().await;
+
+        // Send event
+        if let Err(e) = self.event_sender.send(JobEvent::JobCompleted(job_id, result)) {
+            error!("Failed to send job completed event: {}", e);
+        }
+
+        info!("Job {} completed successfully", job_id);
+        Ok(())
     }
 
     /// Fail job
@@ -928,57 +1045,6 @@ impl JobProcessor {
         }
 
         tags
-    }
-
-    /// Derive compute requirements from job request
-    fn derive_compute_requirements(&self, request: &JobRequest) -> ComputeRequirements {
-        match &request.job_type {
-            JobType::AIInference { batch_size, .. } => ComputeRequirements {
-                min_gpu_memory_gb: 8.max(*batch_size / 4),
-                min_cpu_cores: 4,
-                min_ram_gb: 16,
-                preferred_gpu_type: Some("A100".to_string()),
-                requires_high_precision: false,
-                requires_specialized_hardware: false,
-                estimated_runtime_minutes: 5,
-            },
-            JobType::ZKProof { .. } => ComputeRequirements {
-                min_gpu_memory_gb: 24,
-                min_cpu_cores: 8,
-                min_ram_gb: 64,
-                preferred_gpu_type: Some("H100".to_string()),
-                requires_high_precision: true,
-                requires_specialized_hardware: false,
-                estimated_runtime_minutes: 30,
-            },
-            JobType::Render3D { .. } => ComputeRequirements {
-                min_gpu_memory_gb: 12,
-                min_cpu_cores: 8,
-                min_ram_gb: 32,
-                preferred_gpu_type: Some("RTX".to_string()),
-                requires_high_precision: false,
-                requires_specialized_hardware: false,
-                estimated_runtime_minutes: 60,
-            },
-            JobType::ConfidentialVM { memory_mb, vcpu_count, .. } => ComputeRequirements {
-                min_gpu_memory_gb: 0,
-                min_cpu_cores: *vcpu_count,
-                min_ram_gb: (*memory_mb / 1024).max(4),
-                preferred_gpu_type: None,
-                requires_high_precision: false,
-                requires_specialized_hardware: true, // Requires TEE
-                estimated_runtime_minutes: (request.max_duration_secs / 60) as u32,
-            },
-            _ => ComputeRequirements {
-                min_gpu_memory_gb: 4,
-                min_cpu_cores: 2,
-                min_ram_gb: 8,
-                preferred_gpu_type: None,
-                requires_high_precision: false,
-                requires_specialized_hardware: false,
-                estimated_runtime_minutes: 10,
-            },
-        }
     }
 
     /// Add job to priority queue
@@ -1461,12 +1527,12 @@ impl JobProcessor {
             self.complete_job(job_id, result.clone()).await?;
 
             // Queue for blockchain submission
-            let execution_time = result.execution_time_secs.map(|s| s as u64 * 1000).unwrap_or(0);
+            let execution_time_ms = result.execution_time;
             self.queue_result_for_blockchain(
                 job_id,
                 &result_hash,
-                execution_time,
-                result.error.is_none(),
+                execution_time_ms,
+                result.error_message.is_none(),
                 None,
             ).await?;
 
@@ -1479,11 +1545,21 @@ impl JobProcessor {
 
         Ok(())
     }
+
+    /// Get the database reference
+    pub fn database(&self) -> &Arc<Database> {
+        &self.database
+    }
+
+    /// Get the job manager contract reference
+    pub fn job_manager_contract(&self) -> &Arc<JobManagerContract> {
+        &self.job_manager_contract
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    
 
     #[tokio::test]
     async fn test_job_processor_creation() {

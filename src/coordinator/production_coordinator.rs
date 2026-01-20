@@ -7,7 +7,7 @@
 //! - Fault tolerance
 //! - Job lifecycle management
 
-use anyhow::{Result, anyhow};
+use anyhow::{Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -16,6 +16,10 @@ use tracing::{info, error, warn, debug};
 use uuid::Uuid;
 use chrono::{DateTime, Utc, Duration};
 use super::blockchain_bridge::BlockchainBridge;
+use crate::obelysk::elgamal::{ECPoint, hash_felts, verify_schnorr_proof, Felt252};
+use crate::obelysk::worker_keys::RegistrationSignature;
+use crate::validator::consensus::SageGuardConsensus;
+use crate::obelysk::starknet::StakingClient;
 
 // ==========================================
 // Domain Models
@@ -94,6 +98,10 @@ pub struct WorkerSlot {
     pub reputation_score: f32,
     pub total_jobs_completed: u64,
     pub total_jobs_failed: u64,
+    /// Wallet address for stake verification and transparent payments
+    pub wallet_address: Option<String>,
+    /// ElGamal public key for encrypted payments
+    pub privacy_public_key: Option<ECPoint>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -126,6 +134,10 @@ pub struct ProductionCoordinator {
     pending_queue: Arc<RwLock<Vec<JobId>>>,
     heartbeat_timeout: Duration,
     blockchain: Option<Arc<BlockchainBridge>>,
+    /// SageGuard BFT consensus for proof validation
+    consensus: Option<Arc<SageGuardConsensus>>,
+    /// Staking client for validator verification
+    staking_client: Option<Arc<StakingClient>>,
 }
 
 impl ProductionCoordinator {
@@ -136,6 +148,8 @@ impl ProductionCoordinator {
             pending_queue: Arc::new(RwLock::new(Vec::new())),
             heartbeat_timeout: Duration::seconds(60),
             blockchain: None, // Blockchain disabled by default
+            consensus: None,
+            staking_client: None,
         };
 
         coord.spawn_maintenance_loop();
@@ -160,11 +174,38 @@ impl ProductionCoordinator {
             pending_queue: Arc::new(RwLock::new(Vec::new())),
             heartbeat_timeout: Duration::seconds(60),
             blockchain: Some(blockchain),
+            consensus: None,
+            staking_client: None,
         };
 
         coord.spawn_maintenance_loop();
         info!("✅ Production Coordinator initialized with blockchain integration");
         Ok(coord)
+    }
+
+    /// Add consensus system to coordinator (optional, for production deployments)
+    pub fn with_consensus(
+        mut self,
+        consensus: Arc<SageGuardConsensus>,
+        staking_client: Arc<StakingClient>,
+    ) -> Self {
+        info!("🔒 Enabling SageGuard BFT consensus");
+        self.consensus = Some(consensus);
+        self.staking_client = Some(staking_client);
+        self
+    }
+
+    /// Get consensus instance if enabled
+    pub fn consensus(&self) -> Option<Arc<SageGuardConsensus>> {
+        self.consensus.clone()
+    }
+
+    /// Check if a worker has sufficient stake to be a validator
+    pub async fn is_validator(&self, worker_address: &str) -> Result<bool> {
+        match &self.staking_client {
+            Some(client) => client.is_validator_eligible(worker_address).await,
+            None => Ok(false), // No staking client, no validators
+        }
     }
 
     /// Background loop: clean up dead workers, retry failed jobs
@@ -229,13 +270,48 @@ impl ProductionCoordinator {
     // ---------------------------------------------------------
 
     pub async fn register_worker(&self, id: String, caps: WorkerCapabilities) -> Result<()> {
+        self.register_worker_with_privacy(id, caps, None, None, None).await
+    }
+
+    /// Register a worker with optional privacy payment support
+    ///
+    /// If privacy_public_key and privacy_key_signature are provided, the signature
+    /// is verified to prove ownership of the key before registration.
+    pub async fn register_worker_with_privacy(
+        &self,
+        id: String,
+        caps: WorkerCapabilities,
+        wallet_address: Option<String>,
+        privacy_public_key: Option<ECPoint>,
+        privacy_key_signature: Option<RegistrationSignature>,
+    ) -> Result<()> {
         let mut workers = self.workers.write().await;
-        
-        info!("✅ Registering Worker: {} | GPUs: {} | TEE: CPU={} GPU={}", 
-            id, caps.gpus.len(), caps.tee_cpu, 
-            caps.gpus.iter().any(|g| g.has_tee)
+
+        // Verify privacy key signature if provided
+        let verified_public_key = if let (Some(ref pubkey), Some(ref sig)) = (&privacy_public_key, &privacy_key_signature) {
+            // Verify the signature proves ownership of the key
+            if !Self::verify_registration_signature(pubkey, sig) {
+                bail!("Invalid privacy key signature - worker does not own this key");
+            }
+
+            // Check timestamp is recent (within 5 minutes)
+            let now = chrono::Utc::now().timestamp() as u64;
+            if sig.timestamp > now || now - sig.timestamp > 300 {
+                bail!("Privacy key signature timestamp is stale or in the future");
+            }
+
+            info!("Worker {} registered with verified privacy public key", id);
+            Some(pubkey.clone())
+        } else {
+            privacy_public_key
+        };
+
+        info!("✅ Registering Worker: {} | GPUs: {} | TEE: CPU={} GPU={} | Privacy: {}",
+            id, caps.gpus.len(), caps.tee_cpu,
+            caps.gpus.iter().any(|g| g.has_tee),
+            verified_public_key.is_some()
         );
-        
+
         workers.insert(id.clone(), WorkerSlot {
             id,
             capabilities: caps,
@@ -245,9 +321,24 @@ impl ProductionCoordinator {
             reputation_score: 100.0,
             total_jobs_completed: 0,
             total_jobs_failed: 0,
+            wallet_address,
+            privacy_public_key: verified_public_key,
         });
-        
+
         Ok(())
+    }
+
+    /// Verify that a registration signature proves ownership of the public key
+    fn verify_registration_signature(public_key: &ECPoint, signature: &RegistrationSignature) -> bool {
+        // Reconstruct the message that was signed
+        let message = hash_felts(&[
+            public_key.x,
+            public_key.y,
+            Felt252::from_u64(signature.timestamp),
+        ]);
+
+        // Verify the Schnorr proof
+        verify_schnorr_proof(public_key, &signature.proof, &[message])
     }
 
     pub async fn update_worker_heartbeat(&self, heartbeat: WorkerHeartbeat) -> Result<()> {

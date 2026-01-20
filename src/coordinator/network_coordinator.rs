@@ -44,6 +44,7 @@ pub struct NetworkCoordinatorStats {
     pub jobs_bid_on: u64,
     pub jobs_assigned: u64,
     pub jobs_completed: u64,
+    pub jobs_failed: u64,
     pub average_reputation: f64,
     pub network_latency_ms: u64,
     pub messages_sent: u64,
@@ -111,6 +112,7 @@ impl NetworkCoordinatorService {
             jobs_bid_on: 0,
             jobs_assigned: 0,
             jobs_completed: 0,
+            jobs_failed: 0,
             average_reputation: 0.0,
             network_latency_ms: 0,
             messages_sent: 0,
@@ -433,7 +435,7 @@ impl NetworkCoordinatorService {
                         0.0
                     },
                     successful_jobs_24h: current_stats.jobs_completed,
-                    failed_jobs_24h: 0, // TODO: Track failed jobs
+                    failed_jobs_24h: current_stats.jobs_failed,
                     average_job_latency_ms: current_stats.network_latency_ms,
                 };
 
@@ -473,7 +475,12 @@ impl NetworkCoordinatorService {
                 // Update stats with current peer information
                 let mut stats_guard = stats.write().await;
                 stats_guard.total_peers = peer_count;
-                stats_guard.active_peers = peer_count; // TODO: Filter by status
+
+                // Filter active peers by their is_active status
+                let peers_read = active_peers.read().await;
+                let active_count = peers_read.values().filter(|p| p.is_active).count() as u64;
+                drop(peers_read);
+                stats_guard.active_peers = active_count;
 
                 // Calculate average reputation from peers (if we have reputation data)
                 // For now, maintain the current average
@@ -492,7 +499,7 @@ impl NetworkCoordinatorService {
                             average_reputation: current_stats.average_reputation,
                             network_load_percent: 0.0,
                             successful_jobs_24h: current_stats.jobs_completed,
-                            failed_jobs_24h: 0,
+                            failed_jobs_24h: current_stats.jobs_failed,
                             average_job_latency_ms: current_stats.network_latency_ms,
                         },
                     }
@@ -600,6 +607,34 @@ impl NetworkCoordinatorService {
     pub fn running_handle(&self) -> Arc<RwLock<bool>> {
         Arc::clone(&self.running)
     }
+
+    /// Get announcement details for a job
+    pub async fn get_announcement(&self, job_id: &JobId) -> Option<(JobId, Instant, Vec<String>, u64)> {
+        let announcements = self.job_announcements.read().await;
+        announcements.get(job_id).map(|a| (a.job_id, a.announced_at, a.requirements.clone(), a.max_bid))
+    }
+
+    /// Get all bids for a job
+    pub async fn get_job_bids(&self, job_id: &JobId) -> Vec<(WorkerId, u64, Instant, Vec<String>)> {
+        let bids = self.job_bids.read().await;
+        bids.get(job_id)
+            .map(|job_bids| {
+                job_bids.iter()
+                    .map(|b| (b.worker_id.clone(), b.bid_amount, b.bid_at, b.capabilities.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Get the Starknet client
+    pub fn starknet_client(&self) -> &Arc<StarknetClient> {
+        &self.starknet_client
+    }
+
+    /// Get the job manager contract
+    pub fn job_manager_contract(&self) -> &Arc<JobManagerContract> {
+        &self.job_manager_contract
+    }
 }
 
 #[cfg(test)]
@@ -609,7 +644,7 @@ mod tests {
     #[tokio::test]
     async fn test_network_coordinator_creation() {
         let config = NetworkCoordinatorConfig::default();
-        let starknet_client = Arc::new(StarknetClient::new("https://rpc.starknet-testnet.lava.build".to_string()).unwrap());
+        let starknet_client = Arc::new(StarknetClient::new("https://starknet-sepolia-rpc.publicnode.com".to_string()).unwrap());
         let job_manager_contract = Arc::new(JobManagerContract::new_from_address(
             starknet_client.clone(),
             "0x00bf025663b8a7c7e43393f082b10afe66bd9ddb06fb5e521e3adbcf693094bd",
@@ -627,7 +662,7 @@ mod tests {
     #[tokio::test]
     async fn test_job_announcement() {
         let config = NetworkCoordinatorConfig::default();
-        let starknet_client = Arc::new(StarknetClient::new("https://rpc.starknet-testnet.lava.build".to_string()).unwrap());
+        let starknet_client = Arc::new(StarknetClient::new("https://starknet-sepolia-rpc.publicnode.com".to_string()).unwrap());
         let job_manager_contract = Arc::new(JobManagerContract::new_from_address(
             starknet_client.clone(),
             "0x00bf025663b8a7c7e43393f082b10afe66bd9ddb06fb5e521e3adbcf693094bd",

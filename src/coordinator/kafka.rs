@@ -266,35 +266,39 @@ impl Default for KafkaStats {
 /// Main Kafka coordinator
 pub struct KafkaCoordinator {
     config: KafkaConfig,
-    
+
     // Kafka clients
     consumer: Option<StreamConsumer>,
     producer: Option<FutureProducer>,
-    
+
     // Message processing
     job_queue: Arc<RwLock<Vec<JobIntakeMessage>>>,
     dead_letter_queue: Arc<RwLock<Vec<DeadLetterEntry>>>,
-    
+
     // Communication channels
     event_sender: mpsc::UnboundedSender<KafkaEvent>,
     event_receiver: Arc<RwLock<Option<mpsc::UnboundedReceiver<KafkaEvent>>>>,
-    
+
     // Internal state
     running: Arc<RwLock<bool>>,
     message_counters: Arc<RwLock<HashMap<String, u64>>>,
+
+    // Sequence counter for dead letter queue entries (used when partition/offset unavailable)
+    dlq_sequence: Arc<std::sync::atomic::AtomicI64>,
 }
 
 impl KafkaCoordinator {
     /// Create a new Kafka coordinator
     pub fn new(config: KafkaConfig) -> Self {
         let (event_sender, event_receiver) = mpsc::unbounded_channel();
-        
+
         Self {
             config,
             consumer: None,
             producer: None,
             job_queue: Arc::new(RwLock::new(Vec::new())),
             dead_letter_queue: Arc::new(RwLock::new(Vec::new())),
+            dlq_sequence: Arc::new(std::sync::atomic::AtomicI64::new(0)),
             event_sender,
             event_receiver: Arc::new(RwLock::new(Some(event_receiver))),
             running: Arc::new(RwLock::new(false)),
@@ -1077,18 +1081,38 @@ impl KafkaCoordinator {
     }
 
     /// Add message to dead letter queue
+    ///
+    /// For producer-side failures (send errors), partition and offset are not available,
+    /// so we use a monotonic sequence number for tracking.
     async fn add_to_dead_letter_queue(&self, topic: &str, payload: Vec<u8>, error: String) {
+        self.add_to_dead_letter_queue_with_offset(topic, payload, error, None, None).await;
+    }
+
+    /// Add message to dead letter queue with optional partition and offset
+    ///
+    /// Use this when you have partition/offset from consumed messages.
+    /// For producer failures, pass None and a sequence number will be used.
+    async fn add_to_dead_letter_queue_with_offset(
+        &self,
+        topic: &str,
+        payload: Vec<u8>,
+        error: String,
+        partition: Option<i32>,
+        offset: Option<i64>,
+    ) {
+        // Use sequence number when partition/offset not available (producer failures)
+        let seq = self.dlq_sequence.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let entry = DeadLetterEntry {
             message_id: Uuid::new_v4().to_string(),
             topic: topic.to_string(),
-            partition: 0, // TODO: Get actual partition
-            offset: 0,    // TODO: Get actual offset
+            partition: partition.unwrap_or(-1), // -1 indicates producer-side failure
+            offset: offset.unwrap_or(seq),      // Use sequence for tracking
             error,
             message_data: payload,
             timestamp: chrono::Utc::now().timestamp() as u64,
             retry_count: 0,
         };
-        
+
         self.dead_letter_queue.write().await.push(entry);
     }
 
@@ -1195,6 +1219,24 @@ impl KafkaCoordinator {
     /// Check if running
     pub async fn is_running(&self) -> bool {
         *self.running.read().await
+    }
+
+    /// Reconnect both consumer and producer
+    ///
+    /// Attempts to reconnect both Kafka consumer and producer.
+    /// Useful for recovering from connection failures.
+    pub async fn reconnect(&self) -> Result<()> {
+        self.reconnect_consumer().await?;
+        self.reconnect_producer().await?;
+        Ok(())
+    }
+
+    /// Process a raw message payload
+    ///
+    /// Utility method for processing Kafka message payloads.
+    /// Returns the parsed event for downstream handling.
+    pub async fn process_raw_message(&self, msg: &OwnedMessage) -> Result<()> {
+        Self::process_message(msg, &self.event_sender, &self.config).await
     }
 }
 

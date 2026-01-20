@@ -92,17 +92,19 @@ impl BlockchainBridge {
     }
 
     /// Create a disabled bridge (for testing without blockchain)
-    /// Returns None if the client cannot be created (which is fine for disabled mode)
+    /// Returns a disabled blockchain bridge for testing/development
+    /// The client will fail on any real operations but that's acceptable when disabled
     pub fn disabled() -> Self {
-        // Use a fallback client - if creation fails, we still return a disabled bridge
-        // since the bridge won't be used anyway when disabled
+        // Use a fallback client - try localhost devnet, then minimal fallback
         let client = Arc::new(
             StarknetClient::new("http://localhost:5050".to_string())
-                .unwrap_or_else(|_| {
-                    // Fallback to a minimal client that will fail on any real operation
-                    // This is acceptable since the bridge is disabled
-                    StarknetClient::new("http://127.0.0.1:1".to_string())
-                        .expect("Failed to create even fallback StarknetClient")
+                .or_else(|_| StarknetClient::new("http://127.0.0.1:5050".to_string()))
+                .unwrap_or_else(|e| {
+                    // Log warning but create a minimal stub client
+                    // This is acceptable since the bridge is disabled anyway
+                    tracing::warn!("Could not create Starknet client for disabled bridge: {}. Using stub.", e);
+                    // Create with a URL that won't be used
+                    StarknetClient::new_unchecked("http://disabled.local:1")
                 })
         );
         Self {
@@ -279,6 +281,12 @@ impl BlockchainBridge {
             execution_time: execution_time_ms,
             total_cost: 0,
             error_message: None,
+            proof_hash: None,
+            proof_attestation: None,
+            proof_commitment: None,
+            compressed_proof: None,
+            proof_size_bytes: None,
+            proof_time_ms: None,
         };
 
         // Submit result via JobManager contract
@@ -351,9 +359,10 @@ impl BlockchainBridge {
         }
 
         info!("🔍 Verifying proof on-chain");
-        
+
         // Call ProofVerifier contract
-        let selector = FieldElement::from_hex_be("0x76657269667950726f6f66").unwrap(); // "verifyProof"
+        let selector = FieldElement::from_hex_be("0x76657269667950726f6f66")
+            .expect("hardcoded selector hex is always valid"); // "verifyProof"
         let is_valid = self.client
             .call_contract(
                 self.proof_verifier_address,
@@ -761,12 +770,13 @@ impl BlockchainBridge {
             creds.account_address,
         ).await.context("Failed to distribute batch rewards")?;
 
-        info!("✅ Rewards distributed for {} jobs: tx {:#x}", job_ids.len(), tx_hash);
+        let job_count = job_ids.len();
+        info!("✅ Rewards distributed for {} jobs: tx {:#x}", job_count, tx_hash);
 
         Ok(BatchSubmissionResult {
             transaction_hash: tx_hash,
             job_ids,
-            success_count: job_ids.len(),
+            success_count: job_count,
             failed_count: 0,
             errors: vec![],
         })
