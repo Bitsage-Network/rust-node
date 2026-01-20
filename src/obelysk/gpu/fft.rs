@@ -14,21 +14,34 @@
 // - Large FFTs (>16K): GPU provides significant speedup
 // - Memory transfer is the main bottleneck for moderate sizes
 
-use anyhow::{Result, anyhow};
+use anyhow::Result;
+#[cfg(feature = "cuda")]
+use anyhow::Context;
 use tracing::info;
 
 #[cfg(feature = "cuda")]
 use cudarc::driver::*;
 #[cfg(feature = "cuda")]
 use cudarc::nvrtc::compile_ptx;
+#[cfg(feature = "cuda")]
+use std::collections::HashMap;
 
 use crate::obelysk::field::M31;
 
-/// Threshold below which CPU is faster
-const GPU_FFT_THRESHOLD: usize = 1 << 14; // 16K elements
+/// Bit-reverse an index for FFT permutation
+#[inline]
+fn bit_reverse(mut x: usize, log_n: usize) -> usize {
+    let mut result = 0;
+    for _ in 0..log_n {
+        result = (result << 1) | (x & 1);
+        x >>= 1;
+    }
+    result
+}
 
-/// Maximum cached twiddle size
-const MAX_CACHED_TWIDDLES: u32 = 24; // Up to 2^24 = 16M elements
+/// Threshold below which CPU is faster
+#[cfg(feature = "cuda")]
+const GPU_FFT_THRESHOLD: usize = 1 << 14; // 16K elements
 
 /// GPU FFT executor
 #[cfg(feature = "cuda")]
@@ -196,14 +209,109 @@ impl GpuFft {
         Ok(result)
     }
     
-    /// CPU fallback for small FFTs
-    fn cpu_fft(&self, input: &[M31], _twiddles: &[M31]) -> Vec<M31> {
-        // Simple placeholder - in production, call Stwo's CPU FFT
-        input.to_vec()
+    /// CPU fallback for small FFTs - implements Cooley-Tukey Circle FFT over M31
+    fn cpu_fft(&self, input: &[M31], twiddles: &[M31]) -> Vec<M31> {
+        let n = input.len();
+        if n <= 1 {
+            return input.to_vec();
+        }
+
+        let log_n = (n as f64).log2() as usize;
+        let mut data = input.to_vec();
+
+        // Bit-reversal permutation
+        for i in 0..n {
+            let j = bit_reverse(i, log_n);
+            if i < j {
+                data.swap(i, j);
+            }
+        }
+
+        // Cooley-Tukey FFT butterfly operations
+        for layer in 0..log_n {
+            let half_block = 1 << layer;
+            let block_size = half_block << 1;
+            let twiddle_step = n >> (layer + 1);
+
+            for block_start in (0..n).step_by(block_size) {
+                for j in 0..half_block {
+                    let idx0 = block_start + j;
+                    let idx1 = idx0 + half_block;
+                    let twiddle_idx = j * twiddle_step;
+
+                    // Butterfly: (a, b) -> (a + tw*b, a - tw*b)
+                    let twiddle = if twiddle_idx < twiddles.len() {
+                        twiddles[twiddle_idx]
+                    } else {
+                        M31::ONE
+                    };
+
+                    let a = data[idx0];
+                    let b = data[idx1];
+                    let tw_b = b * twiddle;
+
+                    data[idx0] = a + tw_b;
+                    data[idx1] = a - tw_b;
+                }
+            }
+        }
+
+        data
     }
-    
-    fn cpu_ifft(&self, input: &[M31], _itwiddles: &[M31]) -> Vec<M31> {
-        input.to_vec()
+
+    /// CPU fallback for inverse FFT
+    fn cpu_ifft(&self, input: &[M31], itwiddles: &[M31]) -> Vec<M31> {
+        let n = input.len();
+        if n <= 1 {
+            return input.to_vec();
+        }
+
+        let log_n = (n as f64).log2() as usize;
+        let mut data = input.to_vec();
+
+        // Inverse FFT: process layers in reverse order
+        for layer in (0..log_n).rev() {
+            let half_block = 1 << layer;
+            let block_size = half_block << 1;
+            let twiddle_step = n >> (layer + 1);
+
+            for block_start in (0..n).step_by(block_size) {
+                for j in 0..half_block {
+                    let idx0 = block_start + j;
+                    let idx1 = idx0 + half_block;
+                    let twiddle_idx = j * twiddle_step;
+
+                    let itwiddle = if twiddle_idx < itwiddles.len() {
+                        itwiddles[twiddle_idx]
+                    } else {
+                        M31::ONE
+                    };
+
+                    let a = data[idx0];
+                    let b = data[idx1];
+
+                    // Inverse butterfly
+                    data[idx0] = a + b;
+                    data[idx1] = (a - b) * itwiddle;
+                }
+            }
+        }
+
+        // Bit-reversal permutation
+        for i in 0..n {
+            let j = bit_reverse(i, log_n);
+            if i < j {
+                data.swap(i, j);
+            }
+        }
+
+        // Scale by 1/n (in M31, this is n^{-1} mod p)
+        let n_inv = M31::from_u32(n as u32).inverse().unwrap_or(M31::ONE);
+        for elem in &mut data {
+            *elem = *elem * n_inv;
+        }
+
+        data
     }
     
     /// Print performance statistics
@@ -228,7 +336,7 @@ impl GpuFft {
     }
 }
 
-// Stub implementation when CUDA is not available
+// CPU-only implementation when CUDA is not available
 #[cfg(not(feature = "cuda"))]
 pub struct GpuFft {
     pub stats: FftStats,
@@ -237,20 +345,150 @@ pub struct GpuFft {
 #[cfg(not(feature = "cuda"))]
 impl GpuFft {
     pub fn new() -> Result<Self> {
-        Err(anyhow!("CUDA support not compiled in. Build with --features cuda"))
+        info!("CUDA not available, using CPU-only FFT");
+        Ok(Self {
+            stats: FftStats::default(),
+        })
     }
-    
-    pub fn fft(&mut self, input: &[M31], _twiddles: &[M31]) -> Result<Vec<M31>> {
-        Ok(input.to_vec())
+
+    pub fn fft(&mut self, input: &[M31], twiddles: &[M31]) -> Result<Vec<M31>> {
+        self.stats.forward_fft_calls += 1;
+        self.stats.cpu_fallback_calls += 1;
+        self.stats.total_elements_processed += input.len() as u64;
+        Ok(cpu_fft_impl(input, twiddles))
     }
-    
-    pub fn ifft(&mut self, input: &[M31], _itwiddles: &[M31]) -> Result<Vec<M31>> {
-        Ok(input.to_vec())
+
+    pub fn ifft(&mut self, input: &[M31], itwiddles: &[M31]) -> Result<Vec<M31>> {
+        self.stats.inverse_fft_calls += 1;
+        self.stats.cpu_fallback_calls += 1;
+        self.stats.total_elements_processed += input.len() as u64;
+        Ok(cpu_ifft_impl(input, itwiddles))
     }
-    
+
     pub fn print_stats(&self) {
-        info!("GPU FFT not available (compile with --features cuda)");
+        info!(
+            forward_fft_calls = self.stats.forward_fft_calls,
+            inverse_fft_calls = self.stats.inverse_fft_calls,
+            cpu_fallbacks = self.stats.cpu_fallback_calls,
+            total_elements = self.stats.total_elements_processed,
+            "CPU FFT statistics (no GPU)"
+        );
     }
+}
+
+/// Standalone CPU FFT implementation for use when CUDA is not available
+fn cpu_fft_impl(input: &[M31], twiddles: &[M31]) -> Vec<M31> {
+    let n = input.len();
+    if n <= 1 {
+        return input.to_vec();
+    }
+
+    // FFT requires power of 2 size
+    if !n.is_power_of_two() {
+        // Return input unchanged for non-power-of-2 sizes
+        return input.to_vec();
+    }
+
+    let log_n = n.trailing_zeros() as usize;
+    let mut data = input.to_vec();
+
+    // Bit-reversal permutation
+    for i in 0..n {
+        let j = bit_reverse(i, log_n);
+        if i < j {
+            data.swap(i, j);
+        }
+    }
+
+    // Cooley-Tukey FFT butterfly operations
+    for layer in 0..log_n {
+        let half_block = 1 << layer;
+        let block_size = half_block << 1;
+        let twiddle_step = n >> (layer + 1);
+
+        for block_start in (0..n).step_by(block_size) {
+            for j in 0..half_block {
+                let idx0 = block_start + j;
+                let idx1 = idx0 + half_block;
+                let twiddle_idx = j * twiddle_step;
+
+                let twiddle = if twiddle_idx < twiddles.len() {
+                    twiddles[twiddle_idx]
+                } else {
+                    M31::ONE
+                };
+
+                let a = data[idx0];
+                let b = data[idx1];
+                let tw_b = b * twiddle;
+
+                data[idx0] = a + tw_b;
+                data[idx1] = a - tw_b;
+            }
+        }
+    }
+
+    data
+}
+
+/// Standalone CPU inverse FFT implementation
+fn cpu_ifft_impl(input: &[M31], itwiddles: &[M31]) -> Vec<M31> {
+    let n = input.len();
+    if n <= 1 {
+        return input.to_vec();
+    }
+
+    // FFT requires power of 2 size
+    if !n.is_power_of_two() {
+        // Return input unchanged for non-power-of-2 sizes
+        return input.to_vec();
+    }
+
+    let log_n = n.trailing_zeros() as usize;
+    let mut data = input.to_vec();
+
+    // Inverse FFT: process layers in reverse order
+    for layer in (0..log_n).rev() {
+        let half_block = 1 << layer;
+        let block_size = half_block << 1;
+        let twiddle_step = n >> (layer + 1);
+
+        for block_start in (0..n).step_by(block_size) {
+            for j in 0..half_block {
+                let idx0 = block_start + j;
+                let idx1 = idx0 + half_block;
+                let twiddle_idx = j * twiddle_step;
+
+                let itwiddle = if twiddle_idx < itwiddles.len() {
+                    itwiddles[twiddle_idx]
+                } else {
+                    M31::ONE
+                };
+
+                let a = data[idx0];
+                let b = data[idx1];
+
+                data[idx0] = a + b;
+                data[idx1] = (a - b) * itwiddle;
+            }
+        }
+    }
+
+    // Bit-reversal permutation
+    for i in 0..n {
+        let j = bit_reverse(i, log_n);
+        if i < j {
+            data.swap(i, j);
+        }
+    }
+
+    // Scale by 1/n
+    let n_inv = M31::from_u32(n as u32).inverse().unwrap_or(M31::ONE);
+    for elem in &mut data {
+        *elem = *elem * n_inv;
+    }
+
+    data
 }
 
 /// Create a new GPU FFT instance

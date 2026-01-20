@@ -79,6 +79,11 @@ unsafe impl Send for GpuBuffer {}
 unsafe impl Sync for GpuBuffer {}
 
 impl GpuBuffer {
+    /// Get the raw pointer to GPU memory (unsafe operations only)
+    pub fn ptr(&self) -> *mut u8 {
+        self.ptr
+    }
+
     pub fn size(&self) -> usize {
         self.size
     }
@@ -88,19 +93,22 @@ impl GpuBuffer {
     }
 
     /// Create a CPU-side buffer as fallback when no GPU is available
-    pub fn cpu_fallback(size_bytes: usize) -> Self {
+    pub fn cpu_fallback(size_bytes: usize) -> Result<Self> {
         // Allocate on heap for CPU fallback mode
         let layout = std::alloc::Layout::from_size_align(size_bytes, 16)
-            .expect("Invalid allocation layout");
+            .map_err(|e| anyhow::anyhow!("Invalid allocation layout: {}", e))?;
         let ptr = unsafe { std::alloc::alloc_zeroed(layout) };
         if ptr.is_null() {
-            panic!("CPU fallback allocation failed for {} bytes", size_bytes);
+            return Err(anyhow::anyhow!(
+                "CPU fallback allocation failed for {} bytes - out of memory",
+                size_bytes
+            ));
         }
-        Self {
+        Ok(Self {
             ptr,
             size: size_bytes,
             device_id: -1, // -1 indicates CPU
-        }
+        })
     }
 }
 
@@ -166,9 +174,15 @@ impl Clone for GpuBackendType {
     fn clone(&self) -> Self {
         match self {
             #[cfg(feature = "cuda")]
-            GpuBackendType::Cuda(_) => panic!("CudaBackend cannot be cloned - use Arc<GpuBackendType> for shared access"),
+            GpuBackendType::Cuda(_) => {
+                tracing::error!("CudaBackend cannot be cloned - use Arc<GpuBackendType> for shared access. Falling back to CPU.");
+                GpuBackendType::Cpu
+            },
             #[cfg(feature = "rocm")]
-            GpuBackendType::Rocm(_) => panic!("RocmBackend cannot be cloned - use Arc<GpuBackendType> for shared access"),
+            GpuBackendType::Rocm(_) => {
+                tracing::error!("RocmBackend cannot be cloned - use Arc<GpuBackendType> for shared access. Falling back to CPU.");
+                GpuBackendType::Cpu
+            },
             GpuBackendType::Cpu => GpuBackendType::Cpu,
         }
     }

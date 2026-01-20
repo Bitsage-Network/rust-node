@@ -37,9 +37,9 @@
 // └─────────────────────────────────────────────────────────────────────────────┘
 
 use crate::obelysk::elgamal::{
-    Felt252, ECPoint, ElGamalCiphertext, EncryptionProof, KeyPair, EncryptedBalance,
-    encrypt, decrypt_point, derive_public_key, homomorphic_add, homomorphic_sub,
-    create_schnorr_proof, verify_schnorr_proof, generate_randomness, hash_felts,
+    Felt252, ECPoint, ElGamalCiphertext, EncryptionProof, KeyPair,
+    encrypt, homomorphic_add, homomorphic_sub,
+    create_schnorr_proof, generate_randomness, hash_felts,
     reduce_to_curve_order, add_mod_n, mul_mod_n, pedersen_commit,
     CryptoError,
 };
@@ -105,9 +105,14 @@ impl AssetConfig {
         Self::new(AssetId::STRK, "Starknet Token", "STRK", 18)
     }
 
-    /// Standard WBTC config
+    /// Standard BTC config (native Bitcoin on Starknet)
+    pub fn btc() -> Self {
+        Self::new(AssetId::BTC, "Bitcoin", "BTC", 8)
+    }
+
+    /// Alias for backwards compatibility
     pub fn wbtc() -> Self {
-        Self::new(AssetId::WBTC, "Wrapped Bitcoin", "WBTC", 8)
+        Self::btc()
     }
 
     /// Standard ETH config
@@ -295,7 +300,7 @@ impl MultiAssetManager {
         configs.insert(AssetId::SAGE, AssetConfig::sage());
         configs.insert(AssetId::USDC, AssetConfig::usdc());
         configs.insert(AssetId::STRK, AssetConfig::strk());
-        configs.insert(AssetId::WBTC, AssetConfig::wbtc());
+        configs.insert(AssetId::BTC, AssetConfig::btc());
         configs.insert(AssetId::ETH, AssetConfig::eth());
 
         Self {
@@ -616,6 +621,11 @@ impl MultiAssetManager {
 
         Ok(())
     }
+
+    /// Get the number of pending transfers
+    pub fn pending_transfers_count(&self) -> usize {
+        self.pending_transfers.read().len()
+    }
 }
 
 impl Default for MultiAssetManager {
@@ -717,7 +727,7 @@ pub fn verify_cross_asset_ratio_proof(
     rate_numerator: u64,
     rate_denominator: u64,
 ) -> bool {
-    let g = ECPoint::generator();
+    let _g = ECPoint::generator();
 
     // Recompute challenge
     let expected_challenge = hash_felts(&[

@@ -1,0 +1,211 @@
+[
+  {
+    "type": "function",
+    "name": "stake",
+    "inputs": [
+      {
+        "name": "worker_id",
+        "type": "core::felt252"
+      },
+      {
+        "name": "amount",
+        "type": "core::integer::u256"
+      },
+      {
+        "name": "gpu_tier",
+        "type": "core::integer::u8"
+      },
+      {
+        "name": "has_tee",
+        "type": "core::bool"
+      }
+    ],
+    "outputs": [],
+    "state_mutability": "external"
+  },
+  {
+    "type": "function",
+    "name": "increase_stake",
+    "inputs": [
+      {
+        "name": "worker_id",
+        "type": "core::felt252"
+      },
+      {
+        "name": "additional_amount",
+        "type": "core::integer::u256"
+      }
+    ],
+    "outputs": [],
+    "state_mutability": "external"
+  },
+  {
+    "type": "function",
+    "name": "initiate_unstake",
+    "inputs": [
+      {
+        "name": "worker_id",
+        "type": "core::felt252"
+      }
+    ],
+    "outputs": [],
+    "state_mutability": "external"
+  },
+  {
+    "type": "function",
+    "name": "complete_unstake",
+    "inputs": [
+      {
+        "name": "worker_id",
+        "type": "core::felt252"
+      }
+    ],
+    "outputs": [],
+    "state_mutability": "external"
+  },
+  {
+    "type": "function",
+    "name": "slash",
+    "inputs": [
+      {
+        "name": "worker_id",
+        "type": "core::felt252"
+      },
+      {
+        "name": "slash_percentage_bps",
+        "type": "core::integer::u16"
+      },
+      {
+        "name": "reason",
+        "type": "core::felt252"
+      },
+      {
+        "name": "challenger",
+        "type": "core::starknet::contract_address::ContractAddress"
+      }
+    ],
+    "outputs": [],
+    "state_mutability": "external"
+  },
+  {
+    "type": "function",
+    "name": "get_stake",
+    "inputs": [
+      {
+        "name": "worker_id",
+        "type": "core::felt252"
+      }
+    ],
+    "outputs": [
+      {
+        "type": "(core::starknet::contract_address::ContractAddress, core::integer::u256, core::integer::u256, core::integer::u64, core::integer::u8, core::bool, core::integer::u8, core::integer::u64)"
+      }
+    ],
+    "state_mutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "get_min_stake",
+    "inputs": [
+      {
+        "name": "gpu_tier",
+        "type": "core::integer::u8"
+      },
+      {
+        "name": "has_tee",
+        "type": "core::bool"
+      },
+      {
+        "name": "reputation",
+        "type": "core::integer::u64"
+      }
+    ],
+    "outputs": [
+      {
+        "type": "core::integer::u256"
+      }
+    ],
+    "state_mutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "get_network_stats",
+    "inputs": [],
+    "outputs": [
+      {
+        "type": "(core::integer::u256, core::integer::u64, core::integer::u256)"
+      }
+    ],
+    "state_mutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "update_reputation",
+    "inputs": [
+      {
+        "name": "worker_id",
+        "type": "core::felt252"
+      },
+      {
+        "name": "new_reputation",
+        "type": "core::integer::u64"
+      }
+    ],
+    "outputs": [],
+    "state_mutability": "external"
+  },
+  {
+    "type": "function",
+    "name": "get_worker_address",
+    "inputs": [
+      {
+        "name": "worker_id",
+        "type": "core::felt252"
+      }
+    ],
+    "outputs": [
+      {
+        "type": "core::starknet::contract_address::ContractAddress"
+      }
+    ],
+    "state_mutability": "view"
+  },
+  {
+    "type": "struct",
+    "name": "StakeInfo",
+    "members": [
+      {
+        "name": "owner",
+        "type": "core::starknet::contract_address::ContractAddress"
+      },
+      {
+        "name": "amount",
+        "type": "core::integer::u256"
+      },
+      {
+        "name": "locked_amount",
+        "type": "core::integer::u256"
+      },
+      {
+        "name": "stake_time",
+        "type": "core::integer::u64"
+      },
+      {
+        "name": "gpu_tier",
+        "type": "core::integer::u8"
+      },
+      {
+        "name": "has_tee",
+        "type": "core::bool"
+      },
+      {
+        "name": "status",
+        "type": "core::integer::u8"
+      },
+      {
+        "name": "reputation",
+        "type": "core::integer::u64"
+      }
+    ]
+  }
+]

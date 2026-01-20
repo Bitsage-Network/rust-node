@@ -1230,7 +1230,7 @@ impl AmlMonitor {
     /// Build risk factors list
     fn build_risk_factors(
         &self,
-        tx: &AmlTransaction,
+        _tx: &AmlTransaction,
         components: &RiskComponents,
         patterns: &[PatternDetection],
     ) -> Vec<RiskFactor> {
@@ -1399,7 +1399,7 @@ impl AmlMonitor {
         let mut alerts = self.alerts.write();
         for user_alerts in alerts.values_mut() {
             if let Some(alert) = user_alerts.iter_mut().find(|a| a.alert_id == *alert_id) {
-                let old_status = alert.status;
+                let _old_status = alert.status;
                 alert.status = new_status;
                 alert.updated_at = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -1536,7 +1536,7 @@ impl ComplianceIntegration {
     /// Verify that amount is below CTR threshold using ZK range proof
     /// (Delegates to existing range compliance proof system)
     pub fn verify_amount_below_threshold_zk(
-        ciphertext: &ElGamalCiphertext,
+        _ciphertext: &ElGamalCiphertext,
         range_proof_verified: bool,
         verified_upper_bound: Option<u64>,
         threshold: u64,
@@ -1651,6 +1651,11 @@ impl StreamingMonitor {
     /// Get the underlying monitor
     pub fn monitor(&self) -> &Arc<AmlMonitor> {
         &self.monitor
+    }
+
+    /// Get the number of pending transactions
+    pub fn pending_count(&self) -> usize {
+        self.pending.read().len()
     }
 }
 
@@ -1978,7 +1983,7 @@ mod tests {
 
     #[test]
     fn test_dormant_account_detection() {
-        let mut baseline = UserBehaviorBaseline::new(Felt252::from_u64(1), 1000);
+        let baseline = UserBehaviorBaseline::new(Felt252::from_u64(1), 1000);
 
         // 90 days = 7776000 seconds
         assert!(!baseline.is_dormant(1000 + 86400 * 30)); // 30 days - not dormant

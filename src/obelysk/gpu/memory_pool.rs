@@ -48,7 +48,7 @@ const DEFAULT_MAX_POOL_MEMORY: usize = 8 * 1024 * 1024 * 1024;
 const NUM_SIZE_CLASSES: usize = 15; // 64KB, 128KB, 256KB, ... 512MB, 1GB
 
 /// Buffer entry in the pool
-struct PooledBuffer {
+pub struct PooledBuffer {
     /// The actual GPU buffer
     buffer: GpuBuffer,
     /// Size class this buffer belongs to
@@ -59,6 +59,18 @@ struct PooledBuffer {
     id: u64,
     /// Whether this buffer is currently in use
     in_use: bool,
+}
+
+impl PooledBuffer {
+    /// Get the underlying GPU buffer reference
+    pub fn gpu_buffer(&self) -> &GpuBuffer {
+        &self.buffer
+    }
+
+    /// Get the size class
+    pub fn size_class(&self) -> usize {
+        self.size_class
+    }
 }
 
 /// Statistics for memory pool monitoring
@@ -382,7 +394,7 @@ impl GpuMemoryPool {
         #[cfg(not(feature = "cuda"))]
         {
             // CPU fallback
-            Ok(GpuBuffer::cpu_fallback(size))
+            GpuBuffer::cpu_fallback(size)
         }
     }
 
@@ -458,6 +470,11 @@ impl GpuMemoryPool {
             counts.push((self.class_to_size(class), available));
         }
         counts
+    }
+
+    /// Get the device ID this pool manages
+    pub fn device_id(&self) -> i32 {
+        self.device_id
     }
 }
 

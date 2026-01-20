@@ -25,6 +25,12 @@ pub mod network;
 // Faucet contract client for testnet token distribution
 pub mod faucet_client;
 
+// Fraud proof contract client for validator slashing
+pub mod fraud_proof_client;
+
+// Account manager for transaction signing
+pub mod account_manager;
+
 pub use proof_serializer::{CairoSerializedProof, ProofSerializer};
 pub use starknet_client::{
     StarknetClient, StarknetClientConfig,
@@ -37,7 +43,7 @@ pub use proof_compression::{
     CompressionStats, BatchCompressor, OnChainCompressedProof,
 };
 pub use staking_client::{
-    StakingClient, StakingClientConfig, GpuTier, WorkerStake,
+    StakingClient, StakingClientConfig, GpuTier, WorkerStake, StakeStatus, WorkerTier,
 };
 pub use reputation_client::{
     ReputationClient, ReputationClientConfig, ReputationScore,
@@ -50,6 +56,15 @@ pub use network::{
 // Export faucet types
 pub use faucet_client::{
     FaucetClient, FaucetClientConfig, FaucetStatus, ClaimInfo, ClaimResult, FaucetConfig,
+};
+// Export fraud proof types
+pub use fraud_proof_client::{
+    FraudProofClient, FraudProofClientTrait, FraudProofConfig,
+    Challenge, ChallengeStatus, VerificationMethod, FraudProofStats,
+};
+// Export account manager types
+pub use account_manager::{
+    AccountManager, AccountManagerConfig, Keystore,
 };
 // Export verifier optimization types
 pub use verifier_optimization::{

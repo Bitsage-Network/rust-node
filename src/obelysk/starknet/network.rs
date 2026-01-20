@@ -29,9 +29,9 @@ impl StarknetNetwork {
     /// Get the default RPC URL for this network
     pub fn default_rpc_url(&self) -> &'static str {
         match self {
-            StarknetNetwork::Mainnet => "https://rpc.starknet.lava.build",
-            StarknetNetwork::Sepolia => "https://rpc.starknet-testnet.lava.build",
-            StarknetNetwork::Goerli => "https://rpc.starknet-testnet.lava.build", // Goerli deprecated, use Sepolia
+            StarknetNetwork::Mainnet => "https://starknet-mainnet-rpc.publicnode.com",
+            StarknetNetwork::Sepolia => "https://api.cartridge.gg/x/starknet/sepolia",
+            StarknetNetwork::Goerli => "https://api.cartridge.gg/x/starknet/sepolia", // Goerli deprecated, use Sepolia
             StarknetNetwork::Devnet => "http://localhost:5050",
             StarknetNetwork::Custom => "",
         }
@@ -351,43 +351,194 @@ pub struct NetworkContracts {
     pub job_manager: String,
     /// CDC pool contract address
     pub cdc_pool: String,
+    /// Payment router contract address
+    pub payment_router: String,
     /// Faucet contract address (testnet only)
     pub faucet: Option<String>,
+    /// OptimisticTEE contract address
+    pub optimistic_tee: String,
+    /// ProofVerifier contract address
+    pub proof_verifier: String,
+    /// ValidatorRegistry contract address
+    pub validator_registry: String,
+    /// Collateral contract address
+    pub collateral: String,
+    /// Escrow contract address
+    pub escrow: String,
+    /// FeeManager contract address
+    pub fee_manager: String,
+    /// FraudProof contract address
+    pub fraud_proof: String,
+    /// Gamification contract address
+    pub gamification: String,
+    /// PrivacyRouter contract address
+    pub privacy_router: String,
+    /// StwoVerifier contract address
+    pub stwo_verifier: String,
+    /// MeteredBilling contract address
+    pub metered_billing: String,
+    /// ProofGatedPayment contract address
+    pub proof_gated_payment: String,
+    /// ObelyskProverRegistry contract address
+    pub prover_registry: String,
+    /// WorkerStaking contract address
+    pub worker_staking: String,
+    /// WorkerPrivacyHelper contract address
+    pub worker_privacy_helper: String,
+    /// OracleWrapper contract address
+    pub oracle_wrapper: String,
+    /// RewardVesting contract address
+    pub reward_vesting: String,
+    /// BurnManager contract address
+    pub burn_manager: String,
+    /// LinearVestingWithCliff contract address
+    pub linear_vesting: String,
+    /// MilestoneVesting contract address
+    pub milestone_vesting: String,
+    /// TreasuryTimelock contract address
+    pub treasury_timelock: String,
+    /// GovernanceTreasury contract address
+    pub governance_treasury: String,
 }
 
 impl NetworkContracts {
     /// Get contracts for a specific network
     pub fn for_network(network: StarknetNetwork) -> Self {
         match network {
-            StarknetNetwork::Mainnet => Self::mainnet(),
+            StarknetNetwork::Mainnet => {
+                let contracts = Self::mainnet();
+                // Validate mainnet contracts are properly configured
+                if let Err(e) = contracts.validate_for_production() {
+                    panic!("CRITICAL: Mainnet contract addresses not configured: {}", e);
+                }
+                contracts
+            },
             StarknetNetwork::Sepolia => Self::sepolia(),
             _ => Self::default(),
         }
     }
 
+    /// Validate that contract addresses are properly configured for production
+    pub fn validate_for_production(&self) -> Result<(), String> {
+        let mut uninitialized = Vec::new();
+
+        // Check critical contracts
+        if self.sage_token == "0x0" || self.sage_token.is_empty() {
+            uninitialized.push("sage_token");
+        }
+        if self.prover_staking == "0x0" || self.prover_staking.is_empty() {
+            uninitialized.push("prover_staking");
+        }
+        if self.reputation_manager == "0x0" || self.reputation_manager.is_empty() {
+            uninitialized.push("reputation_manager");
+        }
+        if self.job_manager == "0x0" || self.job_manager.is_empty() {
+            uninitialized.push("job_manager");
+        }
+        if self.payment_router == "0x0" || self.payment_router.is_empty() {
+            uninitialized.push("payment_router");
+        }
+        if self.fraud_proof == "0x0" || self.fraud_proof.is_empty() {
+            uninitialized.push("fraud_proof");
+        }
+
+        if !uninitialized.is_empty() {
+            return Err(format!(
+                "The following critical contracts have uninitialized addresses (0x0): {}. \
+                Deploy contracts to mainnet and update addresses before launching.",
+                uninitialized.join(", ")
+            ));
+        }
+
+        Ok(())
+    }
+
     /// Mainnet contract addresses
+    ///
+    /// Note: These are placeholder addresses. Replace with actual deployed
+    /// contract addresses after mainnet deployment. Attempting to use these
+    /// zero addresses will result in transaction failures.
     pub fn mainnet() -> Self {
         Self {
-            // TODO: Replace with actual mainnet addresses after deployment
+            // MAINNET: Update these addresses after contract deployment
             sage_token: "0x0".to_string(),
             prover_staking: "0x0".to_string(),
             reputation_manager: "0x0".to_string(),
             job_manager: "0x0".to_string(),
             cdc_pool: "0x0".to_string(),
+            payment_router: "0x0".to_string(),
             faucet: None,
+            optimistic_tee: "0x0".to_string(),
+            proof_verifier: "0x0".to_string(),
+            validator_registry: "0x0".to_string(),
+            collateral: "0x0".to_string(),
+            escrow: "0x0".to_string(),
+            fee_manager: "0x0".to_string(),
+            fraud_proof: "0x0".to_string(),
+            gamification: "0x0".to_string(),
+            privacy_router: "0x0".to_string(),
+            stwo_verifier: "0x0".to_string(),
+            metered_billing: "0x0".to_string(),
+            proof_gated_payment: "0x0".to_string(),
+            prover_registry: "0x0".to_string(),
+            worker_staking: "0x0".to_string(),
+            worker_privacy_helper: "0x0".to_string(),
+            oracle_wrapper: "0x0".to_string(),
+            reward_vesting: "0x0".to_string(),
+            burn_manager: "0x0".to_string(),
+            linear_vesting: "0x0".to_string(),
+            milestone_vesting: "0x0".to_string(),
+            treasury_timelock: "0x0".to_string(),
+            governance_treasury: "0x0".to_string(),
         }
     }
 
-    /// Sepolia testnet contract addresses
+    /// Sepolia testnet contract addresses (deployed 2025-12-27)
+    /// All 27 contracts deployed via sncast with Cartridge RPC
     pub fn sepolia() -> Self {
         Self {
-            // TODO: Replace with actual Sepolia addresses after deployment
-            sage_token: "0x0".to_string(),
-            prover_staking: "0x0".to_string(),
-            reputation_manager: "0x0".to_string(),
-            job_manager: "0x00bf025663b8a7c7e43393f082b10afe66bd9ddb06fb5e521e3adbcf693094bd".to_string(),
-            cdc_pool: "0x0".to_string(),
-            faucet: Some("0x0".to_string()),
+            // Core contracts
+            sage_token: "0x04321b7282ae6aa354988eed57f2ff851314af8524de8b1f681a128003cc4ea5".to_string(),
+            prover_staking: "0x0165fe12b09dd5e6b692cbf59f9c3ea0af30a2616f248c150357b07b967039da".to_string(),
+            reputation_manager: "0x019c05a8f648c835e66e98c700b628d14ed4249e5e60e32c7f779d38da90e9d9".to_string(),
+            job_manager: "0x0534a8f5cc1399b368b5be211df25e370f4a74d3d5b2d040f9d5b69981b069ed".to_string(),
+            cdc_pool: "0x012c8ab3fad97954eafbf99ab9d76a9c8e85dd0f6b38139d12d3c5e3f14f950b".to_string(),
+            payment_router: "0x006bfcc028c9976c18f8e22c2472df36d8d7848e7b55b814a5f15d339b97e1fe".to_string(),
+            faucet: Some("0x07943ad334da99ab3dd138ff14d2045a7d962f1a426a4dd909fda026f37acf9f".to_string()),
+
+            // Obelysk privacy/TEE contracts
+            optimistic_tee: "0x04ea542ccad82e75681f438e1667baaeaca5285791dc2449e0f9f3df3e998b49".to_string(),
+            proof_verifier: "0x06c27c897108f20afbd045e561e465e0843d85e84fe7dfd55f910ee75df6385a".to_string(),
+            validator_registry: "0x0252d13615dd74b70c9d653250fe8baa66130f683783c542c582dbc9709ee2cd".to_string(),
+            privacy_router: "0x0051e114ec3d524f203900c78e5217f23de51e29d6a6ecabb6dc92fb8ccca6e0".to_string(),
+            stwo_verifier: "0x00555555e154e28a596a59f98f857ec85f6dc7038f8d18dd1a08364d8e76dd47".to_string(),
+            prover_registry: "0x005d46ac3e32242c2681a5171551abb773464812b77eec7e52d60ec612e9bf3a".to_string(),
+            worker_staking: "0x064df40ab00145394de98676d0934e49c0f436c4589d4d35ffa720e45c3de7e7".to_string(),
+            worker_privacy_helper: "0x06219e1e40b7a07c0a07fa38e4c19b661943d2f410839ddfe5e3bf7376206e47".to_string(),
+
+            // Economics contracts
+            collateral: "0x01384e775b5b19bd8756d5a77c7d9e99a739b35523915a1ad0b4c3c4d0b00f7c".to_string(),
+            escrow: "0x045aa77cfaf3a902d879f3a26165922a423f5902c9d1647dbfe0274328930d4f".to_string(),
+            fee_manager: "0x0762a276d38f66b6fe8cf3eb140247624f02bb87e32917dffbad197c73f3fb56".to_string(),
+            reward_vesting: "0x07bb26a7d6d97e8292af9bb14244afbaaf2d722140111b8cced185bbde1a026d".to_string(),
+
+            // Game mechanics contracts
+            fraud_proof: "0x0249179135c4d35f6a199de0fb91a1fbe29d5798e862bc14a108f1da8ec42acf".to_string(),
+            gamification: "0x047402be0797cda868f2601f6234f56fa814e51957fa1981989ffcbf471e81e4".to_string(),
+
+            // Payment contracts
+            metered_billing: "0x058b10cf0a1369fca1a90192d5b58a757a30a93af2ce5c3af0c16001fb57bb4b".to_string(),
+            proof_gated_payment: "0x06f153aff8835202fb3183ddf2edde40b1ca0360cdf20611649f05a16ca04cc7".to_string(),
+
+            // Oracle integration
+            oracle_wrapper: "0x0020ba92a5df4c7719decbc8e43d5475059311b0b8bb2cdd623f5f29d61f0f2d".to_string(),
+
+            // Vesting & governance contracts
+            burn_manager: "0x04d11f83401087bc1813ae4f69ecb4e7c2477829b740d6a5ae900e9e81df1933".to_string(),
+            linear_vesting: "0x06df34218f99b8bd19b0cdec2fcef7ca7bc07218799aed0d72f2078b9a68e6ba".to_string(),
+            milestone_vesting: "0x04ae08af901c3952bf97252ad888b9138c930da780a66ec3a87b192413e95dd5".to_string(),
+            treasury_timelock: "0x03246a3d6f51c08033a7030f795088f84c67c5ed8f7790405a4e192f0c59ff79".to_string(),
+            governance_treasury: "0x00f8718089716c532f084326a707678ae1b159386613e86ced48c53fa24c8a3b".to_string(),
         }
     }
 
@@ -408,7 +559,30 @@ impl Default for NetworkContracts {
             reputation_manager: "0x0".to_string(),
             job_manager: "0x0".to_string(),
             cdc_pool: "0x0".to_string(),
+            payment_router: "0x0".to_string(),
             faucet: None,
+            optimistic_tee: "0x0".to_string(),
+            proof_verifier: "0x0".to_string(),
+            validator_registry: "0x0".to_string(),
+            collateral: "0x0".to_string(),
+            escrow: "0x0".to_string(),
+            fee_manager: "0x0".to_string(),
+            fraud_proof: "0x0".to_string(),
+            gamification: "0x0".to_string(),
+            privacy_router: "0x0".to_string(),
+            stwo_verifier: "0x0".to_string(),
+            metered_billing: "0x0".to_string(),
+            proof_gated_payment: "0x0".to_string(),
+            prover_registry: "0x0".to_string(),
+            worker_staking: "0x0".to_string(),
+            worker_privacy_helper: "0x0".to_string(),
+            oracle_wrapper: "0x0".to_string(),
+            reward_vesting: "0x0".to_string(),
+            burn_manager: "0x0".to_string(),
+            linear_vesting: "0x0".to_string(),
+            milestone_vesting: "0x0".to_string(),
+            treasury_timelock: "0x0".to_string(),
+            governance_treasury: "0x0".to_string(),
         }
     }
 }
@@ -426,10 +600,11 @@ mod tests {
 
     #[test]
     fn test_network_rpc_urls() {
-        // Lava mainnet uses rpc.starknet.lava.build (no "mainnet" in URL)
+        // Mainnet uses Lava: rpc.starknet.lava.build
         assert!(StarknetNetwork::Mainnet.default_rpc_url().contains("starknet.lava"));
-        // Lava sepolia uses rpc.starknet-testnet.lava.build
-        assert!(StarknetNetwork::Sepolia.default_rpc_url().contains("testnet"));
+        // Sepolia uses Cartridge: api.cartridge.gg/x/starknet/sepolia
+        assert!(StarknetNetwork::Sepolia.default_rpc_url().contains("sepolia"));
+        assert!(StarknetNetwork::Sepolia.default_rpc_url().contains("cartridge"));
     }
 
     #[tokio::test]

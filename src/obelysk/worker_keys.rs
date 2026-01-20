@@ -17,6 +17,11 @@ use std::path::PathBuf;
 use std::fs;
 use sha3::{Digest, Keccak256};
 use tracing::{info, debug};
+use aes_gcm::{
+    aead::{Aead, KeyInit, OsRng},
+    Aes256Gcm, Nonce,
+    aead::rand_core::RngCore,
+};
 
 use super::elgamal::{
     Felt252, ECPoint, KeyPair, ElGamalCiphertext,
@@ -212,6 +217,36 @@ impl WorkerKeyManager {
     pub fn keypair(&self) -> &KeyPair {
         &self.keypair
     }
+
+    /// Load from file or generate new keypair if file doesn't exist
+    ///
+    /// This is the recommended way to initialize a worker's privacy keys.
+    /// If a keystore file exists at the given path, it will be loaded.
+    /// Otherwise, a new keypair is generated and persisted.
+    pub fn load_or_generate(
+        worker_id: &str,
+        secret: &[u8],
+        path: &PathBuf,
+    ) -> Result<Self> {
+        // Try to load existing keystore
+        let encryption_key = derive_file_encryption_key(worker_id, &hex::encode(secret));
+
+        match Self::load_from_file(path, &encryption_key) {
+            Ok(manager) => {
+                info!("Loaded existing privacy keypair for worker {}", worker_id);
+                Ok(manager)
+            }
+            Err(e) => {
+                debug!("Could not load keystore ({}), generating new keypair", e);
+                Self::new_from_secret(worker_id, secret, Some(path.clone()))
+            }
+        }
+    }
+
+    /// Check if this manager is running in TEE mode
+    pub fn is_tee_mode(&self) -> bool {
+        self.tee_mode
+    }
 }
 
 // =============================================================================
@@ -276,54 +311,70 @@ fn derive_file_encryption_key(worker_id: &str, secret_hex: &str) -> [u8; 32] {
 }
 
 // =============================================================================
-// File Encryption (simple XOR for demo, use AES-GCM in production)
+// File Encryption (AES-256-GCM with authenticated encryption)
 // =============================================================================
 
+/// Encrypt key file using AES-256-GCM (authenticated encryption)
+///
+/// Format: [12-byte nonce][ciphertext][16-byte auth tag]
+///
+/// SECURITY:
+/// - Uses AES-256-GCM (AEAD) for authenticated encryption
+/// - Nonce generated via OS CSPRNG (OsRng)
+/// - Auth tag prevents tampering
 fn encrypt_key_file(data: &[u8], key: &[u8; 32]) -> Result<Vec<u8>> {
-    // In production, use AES-GCM from aes-gcm crate
-    // This is a simple XOR for demonstration
-    let mut encrypted = vec![0u8; data.len() + 32]; // Include salt
+    // Generate random 12-byte nonce using secure OS RNG
+    let mut nonce_bytes = [0u8; 12];
+    OsRng.fill_bytes(&mut nonce_bytes);
+    let nonce = Nonce::from_slice(&nonce_bytes);
 
-    // Generate random salt
-    let salt: [u8; 32] = rand::random();
-    encrypted[0..32].copy_from_slice(&salt);
+    // Create cipher
+    let cipher = Aes256Gcm::new_from_slice(key)
+        .map_err(|e| anyhow!("Failed to create cipher: {}", e))?;
 
-    // Derive encryption stream from key + salt
-    let mut hasher = Keccak256::new();
-    hasher.update(key);
-    hasher.update(&salt);
-    let stream: [u8; 32] = hasher.finalize().into();
+    // Encrypt with authentication
+    let ciphertext = cipher.encrypt(nonce, data)
+        .map_err(|e| anyhow!("Encryption failed: {}", e))?;
 
-    // XOR encrypt (repeat stream as needed)
-    for (i, byte) in data.iter().enumerate() {
-        encrypted[32 + i] = byte ^ stream[i % 32];
-    }
+    // Output: [12-byte nonce][ciphertext + 16-byte auth tag]
+    let mut output = Vec::with_capacity(12 + ciphertext.len());
+    output.extend_from_slice(&nonce_bytes);
+    output.extend_from_slice(&ciphertext);
 
-    Ok(encrypted)
+    Ok(output)
 }
 
+/// Decrypt key file using AES-256-GCM
+///
+/// SECURITY:
+/// - Verifies auth tag before returning plaintext
+/// - Prevents tampering and bit-flipping attacks
 fn decrypt_key_file(encrypted: &[u8], key: &[u8]) -> Result<Vec<u8>> {
-    if encrypted.len() < 32 {
-        return Err(anyhow!("Invalid encrypted file"));
+    // Minimum size: 12 (nonce) + 16 (auth tag) = 28 bytes
+    if encrypted.len() < 28 {
+        return Err(anyhow!("Invalid encrypted file: too short"));
     }
 
-    // Extract salt
-    let salt = &encrypted[0..32];
-    let ciphertext = &encrypted[32..];
-
-    // Derive decryption stream
-    let mut hasher = Keccak256::new();
-    hasher.update(key);
-    hasher.update(salt);
-    let stream: [u8; 32] = hasher.finalize().into();
-
-    // XOR decrypt
-    let mut decrypted = Vec::with_capacity(ciphertext.len());
-    for (i, byte) in ciphertext.iter().enumerate() {
-        decrypted.push(byte ^ stream[i % 32]);
+    // Key must be 32 bytes for AES-256
+    if key.len() != 32 {
+        return Err(anyhow!("Invalid key length: expected 32, got {}", key.len()));
     }
 
-    Ok(decrypted)
+    // Extract nonce and ciphertext
+    let nonce = Nonce::from_slice(&encrypted[0..12]);
+    let ciphertext = &encrypted[12..];
+
+    // Create cipher
+    let key_array: [u8; 32] = key.try_into()
+        .map_err(|_| anyhow!("Invalid key length"))?;
+    let cipher = Aes256Gcm::new_from_slice(&key_array)
+        .map_err(|e| anyhow!("Failed to create cipher: {}", e))?;
+
+    // Decrypt and verify authentication tag
+    let plaintext = cipher.decrypt(nonce, ciphertext)
+        .map_err(|_| anyhow!("Decryption failed: authentication failed (file may be corrupted or tampered)"))?;
+
+    Ok(plaintext)
 }
 
 // =============================================================================
@@ -470,13 +521,48 @@ mod tests {
 
     #[test]
     fn test_file_encryption_roundtrip() {
-        let data = b"secret key data here";
-        let key = [0u8; 32];
+        let data = b"secret key data here - testing AES-256-GCM encryption";
+        let key = [42u8; 32]; // Use non-zero key for realistic test
 
         let encrypted = encrypt_key_file(data, &key).unwrap();
-        let decrypted = decrypt_key_file(&encrypted, &key).unwrap();
 
+        // Verify format: [12-byte nonce][ciphertext][16-byte auth tag]
+        // Minimum size = 12 + data.len() + 16
+        assert!(encrypted.len() >= 28 + data.len());
+
+        // Verify decryption works
+        let decrypted = decrypt_key_file(&encrypted, &key).unwrap();
         assert_eq!(data.as_slice(), decrypted.as_slice());
+    }
+
+    #[test]
+    fn test_file_encryption_tamper_detection() {
+        let data = b"secret key data here";
+        let key = [42u8; 32];
+
+        let mut encrypted = encrypt_key_file(data, &key).unwrap();
+
+        // Tamper with the ciphertext (flip a bit in the encrypted data)
+        if encrypted.len() > 20 {
+            encrypted[20] ^= 0x01;
+        }
+
+        // Decryption should fail due to auth tag mismatch
+        let result = decrypt_key_file(&encrypted, &key);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_file_encryption_wrong_key() {
+        let data = b"secret key data here";
+        let key = [42u8; 32];
+        let wrong_key = [0u8; 32];
+
+        let encrypted = encrypt_key_file(data, &key).unwrap();
+
+        // Decryption with wrong key should fail
+        let result = decrypt_key_file(&encrypted, &wrong_key);
+        assert!(result.is_err());
     }
 
     #[test]

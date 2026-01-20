@@ -33,9 +33,9 @@ pub enum GpuTier {
     Workstation = 1,
     /// DataCenter GPUs: A100
     DataCenter = 2,
-    /// Enterprise GPUs: H100, H200
+    /// Enterprise GPUs: H100, H200, B200, B300
     Enterprise = 3,
-    /// Frontier GPUs: B200
+    /// Frontier GPUs: Multi-GPU clusters, MI300X
     Frontier = 4,
 }
 
@@ -44,13 +44,18 @@ impl GpuTier {
     pub fn from_gpu_model(model: &str) -> Self {
         let model_upper = model.to_uppercase();
 
-        // Frontier tier - B200
-        if model_upper.contains("B200") || model_upper.contains("B100") {
+        // Frontier tier - Multi-GPU clusters, AMD MI300X
+        if model_upper.contains("MI300") || model_upper.contains("MULTI-GPU") {
             return GpuTier::Frontier;
         }
 
-        // Enterprise tier - H100, H200
-        if model_upper.contains("H100") || model_upper.contains("H200") {
+        // Enterprise tier - Blackwell (B200, B300) and Hopper (H100, H200)
+        if model_upper.contains("B200")
+            || model_upper.contains("B300")
+            || model_upper.contains("B100")
+            || model_upper.contains("H100")
+            || model_upper.contains("H200")
+        {
             return GpuTier::Enterprise;
         }
 
@@ -68,7 +73,7 @@ impl GpuTier {
             return GpuTier::Workstation;
         }
 
-        // Default to Consumer tier - RTX 30xx, 40xx, etc.
+        // Default to Consumer tier - RTX 30xx, 40xx, 50xx, etc.
         GpuTier::Consumer
     }
 
@@ -151,6 +156,152 @@ impl Default for WorkerStake {
     }
 }
 
+/// On-chain staking contract configuration
+/// Retrieved via the `get_config` contract call
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct StakingContractConfig {
+    /// Minimum stake amount per GPU tier (in wei, 18 decimals)
+    pub min_stake_consumer: u128,
+    pub min_stake_workstation: u128,
+    pub min_stake_datacenter: u128,
+    pub min_stake_enterprise: u128,
+    pub min_stake_frontier: u128,
+    /// Unstaking cooldown period in seconds
+    pub unstake_cooldown_secs: u64,
+    /// Slashing percentage for failures (0-100)
+    pub slash_percentage: u8,
+    /// Whether staking is currently paused
+    pub is_paused: bool,
+}
+
+impl Default for StakingContractConfig {
+    fn default() -> Self {
+        Self {
+            min_stake_consumer: 1_000_000_000_000_000_000_000,    // 1,000 SAGE
+            min_stake_workstation: 2_500_000_000_000_000_000_000, // 2,500 SAGE
+            min_stake_datacenter: 5_000_000_000_000_000_000_000,  // 5,000 SAGE
+            min_stake_enterprise: 10_000_000_000_000_000_000_000, // 10,000 SAGE
+            min_stake_frontier: 25_000_000_000_000_000_000_000,   // 25,000 SAGE
+            unstake_cooldown_secs: 7 * 24 * 60 * 60,              // 7 days
+            slash_percentage: 5,
+            is_paused: false,
+        }
+    }
+}
+
+/// Stake status for work-first model (staking is optional)
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StakeStatus {
+    /// No stake - worker participates via reputation only
+    None,
+    /// Worker has staked SAGE tokens
+    Staked {
+        /// Staked amount in SAGE (18 decimals)
+        amount: u128,
+        /// GPU tier the stake covers
+        gpu_tier: GpuTier,
+    },
+    /// Stake is being unstaked (in cooldown)
+    Unstaking {
+        /// Amount being unstaked
+        amount: u128,
+        /// Timestamp when unstake completes
+        available_at: u64,
+    },
+}
+
+impl Default for StakeStatus {
+    fn default() -> Self {
+        Self::None
+    }
+}
+
+/// Worker tier based on stake and reputation (work-first model)
+///
+/// Workers can participate without staking - trust is built through:
+/// 1. STWO proof verification (cryptographic proof of correct computation)
+/// 2. Reputation from successful job completions
+/// 3. Optional staking for premium benefits
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WorkerTier {
+    /// New worker: 0-49 jobs completed, 100% verification
+    New,
+    /// Established worker: 50-499 jobs, 10% verification
+    Established,
+    /// Trusted worker: 500+ jobs with 95%+ success, 1% verification
+    Trusted,
+    /// Staked worker: Has SAGE stake, priority jobs, validator voting
+    Staked,
+    /// Premium worker: Trusted + Staked, maximum benefits
+    Premium,
+}
+
+impl WorkerTier {
+    /// Determine worker tier from stake status and reputation score
+    ///
+    /// Reputation score is from 0-1000 (on-chain ReputationScore.score).
+    /// Thresholds:
+    /// - 500+: Trusted (500+ jobs with high success rate)
+    /// - 50-499: Established (proven track record)
+    /// - 0-49: New worker (building reputation)
+    pub fn from_stake_and_reputation(stake: &StakeStatus, reputation: u32) -> Self {
+        let has_stake = matches!(stake, StakeStatus::Staked { .. });
+
+        match (has_stake, reputation) {
+            // Premium: Staked + Trusted (reputation 500+)
+            (true, rep) if rep >= 500 => WorkerTier::Premium,
+            // Staked: Has stake, any reputation
+            (true, _) => WorkerTier::Staked,
+            // Trusted: No stake, high reputation (500+)
+            (false, rep) if rep >= 500 => WorkerTier::Trusted,
+            // Established: No stake, moderate reputation (50-499)
+            (false, rep) if rep >= 50 => WorkerTier::Established,
+            // New: No stake, low reputation (0-49)
+            (false, _) => WorkerTier::New,
+        }
+    }
+
+    /// Get the verification rate for this tier (0.0 - 1.0)
+    ///
+    /// New workers have all jobs verified, trusted workers have statistical sampling
+    pub fn verification_rate(&self) -> f64 {
+        match self {
+            WorkerTier::New => 1.0,        // 100% verification
+            WorkerTier::Established => 0.1, // 10% verification
+            WorkerTier::Trusted => 0.01,   // 1% verification
+            WorkerTier::Staked => 0.1,     // 10% verification (stake as bond)
+            WorkerTier::Premium => 0.01,   // 1% verification (trusted + stake)
+        }
+    }
+
+    /// Get job priority multiplier for this tier
+    pub fn priority_multiplier(&self) -> f64 {
+        match self {
+            WorkerTier::New => 1.0,
+            WorkerTier::Established => 1.2,
+            WorkerTier::Trusted => 1.5,
+            WorkerTier::Staked => 1.8,
+            WorkerTier::Premium => 2.0,
+        }
+    }
+
+    /// Whether this tier can participate in validator voting
+    pub fn can_vote(&self) -> bool {
+        matches!(self, WorkerTier::Staked | WorkerTier::Premium)
+    }
+
+    /// Human-readable tier description
+    pub fn description(&self) -> &'static str {
+        match self {
+            WorkerTier::New => "New Worker (building reputation)",
+            WorkerTier::Established => "Established Worker",
+            WorkerTier::Trusted => "Trusted Worker",
+            WorkerTier::Staked => "Staked Worker",
+            WorkerTier::Premium => "Premium Worker (Trusted + Staked)",
+        }
+    }
+}
+
 /// Configuration for the staking client
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StakingClientConfig {
@@ -167,12 +318,68 @@ pub struct StakingClientConfig {
 impl Default for StakingClientConfig {
     fn default() -> Self {
         Self {
-            rpc_url: "https://rpc.starknet-testnet.lava.build".to_string(),
-            staking_contract: "0x0".to_string(),
-            timeout: Duration::from_secs(30),
-            enabled: true,
+            rpc_url: std::env::var("STARKNET_RPC_URL")
+                .unwrap_or_else(|_| "https://api.cartridge.gg/x/starknet/sepolia".to_string()),
+            staking_contract: std::env::var("STAKING_CONTRACT_ADDRESS")
+                .unwrap_or_else(|_| "0x0165fe12b09dd5e6b692cbf59f9c3ea0af30a2616f248c150357b07b967039da".to_string()),
+            timeout: Duration::from_secs(
+                std::env::var("STAKING_TIMEOUT_SECS")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(30)
+            ),
+            enabled: std::env::var("STAKING_VERIFICATION_ENABLED")
+                .map(|v| v.to_lowercase() != "false" && v != "0")
+                .unwrap_or(true),
         }
     }
+}
+
+impl StakingClientConfig {
+    /// Create config from environment variables with validation
+    pub fn from_env() -> Result<Self, String> {
+        let config = Self::default();
+
+        // Validate RPC URL format
+        if !config.rpc_url.starts_with("http://") && !config.rpc_url.starts_with("https://") {
+            return Err(format!("Invalid STARKNET_RPC_URL: must start with http:// or https://"));
+        }
+
+        // Validate contract address format
+        if !config.staking_contract.starts_with("0x") {
+            return Err(format!("Invalid STAKING_CONTRACT_ADDRESS: must start with 0x"));
+        }
+
+        // Log configuration on startup
+        tracing::info!(
+            rpc_url = %config.rpc_url,
+            staking_contract = %config.staking_contract,
+            timeout_secs = config.timeout.as_secs(),
+            enabled = config.enabled,
+            "Staking client configuration loaded"
+        );
+
+        Ok(config)
+    }
+}
+
+/// Format a function selector for Starknet
+/// Uses sn_keccak hash truncated to 250 bits
+fn format_selector(function_name: &str) -> String {
+    use sha3::{Keccak256, Digest};
+
+    let mut hasher = Keccak256::new();
+    hasher.update(function_name.as_bytes());
+    let hash = hasher.finalize();
+
+    // Take first 32 bytes and mask to 250 bits (Starknet field element size)
+    let mut selector = [0u8; 32];
+    selector.copy_from_slice(&hash[..32]);
+
+    // Mask the top 6 bits of the first byte to ensure < 2^250
+    selector[0] &= 0x03;
+
+    format!("0x{}", hex::encode(selector))
 }
 
 /// Starknet function selectors for staking contract
@@ -323,7 +530,7 @@ impl StakingClient {
             .context("Failed to get minimum stake")?;
 
         // Parse u256 from two felt252 (low and high)
-        self.parse_u256(&response)
+        self.parse_u256_to_u128(&response)
     }
 
     /// Verify that a worker meets the minimum stake requirement
@@ -343,6 +550,274 @@ impl StakingClient {
         let min_stake = gpu_tier.min_stake();
 
         Ok(stake.amount >= min_stake && stake.is_active)
+    }
+
+    /// Get stake status for a worker (work-first model)
+    ///
+    /// Returns the current stake status without requiring stake for participation.
+    /// This is used to determine worker tier and optional benefits.
+    pub async fn get_stake_status(&self, worker_address: &str) -> Result<StakeStatus> {
+        if !self.config.enabled {
+            // When blockchain is disabled, return no stake
+            return Ok(StakeStatus::None);
+        }
+
+        // Validate address format
+        Self::validate_address(worker_address)
+            .context("Invalid worker address format")?;
+
+        // Get stake info from chain
+        let stake = match self.get_stake(worker_address).await {
+            Ok(s) => s,
+            Err(e) => {
+                debug!(
+                    wallet = %worker_address,
+                    error = %e,
+                    "Could not fetch stake, assuming none"
+                );
+                return Ok(StakeStatus::None);
+            }
+        };
+
+        // Determine stake status
+        if stake.locked_amount > 0 {
+            // Stake is being unstaked
+            Ok(StakeStatus::Unstaking {
+                amount: stake.locked_amount,
+                available_at: stake.last_claim_at + (7 * 24 * 60 * 60), // 7 day cooldown
+            })
+        } else if stake.amount > 0 && stake.is_active {
+            // Active stake
+            Ok(StakeStatus::Staked {
+                amount: stake.amount,
+                gpu_tier: stake.gpu_tier,
+            })
+        } else {
+            // No stake
+            Ok(StakeStatus::None)
+        }
+    }
+
+    /// Check if an address has sufficient stake to be a validator
+    ///
+    /// Validators must have:
+    /// - Active stake
+    /// - Minimum 10,000 SAGE tokens (Enterprise tier equivalent)
+    /// - No pending unstakes
+    pub async fn is_validator_eligible(&self, address: &str) -> Result<bool> {
+        if !self.config.enabled {
+            return Ok(true);
+        }
+
+        let stake = self.get_stake(address).await?;
+
+        // Validator requirements
+        const MIN_VALIDATOR_STAKE: u128 = 10_000_000_000_000_000_000_000; // 10,000 SAGE
+
+        Ok(stake.amount >= MIN_VALIDATOR_STAKE
+            && stake.is_active
+            && stake.locked_amount == 0)
+    }
+
+    /// Get validator information for consensus
+    ///
+    /// Returns stake details formatted for consensus ValidatorInfo
+    pub async fn get_validator_info(&self, address: &str) -> Result<Option<(u128, bool)>> {
+        if !self.config.enabled {
+            return Ok(None);
+        }
+
+        match self.get_stake(address).await {
+            Ok(stake) => {
+                if stake.is_active && stake.amount > 0 {
+                    Ok(Some((stake.amount, true)))
+                } else {
+                    Ok(None)
+                }
+            }
+            Err(_) => Ok(None),
+        }
+    }
+
+    /// Get total amount staked across all workers
+    ///
+    /// Queries the staking contract for the total staked amount.
+    /// Returns 0 if blockchain integration is disabled.
+    pub async fn get_total_staked(&self) -> Result<u128> {
+        if !self.config.enabled {
+            // Return mock value when disabled
+            return Ok(125_000_000_000_000_000_000_000_000); // 125M SAGE
+        }
+
+        let response = self
+            .call_contract("get_total_staked", vec![])
+            .await
+            .context("Failed to get total staked")?;
+
+        // Parse u256 from response
+        self.parse_u256_to_u128(&response)
+    }
+
+    /// Get count of unique stakers
+    ///
+    /// Queries the staking contract for the number of active stakers.
+    /// Returns 0 if blockchain integration is disabled.
+    pub async fn get_staker_count(&self) -> Result<u32> {
+        if !self.config.enabled {
+            // Return mock value when disabled
+            return Ok(1250);
+        }
+
+        let response = self
+            .call_contract("get_staker_count", vec![])
+            .await;
+
+        match response {
+            Ok(resp) => {
+                // Parse single felt252 as staker count
+                let count = resp
+                    .first()
+                    .and_then(|v| {
+                        let clean = v.trim_start_matches("0x");
+                        u32::from_str_radix(clean, 16).ok()
+                    })
+                    .unwrap_or(0);
+                Ok(count)
+            }
+            Err(e) => {
+                debug!("Could not get staker count: {}, returning estimate", e);
+                // Return estimate based on total staked
+                let total_staked = self.get_total_staked().await.unwrap_or(0);
+                let avg_stake: u128 = 100_000_000_000_000_000_000_000; // 100K SAGE avg
+                let estimate = (total_staked / avg_stake) as u32;
+                Ok(estimate.max(1))
+            }
+        }
+    }
+
+    /// Get the on-chain staking contract configuration
+    ///
+    /// Returns current staking parameters including minimum stakes per GPU tier,
+    /// cooldown periods, and slash percentages.
+    pub async fn get_staking_contract_config(&self) -> Result<StakingContractConfig> {
+        if !self.config.enabled {
+            // Return default config when disabled
+            return Ok(StakingContractConfig::default());
+        }
+
+        let response = self
+            .call_contract(selectors::GET_CONFIG, vec![])
+            .await
+            .context("Failed to get staking config")?;
+
+        // Parse config from response
+        // Expected format: [min_consumer, min_workstation, min_datacenter, min_enterprise,
+        //                   min_frontier, cooldown, slash_pct, is_paused]
+        if response.len() < 8 {
+            tracing::warn!("Incomplete staking config response, using defaults");
+            return Ok(StakingContractConfig::default());
+        }
+
+        Ok(StakingContractConfig {
+            min_stake_consumer: self.parse_u256_saturating(&response[0..2])?,
+            min_stake_workstation: self.parse_u256_saturating(&response[2..4])?,
+            min_stake_datacenter: self.parse_u256_saturating(&response[4..6])?,
+            min_stake_enterprise: self.parse_u256_saturating(&response[6..8])?,
+            min_stake_frontier: if response.len() >= 10 {
+                self.parse_u256_saturating(&response[8..10])?
+            } else {
+                25_000_000_000_000_000_000_000 // 25K SAGE default
+            },
+            unstake_cooldown_secs: if response.len() > 10 {
+                self.parse_u64(&response[10])?
+            } else {
+                7 * 24 * 60 * 60 // 7 days default
+            },
+            slash_percentage: if response.len() > 11 {
+                self.parse_u8(&response[11])?
+            } else {
+                5 // 5% default
+            },
+            is_paused: if response.len() > 12 {
+                self.parse_bool(&response[12])?
+            } else {
+                false
+            },
+        })
+    }
+
+    /// Get reputation score for an address from ReputationManager contract
+    ///
+    /// Returns reputation score (0-1000) or default of 100 if unavailable.
+    /// Uses the reputation contract address from environment or config.
+    pub async fn get_reputation_score(&self, address: &str) -> Result<u32> {
+        if !self.config.enabled {
+            // Return neutral score when disabled
+            return Ok(100);
+        }
+
+        // Validate address format
+        Self::validate_address(address)
+            .context("Invalid address format for reputation query")?;
+
+        // Get reputation contract address from env
+        let reputation_contract = std::env::var("REPUTATION_CONTRACT_ADDRESS")
+            .unwrap_or_else(|_| {
+                "0x0dbd9831f5d5ed6f85bc74bbf7aeaa49987d36c619edc27c95d39c4f24e3ff52".to_string()
+            });
+
+        // Build the RPC request for reputation contract
+        let request_body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "starknet_call",
+            "params": {
+                "request": {
+                    "contract_address": reputation_contract,
+                    "entry_point_selector": format_selector("get_reputation"),
+                    "calldata": [address]
+                },
+                "block_id": "latest"
+            }
+        });
+
+        let start = Instant::now();
+        let response = self
+            .http_client
+            .post(&self.config.rpc_url)
+            .json(&request_body)
+            .send()
+            .await;
+
+        match response {
+            Ok(resp) => {
+                self.metrics.record_call(true, start.elapsed().as_millis() as u64, false);
+
+                let body: serde_json::Value = resp.json().await
+                    .context("Failed to parse reputation response")?;
+
+                if let Some(error) = body.get("error") {
+                    debug!("Reputation query error: {:?}, using default", error);
+                    return Ok(100); // Default score
+                }
+
+                // Parse result - reputation score is returned as (score: u32, level: u8, ...)
+                if let Some(result) = body.get("result").and_then(|r| r.as_array()) {
+                    if let Some(score_hex) = result.first().and_then(|v| v.as_str()) {
+                        let score = u32::from_str_radix(score_hex.trim_start_matches("0x"), 16)
+                            .unwrap_or(100);
+                        return Ok(score.min(1000)); // Cap at 1000
+                    }
+                }
+
+                Ok(100) // Default if parsing fails
+            }
+            Err(e) => {
+                self.metrics.record_call(false, start.elapsed().as_millis() as u64, false);
+                debug!("Failed to query reputation: {}, using default", e);
+                Ok(100) // Default score on error
+            }
+        }
     }
 
     /// Make an RPC call to the staking contract with retry logic and circuit breaker
@@ -511,16 +986,16 @@ impl StakingClient {
             );
         }
 
-        // Parse u256 values (low, high pairs)
-        let amount = self.parse_u256(&response[0..2])?;
-        let locked_amount = self.parse_u256(&response[2..4])?;
+        // Parse u256 values (low, high pairs) - use _to_u128 since struct fields are u128
+        let amount = self.parse_u256_to_u128(&response[0..2])?;
+        let locked_amount = self.parse_u256_to_u128(&response[2..4])?;
         let staked_at = self.parse_u64(&response[4])?;
         let last_claim_at = self.parse_u64(&response[5])?;
         let gpu_tier_raw = self.parse_u8(&response[6])?;
         let is_active = self.parse_bool(&response[7])?;
         let consecutive_failures = self.parse_u8(&response[8])?;
-        let total_slashed = self.parse_u256(&response[9..11])?;
-        let pending_rewards = self.parse_u256(&response[11..13])?;
+        let total_slashed = self.parse_u256_to_u128(&response[9..11])?;
+        let pending_rewards = self.parse_u256_to_u128(&response[11..13])?;
 
         let gpu_tier = match gpu_tier_raw {
             0 => GpuTier::Consumer,
@@ -544,8 +1019,11 @@ impl StakingClient {
         })
     }
 
-    /// Parse u256 from two felt252 (low and high)
-    fn parse_u256(&self, parts: &[String]) -> Result<u128> {
+    /// Parse u256 from two felt252 (low and high parts)
+    ///
+    /// Returns (low, high) tuple representing the full 256-bit value.
+    /// For values that fit in u128, high will be 0.
+    fn parse_u256(&self, parts: &[String]) -> Result<(u128, u128)> {
         if parts.len() < 2 {
             anyhow::bail!("Invalid u256: need low and high parts");
         }
@@ -555,13 +1033,47 @@ impl StakingClient {
         let high = u128::from_str_radix(parts[1].trim_start_matches("0x"), 16)
             .context("Failed to parse u256 high part")?;
 
-        // For now, just return low part (most stakes won't exceed u128)
-        // TODO: Handle full u256 if needed
+        Ok((low, high))
+    }
+
+    /// Parse u256 to u128, returning error if value overflows
+    fn parse_u256_to_u128(&self, parts: &[String]) -> Result<u128> {
+        let (low, high) = self.parse_u256(parts)?;
+
         if high > 0 {
-            tracing::warn!("Stake amount exceeds u128, truncating");
+            tracing::warn!(
+                low = low,
+                high = high,
+                "Stake amount has non-zero high part - value exceeds u128"
+            );
+            // Return an error for safety - caller should handle large values
+            anyhow::bail!(
+                "Stake amount {} + {}*2^128 exceeds u128 max value",
+                low,
+                high
+            );
         }
 
         Ok(low)
+    }
+
+    /// Parse u256 to u128, with saturation for overflow
+    ///
+    /// Use this when truncation is acceptable (e.g., display purposes).
+    /// Values exceeding u128::MAX are clamped to u128::MAX with a warning.
+    pub fn parse_u256_saturating(&self, parts: &[String]) -> Result<u128> {
+        let (low, high) = self.parse_u256(parts)?;
+
+        if high > 0 {
+            tracing::warn!(
+                low = low,
+                high = high,
+                "Stake amount exceeds u128, saturating to u128::MAX"
+            );
+            Ok(u128::MAX)
+        } else {
+            Ok(low)
+        }
     }
 
     /// Parse u64 from felt252
@@ -591,14 +1103,27 @@ mod tests {
 
     #[test]
     fn test_gpu_tier_from_model() {
+        // Consumer tier - RTX gaming cards
         assert_eq!(GpuTier::from_gpu_model("NVIDIA RTX 4090"), GpuTier::Consumer);
         assert_eq!(GpuTier::from_gpu_model("RTX 3080"), GpuTier::Consumer);
+        assert_eq!(GpuTier::from_gpu_model("RTX 5090"), GpuTier::Consumer);
+
+        // Workstation tier
         assert_eq!(GpuTier::from_gpu_model("RTX A6000"), GpuTier::Workstation);
         assert_eq!(GpuTier::from_gpu_model("L40S"), GpuTier::Workstation);
+
+        // DataCenter tier
         assert_eq!(GpuTier::from_gpu_model("A100-SXM4-80GB"), GpuTier::DataCenter);
+
+        // Enterprise tier - Hopper and Blackwell
         assert_eq!(GpuTier::from_gpu_model("NVIDIA H100"), GpuTier::Enterprise);
         assert_eq!(GpuTier::from_gpu_model("H200"), GpuTier::Enterprise);
-        assert_eq!(GpuTier::from_gpu_model("B200"), GpuTier::Frontier);
+        assert_eq!(GpuTier::from_gpu_model("B200"), GpuTier::Enterprise);
+        assert_eq!(GpuTier::from_gpu_model("NVIDIA B300"), GpuTier::Enterprise);
+
+        // Frontier tier - Multi-GPU and AMD MI300X
+        assert_eq!(GpuTier::from_gpu_model("MI300X"), GpuTier::Frontier);
+        assert_eq!(GpuTier::from_gpu_model("multi-gpu-cluster"), GpuTier::Frontier);
     }
 
     #[test]

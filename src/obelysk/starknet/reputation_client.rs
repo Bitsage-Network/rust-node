@@ -98,8 +98,8 @@ pub struct ReputationClientConfig {
 impl Default for ReputationClientConfig {
     fn default() -> Self {
         Self {
-            rpc_url: "https://rpc.starknet-testnet.lava.build".to_string(),
-            reputation_contract: "0x0".to_string(),
+            rpc_url: "https://api.cartridge.gg/x/starknet/sepolia".to_string(),
+            reputation_contract: "0x019c05a8f648c835e66e98c700b628d14ed4249e5e60e32c7f779d38da90e9d9".to_string(),
             timeout: Duration::from_secs(15),
             enabled: true,
             cache_ttl_secs: 60, // Cache for 1 minute
@@ -246,6 +246,31 @@ impl ReputationClient {
         }
 
         results
+    }
+
+    /// Get total number of jobs completed by a worker
+    ///
+    /// Returns the total count of jobs (successful and failed) from the reputation contract.
+    pub async fn get_total_jobs(&self, worker_address: &str) -> Result<u64> {
+        if !self.config.enabled {
+            return Ok(0);
+        }
+
+        let response = self
+            .call_contract(selectors::GET_TOTAL_JOBS, vec![worker_address.to_string()])
+            .await
+            .context("Failed to get total jobs")?;
+
+        // Parse response: single felt252 as u64
+        let total = response
+            .first()
+            .and_then(|v| {
+                let clean = v.trim_start_matches("0x");
+                u64::from_str_radix(clean, 16).ok()
+            })
+            .unwrap_or(0);
+
+        Ok(total)
     }
 
     /// Invalidate cache for a specific worker (after job completion)

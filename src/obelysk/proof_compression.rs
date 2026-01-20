@@ -13,7 +13,7 @@
 //!
 //! # Target: < 256KB compressed proof for on-chain verification
 
-use anyhow::{Result, anyhow, Context};
+use anyhow::{Result, anyhow};
 use serde::{Serialize, Deserialize};
 use std::io::{Read, Write};
 

@@ -152,7 +152,10 @@ impl ObelyskProver {
     }
     
     /// Estimate proof size based on trace length
-    fn estimate_proof_size(&self, trace_length: usize) -> usize {
+    ///
+    /// Returns the estimated proof size in bytes for a given trace length.
+    /// Useful for pre-allocating buffers and estimating storage requirements.
+    pub fn estimate_proof_size(&self, trace_length: usize) -> usize {
         // Typical Stwo proof: ~100KB for small circuits
         // Scales logarithmically with trace length
         let base_size = 100_000;  // 100KB base

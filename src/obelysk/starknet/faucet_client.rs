@@ -3,13 +3,13 @@
 //! Client for interacting with the BitSage testnet faucet contract.
 //! Provides SAGE token claims for testing purposes.
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Result};
 use starknet::core::types::FieldElement;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 use super::network::StarknetNetwork;
 
@@ -35,12 +35,12 @@ pub struct FaucetClientConfig {
 impl Default for FaucetClientConfig {
     fn default() -> Self {
         Self {
-            rpc_url: "https://rpc.starknet-testnet.lava.build".to_string(),
-            faucet_contract: "0x0".to_string(),
-            sage_token_contract: "0x0".to_string(),
+            rpc_url: "https://api.cartridge.gg/x/starknet/sepolia".to_string(),
+            faucet_contract: "0x07943ad334da99ab3dd138ff14d2045a7d962f1a426a4dd909fda026f37acf9f".to_string(),
+            sage_token_contract: "0x04321b7282ae6aa354988eed57f2ff851314af8524de8b1f681a128003cc4ea5".to_string(),
             timeout: Duration::from_secs(30),
             enabled: true,
-            claim_amount: 20_000_000_000_000_000, // 0.02 SAGE (18 decimals)
+            claim_amount: 10_000_000_000_000_000_000, // 10 SAGE (18 decimals) - testnet amount
             cooldown_secs: 86400, // 24 hours
         }
     }
@@ -254,12 +254,8 @@ impl FaucetClient {
         // Build claim transaction
         let claim_amount_felt = FieldElement::from(self.config.claim_amount);
 
-        // Call faucet contract's claim function
-        // Selector: claim(recipient: ContractAddress)
-        let selector = starknet::core::utils::get_selector_from_name("claim")
-            .map_err(|e| anyhow!("Failed to get selector: {}", e))?;
-
-        let calldata = vec![recipient];
+        // Call faucet contract's claim function via execute_claim
+        // (selector and calldata are constructed internally by execute_claim)
 
         // For now, return a mock result since we don't have signing credentials here
         // In production, this would be signed by the faucet's account
@@ -395,6 +391,21 @@ impl FaucetClient {
         cache.insert(address.to_string(), info);
 
         Ok(())
+    }
+
+    /// Get the network this client is configured for
+    pub fn network(&self) -> &StarknetNetwork {
+        &self.network
+    }
+
+    /// Get the faucet contract address
+    pub fn faucet_contract(&self) -> FieldElement {
+        self.faucet_contract
+    }
+
+    /// Get the SAGE token contract address
+    pub fn sage_token_contract(&self) -> FieldElement {
+        self.sage_token_contract
     }
 }
 

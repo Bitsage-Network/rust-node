@@ -34,8 +34,8 @@ impl StarknetNetwork {
     /// Get the RPC URL for this network
     pub fn rpc_url(&self) -> &str {
         match self {
-            StarknetNetwork::Mainnet => "https://rpc.starknet.lava.build",
-            StarknetNetwork::Sepolia => "https://rpc.starknet-testnet.lava.build",
+            StarknetNetwork::Mainnet => "https://starknet-mainnet-rpc.publicnode.com",
+            StarknetNetwork::Sepolia => "https://starknet-sepolia-rpc.publicnode.com",
             StarknetNetwork::Devnet { url } => url,
         }
     }
@@ -146,7 +146,15 @@ pub struct StarknetClient {
 
 impl StarknetClient {
     /// Create a new Starknet client
+    ///
+    /// # Configuration Validation
+    /// - Warns if no private key is configured (signing will fail)
+    /// - Warns if no account address is configured
+    /// - Warns if using plain text private key in production
     pub fn new(config: StarknetClientConfig) -> Self {
+        // Validate configuration and emit warnings
+        Self::validate_config(&config);
+
         let http_client = reqwest::Client::builder()
             .timeout(config.timeout)
             .build()
@@ -155,6 +163,71 @@ impl StarknetClient {
         Self {
             config,
             http_client,
+        }
+    }
+
+    /// Validate client configuration and emit warnings
+    fn validate_config(config: &StarknetClientConfig) {
+        use tracing::{warn, info};
+
+        // Check for missing private key
+        if config.private_key.is_none() {
+            warn!(
+                "⚠️  No private key configured for Starknet client. \
+                 Transaction signing will fail. Set STARKNET_PRIVATE_KEY environment variable."
+            );
+        } else {
+            // Warn about plain text key storage in production
+            if std::env::var("PRODUCTION").is_ok() || std::env::var("MAINNET").is_ok() {
+                warn!(
+                    "🔐 SECURITY WARNING: Private key stored in plain text config. \
+                     For production, use a Hardware Security Module (HSM) or \
+                     Key Management Service (KMS) like AWS Secrets Manager."
+                );
+            }
+        }
+
+        // Check for missing account address
+        if config.account_address.is_none() {
+            warn!(
+                "⚠️  No account address configured. \
+                 Set STARKNET_ACCOUNT_ADDRESS environment variable."
+            );
+        }
+
+        // Check for zero verifier address
+        if config.verifier_address == Felt252::ZERO {
+            warn!(
+                "⚠️  Verifier contract address is zero. \
+                 Proof verification will fail. Set VERIFIER_CONTRACT_ADDRESS."
+            );
+        }
+
+        // Log network info
+        info!(
+            network = ?config.network,
+            has_account = config.account_address.is_some(),
+            has_private_key = config.private_key.is_some(),
+            max_fee = config.max_fee,
+            "Starknet client initialized"
+        );
+    }
+
+    /// Check if the client is properly configured for signing transactions
+    pub fn can_sign(&self) -> bool {
+        self.config.private_key.is_some() && self.config.account_address.is_some()
+    }
+
+    /// Get a descriptive error if signing is not possible
+    pub fn signing_error(&self) -> Option<String> {
+        if self.config.private_key.is_none() && self.config.account_address.is_none() {
+            Some("Neither private key nor account address configured".to_string())
+        } else if self.config.private_key.is_none() {
+            Some("Private key not configured. Set STARKNET_PRIVATE_KEY".to_string())
+        } else if self.config.account_address.is_none() {
+            Some("Account address not configured. Set STARKNET_ACCOUNT_ADDRESS".to_string())
+        } else {
+            None
         }
     }
 

@@ -51,9 +51,9 @@ pub fn gpu_accelerated_fft(input: &[M31], twiddles: &[M31]) -> Result<Vec<M31>> 
             }
         }
     }
-    
-    // CPU fallback
-    Ok(input.to_vec())
+
+    // CPU fallback - use proper FFT algorithm
+    Ok(cpu_fft_fallback(input, twiddles))
 }
 
 /// Perform inverse FFT using GPU if available
@@ -65,9 +65,133 @@ pub fn gpu_accelerated_ifft(input: &[M31], itwiddles: &[M31]) -> Result<Vec<M31>
             }
         }
     }
-    
-    // CPU fallback
-    Ok(input.to_vec())
+
+    // CPU fallback - use proper inverse FFT algorithm
+    Ok(cpu_ifft_fallback(input, itwiddles))
+}
+
+/// CPU FFT implementation for fallback
+fn cpu_fft_fallback(input: &[M31], twiddles: &[M31]) -> Vec<M31> {
+    let n = input.len();
+    if n <= 1 {
+        return input.to_vec();
+    }
+
+    // FFT requires power of 2 size
+    if !n.is_power_of_two() {
+        return input.to_vec();
+    }
+
+    let log_n = n.trailing_zeros() as usize;
+    let mut data = input.to_vec();
+
+    // Bit-reversal permutation
+    for i in 0..n {
+        let j = bit_reverse(i, log_n);
+        if i < j {
+            data.swap(i, j);
+        }
+    }
+
+    // Cooley-Tukey FFT butterfly operations
+    for layer in 0..log_n {
+        let half_block = 1 << layer;
+        let block_size = half_block << 1;
+        let twiddle_step = n >> (layer + 1);
+
+        for block_start in (0..n).step_by(block_size) {
+            for j in 0..half_block {
+                let idx0 = block_start + j;
+                let idx1 = idx0 + half_block;
+                let twiddle_idx = j * twiddle_step;
+
+                let twiddle = if twiddle_idx < twiddles.len() {
+                    twiddles[twiddle_idx]
+                } else {
+                    M31::ONE
+                };
+
+                let a = data[idx0];
+                let b = data[idx1];
+                let tw_b = b * twiddle;
+
+                data[idx0] = a + tw_b;
+                data[idx1] = a - tw_b;
+            }
+        }
+    }
+
+    data
+}
+
+/// CPU inverse FFT implementation for fallback
+fn cpu_ifft_fallback(input: &[M31], itwiddles: &[M31]) -> Vec<M31> {
+    let n = input.len();
+    if n <= 1 {
+        return input.to_vec();
+    }
+
+    // FFT requires power of 2 size
+    if !n.is_power_of_two() {
+        return input.to_vec();
+    }
+
+    let log_n = n.trailing_zeros() as usize;
+    let mut data = input.to_vec();
+
+    // Inverse FFT: process layers in reverse order
+    for layer in (0..log_n).rev() {
+        let half_block = 1 << layer;
+        let block_size = half_block << 1;
+        let twiddle_step = n >> (layer + 1);
+
+        for block_start in (0..n).step_by(block_size) {
+            for j in 0..half_block {
+                let idx0 = block_start + j;
+                let idx1 = idx0 + half_block;
+                let twiddle_idx = j * twiddle_step;
+
+                let itwiddle = if twiddle_idx < itwiddles.len() {
+                    itwiddles[twiddle_idx]
+                } else {
+                    M31::ONE
+                };
+
+                let a = data[idx0];
+                let b = data[idx1];
+
+                data[idx0] = a + b;
+                data[idx1] = (a - b) * itwiddle;
+            }
+        }
+    }
+
+    // Bit-reversal permutation
+    for i in 0..n {
+        let j = bit_reverse(i, log_n);
+        if i < j {
+            data.swap(i, j);
+        }
+    }
+
+    // Scale by 1/n
+    let n_inv = M31::from_u32(n as u32).inverse().unwrap_or(M31::ONE);
+    for elem in &mut data {
+        *elem = *elem * n_inv;
+    }
+
+    data
+}
+
+/// Bit-reverse an index for FFT permutation
+#[inline]
+fn bit_reverse(mut x: usize, log_n: usize) -> usize {
+    let mut result = 0;
+    for _ in 0..log_n {
+        result = (result << 1) | (x & 1);
+        x >>= 1;
+    }
+    result
 }
 
 /// Print GPU FFT statistics
@@ -176,9 +300,21 @@ impl GpuProvingContext {
                 return fft.fft(input, twiddles);
             }
         }
-        
-        // CPU fallback
-        Ok(input.to_vec())
+
+        // CPU fallback - use proper FFT algorithm
+        Ok(cpu_fft_fallback(input, twiddles))
+    }
+
+    /// Perform inverse FFT with automatic GPU/CPU selection
+    pub fn ifft(&mut self, input: &[M31], itwiddles: &[M31]) -> Result<Vec<M31>> {
+        if input.len() >= self.config.min_fft_size {
+            if let Some(ref mut fft) = self.fft {
+                return fft.ifft(input, itwiddles);
+            }
+        }
+
+        // CPU fallback - use proper inverse FFT algorithm
+        Ok(cpu_ifft_fallback(input, itwiddles))
     }
 }
 

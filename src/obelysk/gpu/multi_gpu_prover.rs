@@ -152,20 +152,88 @@ impl MultiGpuObelyskProver {
         scheduler
     }
     
-    /// Detect number of available GPUs
+    /// Detect number of available GPUs using multiple methods
     fn detect_gpu_count() -> Result<usize> {
-        // In production, this would query CUDA/ROCm
-        // For now, check environment variable or default to 1
-        
+        // Method 1: Check CUDA_VISIBLE_DEVICES environment variable (highest priority)
         if let Ok(count) = std::env::var("CUDA_VISIBLE_DEVICES") {
-            let gpus: Vec<_> = count.split(',').filter(|s| !s.is_empty()).collect();
+            let count = count.trim();
+            if count.eq_ignore_ascii_case("none") || count.eq_ignore_ascii_case("-1") {
+                info!("GPU disabled via CUDA_VISIBLE_DEVICES");
+                return Ok(0);
+            }
+            let gpus: Vec<_> = count.split(',').filter(|s| !s.trim().is_empty()).collect();
             if !gpus.is_empty() {
+                info!("Detected {} GPUs from CUDA_VISIBLE_DEVICES", gpus.len());
                 return Ok(gpus.len());
             }
         }
-        
-        // Default: assume 1 GPU if CUDA is available
-        Ok(1)
+
+        // Method 2: Try NVML (NVIDIA Management Library)
+        #[cfg(feature = "gpu-metrics")]
+        {
+            if let Ok(nvml) = nvml_wrapper::Nvml::init() {
+                if let Ok(count) = nvml.device_count() {
+                    let count = count as usize;
+                    if count > 0 {
+                        info!("Detected {} NVIDIA GPUs via NVML", count);
+                        return Ok(count);
+                    }
+                }
+            }
+        }
+
+        // Method 3: Check for ROCm GPUs (AMD)
+        #[cfg(feature = "rocm")]
+        {
+            if let Ok(output) = std::process::Command::new("rocm-smi")
+                .arg("--showgpu")
+                .output()
+            {
+                if output.status.success() {
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    // Count GPU entries in rocm-smi output
+                    let gpu_count = stdout.lines()
+                        .filter(|line| line.contains("GPU"))
+                        .count();
+                    if gpu_count > 0 {
+                        info!("Detected {} AMD GPUs via rocm-smi", gpu_count);
+                        return Ok(gpu_count);
+                    }
+                }
+            }
+        }
+
+        // Method 4: Try nvidia-smi as fallback
+        #[cfg(target_os = "linux")]
+        {
+            if let Ok(output) = std::process::Command::new("nvidia-smi")
+                .arg("-L")
+                .output()
+            {
+                if output.status.success() {
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    let gpu_count = stdout.lines()
+                        .filter(|line| line.starts_with("GPU "))
+                        .count();
+                    if gpu_count > 0 {
+                        info!("Detected {} NVIDIA GPUs via nvidia-smi", gpu_count);
+                        return Ok(gpu_count);
+                    }
+                }
+            }
+        }
+
+        // Method 5: Check BITSAGE_GPU_COUNT override
+        if let Ok(count_str) = std::env::var("BITSAGE_GPU_COUNT") {
+            if let Ok(count) = count_str.parse::<usize>() {
+                info!("Using {} GPUs from BITSAGE_GPU_COUNT", count);
+                return Ok(count);
+            }
+        }
+
+        // No GPUs detected - fall back to CPU-only mode
+        warn!("No GPUs detected, using CPU-only mode");
+        Ok(0)
     }
     
     /// Initialize the prover (pre-warm twiddle caches)

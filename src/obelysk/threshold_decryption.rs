@@ -40,7 +40,7 @@
 // └─────────────────────────────────────────────────────────────────────────────┘
 
 use crate::obelysk::elgamal::{
-    Felt252, ECPoint, ElGamalCiphertext, KeyPair,
+    Felt252, ECPoint, ElGamalCiphertext,
     generate_randomness, hash_felts, reduce_to_curve_order,
     add_mod_n, sub_mod_n, mul_mod_n, CURVE_ORDER,
     CryptoError,

@@ -542,7 +542,7 @@ impl CairoHintsGenerator {
     }
 
     /// Compute inverses needed for FRI verification
-    fn compute_inverses(proof: &CairoSerializedProof, num_queries: usize) -> Vec<Felt252> {
+    fn compute_inverses(_proof: &CairoSerializedProof, num_queries: usize) -> Vec<Felt252> {
         // In practice, these would be actual modular inverses
         // For now, placeholder generation
         (0..num_queries * 2).map(|i| {
@@ -560,7 +560,7 @@ impl CairoHintsGenerator {
     }
 
     /// Compute FRI folding powers
-    fn compute_fri_powers(domain_size: usize, log_blowup: u32) -> Vec<Felt252> {
+    fn compute_fri_powers(domain_size: usize, _log_blowup: u32) -> Vec<Felt252> {
         let num_layers = (domain_size as f64).log2() as usize;
         (0..num_layers).flat_map(|layer| {
             (0..(1 << (layer + 1))).map(move |i| {

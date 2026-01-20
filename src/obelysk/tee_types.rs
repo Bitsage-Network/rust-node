@@ -221,36 +221,192 @@ pub enum CertificateError {
     UntrustedRoot,
 }
 
+/// Enclave version with metadata
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnclaveVersion {
+    /// MRENCLAVE hash (32 bytes)
+    pub mrenclave: Vec<u8>,
+
+    /// Semantic version (e.g., "1.0.0")
+    pub version: String,
+
+    /// Human-readable description
+    pub description: String,
+
+    /// Timestamp when this version was whitelisted (Unix epoch)
+    pub whitelisted_at: u64,
+
+    /// Optional deprecation timestamp (Unix epoch)
+    /// After this time, workers should upgrade to newer version
+    pub deprecated_at: Option<u64>,
+
+    /// Whether this version is revoked (emergency security response)
+    pub revoked: bool,
+
+    /// TEE type this enclave supports
+    pub tee_type: TEEType,
+}
+
+impl EnclaveVersion {
+    /// Check if this version is currently valid
+    pub fn is_valid(&self, current_time: u64) -> bool {
+        if self.revoked {
+            return false;
+        }
+
+        // Allow if not deprecated, or if deprecated but still in grace period (30 days)
+        match self.deprecated_at {
+            None => true,
+            Some(dep_time) => {
+                if current_time < dep_time {
+                    true  // Not deprecated yet
+                } else {
+                    // Deprecated, but allow 30-day grace period
+                    const GRACE_PERIOD: u64 = 30 * 24 * 60 * 60; // 30 days
+                    current_time < dep_time + GRACE_PERIOD
+                }
+            }
+        }
+    }
+}
+
 /// Whitelisted enclave measurements (MRENCLAVEs)
 ///
-/// Only enclaves with these measurements are trusted
-/// These are updated through governance/DAO votes
+/// Only enclaves with these measurements are trusted.
+/// Supports versioning, deprecation, and emergency revocation.
+///
+/// # Security Model
+///
+/// 1. **Initial Whitelist**: Hardcoded development/testnet versions
+/// 2. **Governance Updates**: DAO votes to add new versions
+/// 3. **Deprecation**: Older versions marked deprecated after new release
+/// 4. **Revocation**: Emergency removal if vulnerability discovered
 #[derive(Debug, Clone)]
 pub struct EnclaveWhitelist {
-    allowed_mrenclaves: Vec<Vec<u8>>,
+    versions: Vec<EnclaveVersion>,
 }
 
 impl EnclaveWhitelist {
     /// Create a new whitelist with default trusted enclaves
     pub fn new() -> Self {
         Self {
-            allowed_mrenclaves: vec![
-                // TODO: Add real MRENCLAVE values
-                // These will be the hashes of our trusted Obelysk executors
+            versions: vec![
+                // BitSage Obelysk Worker v1.0.0-alpha (Development)
+                // This is a placeholder MRENCLAVE for local development
+                // In production, this would be the measured hash of the Docker image
+                EnclaveVersion {
+                    mrenclave: hex::decode("0000000000000000000000000000000000000000000000000000000000000001")
+                        .unwrap(),
+                    version: "1.0.0-alpha".to_string(),
+                    description: "BitSage Obelysk Worker (Development Build)".to_string(),
+                    whitelisted_at: 1704067200, // 2024-01-01 00:00:00 UTC
+                    deprecated_at: None,
+                    revoked: false,
+                    tee_type: TEEType::IntelTDX,
+                },
+
+                // BitSage Obelysk Worker v1.0.0-testnet (Sepolia)
+                // This would be the measured hash of the testnet Docker image
+                EnclaveVersion {
+                    mrenclave: hex::decode("0000000000000000000000000000000000000000000000000000000000000002")
+                        .unwrap(),
+                    version: "1.0.0-testnet".to_string(),
+                    description: "BitSage Obelysk Worker (Sepolia Testnet)".to_string(),
+                    whitelisted_at: 1704067200,
+                    deprecated_at: None,
+                    revoked: false,
+                    tee_type: TEEType::IntelTDX,
+                },
+
+                // Add real MRENCLAVE values here after Docker image builds:
+                //
+                // To measure MRENCLAVE:
+                // 1. Build worker Docker image: docker build -t bitsage-worker:v1.0.0 .
+                // 2. Run in TEE: gramine-sgx ./measure-enclave
+                // 3. Extract MRENCLAVE from attestation report
+                // 4. Add to whitelist via governance proposal
             ],
         }
     }
-    
-    /// Check if an MRENCLAVE is whitelisted
+
+    /// Check if an MRENCLAVE is whitelisted and valid
     pub fn is_allowed(&self, mrenclave: &[u8]) -> bool {
-        self.allowed_mrenclaves.iter().any(|m| m.as_slice() == mrenclave)
+        let current_time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        self.versions.iter().any(|v| {
+            v.mrenclave.as_slice() == mrenclave && v.is_valid(current_time)
+        })
     }
-    
-    /// Add a new MRENCLAVE to the whitelist (governance function)
+
+    /// Add a new MRENCLAVE version to the whitelist (governance function)
+    pub fn add_version(&mut self, version: EnclaveVersion) {
+        // Check if this MRENCLAVE already exists
+        if !self.versions.iter().any(|v| v.mrenclave == version.mrenclave) {
+            self.versions.push(version);
+        }
+    }
+
+    /// Legacy add function for backward compatibility
     pub fn add(&mut self, mrenclave: Vec<u8>) {
         if !self.is_allowed(&mrenclave) {
-            self.allowed_mrenclaves.push(mrenclave);
+            let version = EnclaveVersion {
+                mrenclave,
+                version: "unknown".to_string(),
+                description: "Manually added enclave".to_string(),
+                whitelisted_at: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs(),
+                deprecated_at: None,
+                revoked: false,
+                tee_type: TEEType::IntelTDX,
+            };
+            self.versions.push(version);
         }
+    }
+
+    /// Deprecate a specific version (marks it for removal in 30 days)
+    pub fn deprecate_version(&mut self, mrenclave: &[u8]) {
+        let current_time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        for version in &mut self.versions {
+            if version.mrenclave.as_slice() == mrenclave {
+                version.deprecated_at = Some(current_time);
+            }
+        }
+    }
+
+    /// Revoke a version immediately (emergency security response)
+    pub fn revoke_version(&mut self, mrenclave: &[u8]) {
+        for version in &mut self.versions {
+            if version.mrenclave.as_slice() == mrenclave {
+                version.revoked = true;
+            }
+        }
+    }
+
+    /// Get all currently valid versions
+    pub fn get_valid_versions(&self) -> Vec<&EnclaveVersion> {
+        let current_time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        self.versions
+            .iter()
+            .filter(|v| v.is_valid(current_time))
+            .collect()
+    }
+
+    /// Get version info for a specific MRENCLAVE
+    pub fn get_version_info(&self, mrenclave: &[u8]) -> Option<&EnclaveVersion> {
+        self.versions.iter().find(|v| v.mrenclave.as_slice() == mrenclave)
     }
 }
 
@@ -332,7 +488,6 @@ impl MockTEEGenerator {
     /// Derive P-256 public key from private key
     fn derive_public_key(private_key: &[u8]) -> Vec<u8> {
         use p256::ecdsa::SigningKey;
-        use p256::elliptic_curve::sec1::ToEncodedPoint;
 
         let signing_key = SigningKey::from_bytes(private_key.into())
             .expect("Invalid private key");
@@ -340,6 +495,17 @@ impl MockTEEGenerator {
 
         // Return uncompressed public key (65 bytes: 0x04 || x || y)
         verifying_key.to_encoded_point(false).as_bytes().to_vec()
+    }
+
+    /// Get the precomputed test public key for validation
+    pub fn expected_test_public_key() -> &'static [u8; 65] {
+        &Self::TEST_PUBLIC_KEY
+    }
+
+    /// Validate that key derivation produces expected result
+    pub fn validate_key_derivation() -> bool {
+        let derived = Self::derive_public_key(&Self::TEST_PRIVATE_KEY);
+        derived == Self::TEST_PUBLIC_KEY.to_vec()
     }
 
     /// Generate a production-formatted TEE quote
