@@ -11,15 +11,35 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tracing::{info, error};
+use tracing::{info, error, debug};
 
 use crate::coordinator::job_processor::JobProcessor;
 use crate::node::coordinator::{JobRequest, JobType as CoordinatorJobType};
+use crate::compute::job_estimation::JobEstimator;
 
 /// API state
 #[derive(Clone)]
 pub struct SubmissionApiState {
     pub job_processor: Arc<JobProcessor>,
+    pub estimator: Arc<JobEstimator>,
+}
+
+impl SubmissionApiState {
+    /// Create a new submission API state with default estimator
+    pub fn new(job_processor: Arc<JobProcessor>) -> Self {
+        Self {
+            job_processor,
+            estimator: Arc::new(JobEstimator::new()),
+        }
+    }
+
+    /// Create with custom estimator
+    pub fn with_estimator(job_processor: Arc<JobProcessor>, estimator: JobEstimator) -> Self {
+        Self {
+            job_processor,
+            estimator: Arc::new(estimator),
+        }
+    }
 }
 
 /// Job submission request (API format)
@@ -67,7 +87,9 @@ async fn submit_job(
     Json(payload): Json<SubmitJobRequest>,
 ) -> Result<Json<SubmitJobResponse>, (StatusCode, String)> {
     info!("Received job submission: {:?}", payload.job_type);
-    
+
+    let priority = payload.priority.unwrap_or(5);
+
     // Parse job type and create job request
     let job_request = match parse_job_request(payload) {
         Ok(req) => req,
@@ -76,22 +98,38 @@ async fn submit_job(
             return Err((StatusCode::BAD_REQUEST, e));
         }
     };
-    
+
+    // Estimate cost and duration before submission
+    let estimate = state.estimator.estimate(&job_request.job_type, priority);
+    debug!(
+        "Job estimate: duration={}s, cost={}, tasks={}, gpu={}",
+        estimate.duration_secs,
+        estimate.cost_formatted,
+        estimate.estimated_tasks,
+        estimate.requires_gpu
+    );
+
     // Submit job to processor
     let job_id = state.job_processor.submit_job(job_request).await
         .map_err(|e| {
             error!("Failed to submit job: {}", e);
             (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
         })?;
-    
-    info!("Job {} submitted successfully", job_id);
-    
+
+    info!(
+        "Job {} submitted successfully (estimated: {}s, {})",
+        job_id, estimate.duration_secs, estimate.cost_formatted
+    );
+
     Ok(Json(SubmitJobResponse {
         job_id: job_id.to_string(),
         status: "submitted".to_string(),
-        message: "Job submitted successfully and queued for execution".to_string(),
-        estimated_cost: None, // TODO: Implement cost estimation
-        estimated_duration_secs: None, // TODO: Implement duration estimation
+        message: format!(
+            "Job submitted successfully. Estimated {} tasks, requires GPU: {}",
+            estimate.estimated_tasks, estimate.requires_gpu
+        ),
+        estimated_cost: Some(estimate.cost_wei as u64),
+        estimated_duration_secs: Some(estimate.duration_secs),
     }))
 }
 
@@ -101,24 +139,32 @@ async fn submit_batch_jobs(
     Json(payload): Json<Vec<SubmitJobRequest>>,
 ) -> Result<Json<Vec<SubmitJobResponse>>, (StatusCode, String)> {
     info!("Received batch submission with {} jobs", payload.len());
-    
+
     if payload.len() > 100 {
         return Err((StatusCode::BAD_REQUEST, "Batch size exceeds maximum of 100 jobs".to_string()));
     }
-    
+
     let mut responses = Vec::new();
-    
+
     for job_payload in payload {
+        let priority = job_payload.priority.unwrap_or(5);
+
         match parse_job_request(job_payload) {
             Ok(job_request) => {
+                // Estimate cost and duration
+                let estimate = state.estimator.estimate(&job_request.job_type, priority);
+
                 match state.job_processor.submit_job(job_request).await {
                     Ok(job_id) => {
                         responses.push(SubmitJobResponse {
                             job_id: job_id.to_string(),
                             status: "submitted".to_string(),
-                            message: "Job submitted successfully".to_string(),
-                            estimated_cost: None,
-                            estimated_duration_secs: None,
+                            message: format!(
+                                "Job submitted. Est. {} tasks, GPU: {}",
+                                estimate.estimated_tasks, estimate.requires_gpu
+                            ),
+                            estimated_cost: Some(estimate.cost_wei as u64),
+                            estimated_duration_secs: Some(estimate.duration_secs),
                         });
                     },
                     Err(e) => {
@@ -145,7 +191,7 @@ async fn submit_batch_jobs(
             }
         }
     }
-    
+
     Ok(Json(responses))
 }
 

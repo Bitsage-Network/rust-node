@@ -405,6 +405,12 @@ mod tests {
             execution_time: 100,
             total_cost: 50,
             error_message: None,
+            proof_hash: None,
+            proof_attestation: None,
+            proof_commitment: None,
+            compressed_proof: None,
+            proof_size_bytes: None,
+            proof_time_ms: None,
         }
     }
 }
