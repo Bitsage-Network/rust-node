@@ -1,18 +1,19 @@
 #!/bin/bash
 #
-# BitSage GPU Worker - One-Click Installation
+# BitSage GPU Worker - One-Command Installation
 #
 # Usage:
-#   curl -sSL https://get.bitsage.network | bash
-#   or
+#   curl -sSL https://raw.githubusercontent.com/Bitsage-Network/rust-node/main/scripts/install.sh | bash
+#
+# Or run directly:
 #   ./install.sh
 #
-# This wizard will:
-#   1. Detect your GPU and system configuration
-#   2. Install all dependencies (Rust, CUDA drivers)
-#   3. Download and build the sage-worker
-#   4. Run the interactive setup wizard
-#   5. Register with the network and start earning
+# This script will:
+#   1. Detect your GPU, TEE, and system configuration
+#   2. Install all dependencies (Rust, build tools)
+#   3. Clone and build the STWO prover and sage-worker
+#   4. Run the setup wizard
+#   5. Start earning SAGE tokens
 #
 
 set -e
@@ -26,20 +27,20 @@ CYAN='\033[0;36m'
 MAGENTA='\033[0;35m'
 NC='\033[0m'
 BOLD='\033[1m'
+DIM='\033[2m'
 
 # Configuration
-VERSION="1.0.0"
-INSTALL_DIR="$HOME/.bitsage"
-BIN_DIR="$INSTALL_DIR/bin"
-REPO_URL="https://github.com/Bitsage-Network/rust-node"
-RELEASE_URL="https://github.com/Bitsage-Network/rust-node/releases/latest/download"
+VERSION="2.0.0"
+INSTALL_DIR="${BITSAGE_HOME:-$HOME/bitsage}"
+BIN_DIR="$HOME/.local/bin"
+RUST_NODE_REPO="https://github.com/Bitsage-Network/rust-node.git"
+STWO_REPO="https://github.com/Bitsage-Network/stwo-gpu.git"
 
 # Coordinator URLs
 MAINNET_COORDINATOR="https://coordinator.bitsage.network"
-SEPOLIA_COORDINATOR="http://35.163.191.22:8080"  # AWS EC2 Sepolia Coordinator
+SEPOLIA_COORDINATOR="http://35.163.191.22:8080"
 
 print_banner() {
-    clear
     echo -e "${CYAN}"
     cat << 'EOF'
 
@@ -50,9 +51,8 @@ print_banner() {
     ██████╔╝██║   ██║   ███████║██║  ██║╚██████╔╝███████╗
     ╚═════╝ ╚═╝   ╚═╝   ╚══════╝╚═╝  ╚═╝ ╚═════╝ ╚══════╝
 
-           GPU WORKER INSTALLATION WIZARD v1.0.0
-
-    Decentralized AI Compute | STWO Proofs | Earn SAGE
+         GPU-Accelerated Compute Network on Starknet
+                  ONE-COMMAND INSTALLER v2.0
 
 EOF
     echo -e "${NC}"
@@ -86,110 +86,170 @@ detect_os() {
         if [ -f /etc/os-release ]; then
             . /etc/os-release
             DISTRO=$ID
+            DISTRO_VERSION=$VERSION_ID
+            DISTRO_NAME=$PRETTY_NAME
         fi
     elif [[ "$OSTYPE" == "darwin"* ]]; then
         OS="macos"
         DISTRO="macos"
+        DISTRO_NAME="macOS $(sw_vers -productVersion 2>/dev/null)"
     else
         print_error "Unsupported operating system: $OSTYPE"
         exit 1
     fi
 }
 
-detect_gpu() {
-    print_step "Step 1/6: Detecting Hardware"
+detect_system() {
+    print_step "Step 1/6: System Detection"
 
-    # Detect NVIDIA GPU
+    echo -e "${CYAN}┌─────────────────────────────────────────────────────────────────┐${NC}"
+    echo -e "${CYAN}│${NC}                    ${BOLD}SYSTEM INFORMATION${NC}                          ${CYAN}│${NC}"
+    echo -e "${CYAN}├─────────────────────────────────────────────────────────────────┤${NC}"
+
+    # OS Info
+    echo -e "${CYAN}│${NC}  ${BOLD}OS:${NC}          $DISTRO_NAME"
+    echo -e "${CYAN}│${NC}  ${BOLD}Kernel:${NC}      $(uname -r)"
+
+    # CPU Info
+    if [ "$OS" == "linux" ]; then
+        CPU_MODEL=$(lscpu 2>/dev/null | grep "Model name" | cut -d':' -f2 | xargs)
+        CPU_CORES=$(nproc 2>/dev/null || echo "?")
+    else
+        CPU_MODEL=$(sysctl -n machdep.cpu.brand_string 2>/dev/null || echo "Unknown")
+        CPU_CORES=$(sysctl -n hw.ncpu 2>/dev/null || echo "?")
+    fi
+    echo -e "${CYAN}│${NC}  ${BOLD}CPU:${NC}         $CPU_MODEL / ${CPU_CORES} cores"
+
+    # RAM Info
+    if [ "$OS" == "linux" ]; then
+        RAM_GB=$(free -g 2>/dev/null | awk '/^Mem:/{print $2}')
+    else
+        RAM_GB=$(($(sysctl -n hw.memsize 2>/dev/null || echo 0) / 1024 / 1024 / 1024))
+    fi
+    echo -e "${CYAN}│${NC}  ${BOLD}RAM:${NC}         ${RAM_GB}GB"
+
+    echo -e "${CYAN}├─────────────────────────────────────────────────────────────────┤${NC}"
+    echo -e "${CYAN}│${NC}                      ${BOLD}GPU INFORMATION${NC}                           ${CYAN}│${NC}"
+    echo -e "${CYAN}├─────────────────────────────────────────────────────────────────┤${NC}"
+
+    # GPU Detection
+    HAS_GPU=false
+    GPU_TYPE="none"
+
     if command -v nvidia-smi &> /dev/null; then
-        GPU_INFO=$(nvidia-smi --query-gpu=name,memory.total,compute_cap --format=csv,noheader 2>/dev/null | head -1)
-        if [ -n "$GPU_INFO" ]; then
-            GPU_NAME=$(echo "$GPU_INFO" | cut -d',' -f1 | xargs)
-            GPU_MEMORY=$(echo "$GPU_INFO" | cut -d',' -f2 | xargs)
-            GPU_COMPUTE=$(echo "$GPU_INFO" | cut -d',' -f3 | xargs)
-            GPU_COUNT=$(nvidia-smi -L 2>/dev/null | wc -l)
+        GPU_COUNT=$(nvidia-smi -L 2>/dev/null | wc -l | xargs)
+        if [ "$GPU_COUNT" -gt 0 ]; then
             HAS_GPU=true
-            print_success "NVIDIA GPU detected: $GPU_NAME"
-            print_success "GPU Memory: $GPU_MEMORY"
-            print_success "Compute Capability: $GPU_COMPUTE"
-            print_success "GPU Count: $GPU_COUNT"
+            GPU_TYPE="NVIDIA"
+
+            # Get detailed GPU info
+            GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1 | xargs)
+            GPU_MEMORY_MB=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -1 | xargs)
+            GPU_MEMORY_GB=$((GPU_MEMORY_MB / 1024))
+            GPU_DRIVER=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -1 | xargs)
+            GPU_CUDA=$(nvcc --version 2>/dev/null | grep "release" | awk '{print $5}' | sed 's/,//' || echo "N/A")
+            GPU_COMPUTE=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -1 | xargs)
+            GPU_UTIL=$(nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader 2>/dev/null | head -1 | xargs)
+            GPU_TEMP=$(nvidia-smi --query-gpu=temperature.gpu --format=csv,noheader 2>/dev/null | head -1 | xargs)
+            GPU_POWER=$(nvidia-smi --query-gpu=power.draw --format=csv,noheader 2>/dev/null | head -1 | xargs)
+
+            echo -e "${CYAN}│${NC}  ${BOLD}GPUs:${NC}         ${GREEN}$GPU_NAME x$GPU_COUNT${NC}"
+            echo -e "${CYAN}│${NC}  ${BOLD}VRAM:${NC}         ${GPU_MEMORY_GB}GB per GPU"
+            echo -e "${CYAN}│${NC}  ${BOLD}Driver:${NC}       $GPU_DRIVER"
+            echo -e "${CYAN}│${NC}  ${BOLD}CUDA:${NC}         $GPU_CUDA"
+            echo -e "${CYAN}│${NC}  ${BOLD}Compute:${NC}      $GPU_COMPUTE"
+            echo -e "${CYAN}│${NC}  ${BOLD}Status:${NC}       ${GPU_UTIL} util, ${GPU_TEMP}°C, ${GPU_POWER}"
+
+            # Determine GPU tier
+            if [[ "$GPU_NAME" =~ H100|H200|B100|B200 ]]; then
+                GPU_TIER="Enterprise"
+                MIN_STAKE="10000"
+            elif [[ "$GPU_NAME" =~ A100|A800 ]]; then
+                GPU_TIER="DataCenter"
+                MIN_STAKE="5000"
+            elif [[ "$GPU_NAME" =~ A6000|L40|L4|A5000 ]]; then
+                GPU_TIER="Workstation"
+                MIN_STAKE="2500"
+            elif [[ "$GPU_NAME" =~ 4090|4080|3090 ]]; then
+                GPU_TIER="Consumer"
+                MIN_STAKE="1000"
+            else
+                GPU_TIER="Basic"
+                MIN_STAKE="500"
+            fi
         fi
     fi
 
-    # Detect AMD GPU
-    if [ -z "$HAS_GPU" ] && command -v rocm-smi &> /dev/null; then
-        GPU_NAME=$(rocm-smi --showproductname 2>/dev/null | grep -i "Card series" | head -1 | cut -d':' -f2 | xargs)
-        if [ -n "$GPU_NAME" ]; then
+    # AMD GPU detection
+    if [ "$HAS_GPU" = false ] && command -v rocm-smi &> /dev/null; then
+        AMD_GPU=$(rocm-smi --showproductname 2>/dev/null | grep -i "card" | head -1)
+        if [ -n "$AMD_GPU" ]; then
             HAS_GPU=true
             GPU_TYPE="AMD"
-            print_success "AMD GPU detected: $GPU_NAME"
+            GPU_NAME="$AMD_GPU"
+            echo -e "${CYAN}│${NC}  ${BOLD}GPUs:${NC}         ${GREEN}$GPU_NAME${NC}"
+            GPU_TIER="Workstation"
+            MIN_STAKE="2500"
         fi
     fi
 
-    if [ -z "$HAS_GPU" ]; then
-        print_warning "No GPU detected - worker will run in CPU mode"
-        print_info "For optimal performance, use an NVIDIA GPU (RTX 3090+, A100, H100)"
-        HAS_GPU=false
-    fi
-
-    # Detect CPU
-    if [ "$OS" == "linux" ]; then
-        CPU_INFO=$(lscpu | grep "Model name" | cut -d':' -f2 | xargs)
-        CPU_CORES=$(nproc)
-    else
-        CPU_INFO=$(sysctl -n machdep.cpu.brand_string 2>/dev/null)
-        CPU_CORES=$(sysctl -n hw.ncpu)
-    fi
-    print_success "CPU: $CPU_INFO ($CPU_CORES cores)"
-
-    # Detect RAM
-    if [ "$OS" == "linux" ]; then
-        RAM_GB=$(free -g | awk '/^Mem:/{print $2}')
-    else
-        RAM_GB=$(($(sysctl -n hw.memsize) / 1024 / 1024 / 1024))
-    fi
-    print_success "RAM: ${RAM_GB}GB"
-
-    # Detect TEE support
-    if [ -f /dev/tdx_guest ] || [ -d /sys/kernel/security/tdx ]; then
-        TEE_TYPE="Intel TDX"
-        HAS_TEE=true
-    elif [ -f /dev/sev-guest ] || [ -d /sys/kernel/security/sev ]; then
-        TEE_TYPE="AMD SEV-SNP"
-        HAS_TEE=true
-    elif nvidia-smi --query-gpu=mig.mode.current --format=csv,noheader 2>/dev/null | grep -qi "enabled"; then
-        TEE_TYPE="NVIDIA Confidential Computing"
-        HAS_TEE=true
-    else
-        HAS_TEE=false
-    fi
-
-    if [ "$HAS_TEE" = true ]; then
-        print_success "TEE Support: $TEE_TYPE"
-    else
-        print_info "TEE Support: Not detected (simulated mode available)"
-    fi
-
-    # Determine staking tier
-    if [ "$HAS_GPU" = true ]; then
-        GPU_MEM_GB=$(echo "$GPU_MEMORY" | grep -oE '[0-9]+' | head -1)
-        if [ "$GPU_MEM_GB" -ge 70 ]; then
-            STAKE_TIER="Enterprise"
-            MIN_STAKE="10000"
-        elif [ "$GPU_MEM_GB" -ge 40 ]; then
-            STAKE_TIER="Professional"
-            MIN_STAKE="5000"
-        elif [ "$GPU_MEM_GB" -ge 20 ]; then
-            STAKE_TIER="Standard"
-            MIN_STAKE="1000"
-        else
-            STAKE_TIER="Basic"
-            MIN_STAKE="100"
-        fi
-    else
-        STAKE_TIER="Basic"
+    if [ "$HAS_GPU" = false ]; then
+        echo -e "${CYAN}│${NC}  ${BOLD}GPUs:${NC}         ${YELLOW}None detected (CPU-only mode)${NC}"
+        GPU_TIER="CPU"
         MIN_STAKE="100"
     fi
-    print_success "Staking Tier: $STAKE_TIER (min ${MIN_STAKE} SAGE)"
+
+    echo -e "${CYAN}├─────────────────────────────────────────────────────────────────┤${NC}"
+    echo -e "${CYAN}│${NC}                  ${BOLD}SECURITY & PRIVACY${NC}                           ${CYAN}│${NC}"
+    echo -e "${CYAN}├─────────────────────────────────────────────────────────────────┤${NC}"
+
+    # TEE Detection
+    TEE_STATUS="${RED}Not Available${NC}"
+    HAS_TEE=false
+
+    # Intel TDX
+    if [ -f /dev/tdx_guest ] || [ -d /sys/kernel/security/tdx ] || dmesg 2>/dev/null | grep -qi "tdx"; then
+        TEE_STATUS="${GREEN}Intel TDX${NC}"
+        TEE_TYPE="TDX"
+        HAS_TEE=true
+    # AMD SEV-SNP
+    elif [ -f /dev/sev-guest ] || [ -d /sys/kernel/security/sev ] || dmesg 2>/dev/null | grep -qi "sev"; then
+        TEE_STATUS="${GREEN}AMD SEV-SNP${NC}"
+        TEE_TYPE="SEV"
+        HAS_TEE=true
+    # NVIDIA Confidential Computing (H100)
+    elif [ "$HAS_GPU" = true ] && [[ "$GPU_NAME" =~ H100|H200 ]]; then
+        # Check if CC mode is available
+        if nvidia-smi conf-compute -i 0 2>/dev/null | grep -qi "enabled\|on"; then
+            TEE_STATUS="${GREEN}NVIDIA CC (Active)${NC}"
+            TEE_TYPE="NVIDIA_CC"
+            HAS_TEE=true
+        else
+            TEE_STATUS="${YELLOW}NVIDIA CC (Available)${NC}"
+            TEE_TYPE="NVIDIA_CC_AVAILABLE"
+        fi
+    fi
+    echo -e "${CYAN}│${NC}  ${BOLD}TEE:${NC}          $TEE_STATUS"
+
+    # FHE Support (based on CPU/GPU capabilities)
+    FHE_STATUS="${YELLOW}Software Mode${NC}"
+    if [ "$HAS_GPU" = true ] && [ "$GPU_MEMORY_GB" -ge 40 ]; then
+        FHE_STATUS="${GREEN}GPU-Accelerated${NC}"
+    fi
+    echo -e "${CYAN}│${NC}  ${BOLD}FHE:${NC}          $FHE_STATUS"
+
+    # STWO Proving capability
+    if [ "$HAS_GPU" = true ]; then
+        STWO_STATUS="${GREEN}GPU-Accelerated${NC}"
+    else
+        STWO_STATUS="${YELLOW}CPU Mode${NC}"
+    fi
+    echo -e "${CYAN}│${NC}  ${BOLD}STWO:${NC}         $STWO_STATUS"
+
+    echo -e "${CYAN}├─────────────────────────────────────────────────────────────────┤${NC}"
+    echo -e "${CYAN}│${NC}  ${BOLD}Worker Tier:${NC}  ${GREEN}$GPU_TIER${NC} (min stake: ${MIN_STAKE} SAGE)"
+    echo -e "${CYAN}└─────────────────────────────────────────────────────────────────┘${NC}"
+    echo
 }
 
 install_dependencies() {
@@ -219,55 +279,59 @@ install_dependencies() {
     fi
 }
 
-download_worker() {
-    print_step "Step 3/6: Downloading BitSage Worker"
+clone_repositories() {
+    print_step "Step 3/6: Cloning BitSage Repositories"
 
+    mkdir -p "$INSTALL_DIR"
+    mkdir -p "$INSTALL_DIR/libs"
     mkdir -p "$BIN_DIR"
 
-    # Try to download pre-built binary first
-    ARCH=$(uname -m)
-    if [ "$ARCH" == "x86_64" ]; then
-        BINARY_NAME="sage-worker-linux-x86_64"
-    elif [ "$ARCH" == "aarch64" ]; then
-        BINARY_NAME="sage-worker-linux-arm64"
-    fi
-
-    print_info "Checking for pre-built binary..."
-    if curl -sSL -o "$BIN_DIR/sage-worker" "$RELEASE_URL/$BINARY_NAME" 2>/dev/null; then
-        chmod +x "$BIN_DIR/sage-worker"
-        if "$BIN_DIR/sage-worker" --version &>/dev/null; then
-            print_success "Downloaded pre-built binary"
-            BUILD_FROM_SOURCE=false
-        else
-            BUILD_FROM_SOURCE=true
-        fi
+    # Clone rust-node
+    if [ -d "$INSTALL_DIR/rust-node" ]; then
+        print_info "rust-node already exists, pulling latest..."
+        cd "$INSTALL_DIR/rust-node"
+        git pull --ff-only 2>/dev/null || true
     else
-        BUILD_FROM_SOURCE=true
+        print_info "Cloning rust-node..."
+        git clone --depth 1 "$RUST_NODE_REPO" "$INSTALL_DIR/rust-node" 2>&1 | tail -2
+    fi
+    print_success "rust-node ready"
+
+    # Clone stwo-gpu
+    if [ -d "$INSTALL_DIR/libs/stwo" ]; then
+        print_info "stwo-gpu already exists, pulling latest..."
+        cd "$INSTALL_DIR/libs/stwo"
+        git pull --ff-only 2>/dev/null || true
+    else
+        print_info "Cloning stwo-gpu (STWO prover with GPU support)..."
+        git clone --depth 1 "$STWO_REPO" "$INSTALL_DIR/libs/stwo" 2>&1 | tail -2
+    fi
+    print_success "stwo-gpu ready"
+}
+
+build_worker() {
+    print_step "Step 4/6: Building BitSage Worker"
+
+    cd "$INSTALL_DIR/rust-node"
+    source "$HOME/.cargo/env" 2>/dev/null || true
+
+    # Determine build features
+    BUILD_FEATURES=""
+    if [ "$HAS_GPU" = true ] && [ "$GPU_TYPE" = "NVIDIA" ]; then
+        BUILD_FEATURES="--features cuda"
+        print_info "Building with GPU acceleration (CUDA)..."
+    else
+        print_info "Building CPU-only version..."
     fi
 
-    if [ "$BUILD_FROM_SOURCE" = true ]; then
-        print_info "Building from source (this may take 5-10 minutes)..."
+    # Build the worker
+    echo -e "${DIM}"
+    cargo build --release --bin sage-worker $BUILD_FEATURES 2>&1 | tail -10
+    echo -e "${NC}"
 
-        # Clone repository
-        TEMP_DIR=$(mktemp -d)
-        git clone --depth 1 "$REPO_URL" "$TEMP_DIR/bitsage-network" 2>/dev/null || {
-            print_warning "Could not clone from GitHub, using local build..."
-        }
-
-        # Build worker
-        cd "$TEMP_DIR/bitsage-network/rust-node" 2>/dev/null || cd "$(dirname "$0")/.."
-
-        source "$HOME/.cargo/env"
-        cargo build --release --bin sage-worker
-
-        cp target/release/sage-worker "$BIN_DIR/"
-        chmod +x "$BIN_DIR/sage-worker"
-
-        # Cleanup
-        rm -rf "$TEMP_DIR"
-
-        print_success "Worker built from source"
-    fi
+    # Copy to bin directory
+    cp "$INSTALL_DIR/rust-node/target/release/sage-worker" "$BIN_DIR/"
+    chmod +x "$BIN_DIR/sage-worker"
 
     # Add to PATH
     if ! grep -q "$BIN_DIR" "$HOME/.bashrc" 2>/dev/null; then
@@ -278,113 +342,49 @@ download_worker() {
     fi
     export PATH="$BIN_DIR:$PATH"
 
-    print_success "Worker installed: $("$BIN_DIR/sage-worker" --version)"
-}
-
-select_network() {
-    print_step "Step 4/6: Network Selection"
-
-    echo -e "  ${BOLD}Select Network:${NC}\n"
-    echo -e "    ${GREEN}1) Sepolia Testnet${NC} (Recommended for testing)"
-    echo -e "       - Free test tokens available"
-    echo -e "       - No real value at stake"
-    echo -e ""
-    echo -e "    ${YELLOW}2) Starknet Mainnet${NC}"
-    echo -e "       - Real SAGE tokens required"
-    echo -e "       - Earn real rewards"
-    echo -e ""
-
-    echo -ne "  ${CYAN}Select network [1-2]:${NC} "
-    read -r selection
-
-    case "$selection" in
-        2)
-            NETWORK="mainnet"
-            COORDINATOR_URL="$MAINNET_COORDINATOR"
-            print_warning "Mainnet selected - real tokens will be used!"
-            ;;
-        *)
-            NETWORK="sepolia"
-            COORDINATOR_URL="$SEPOLIA_COORDINATOR"
-            print_success "Sepolia testnet selected"
-            ;;
-    esac
+    print_success "Worker built: $(sage-worker --version 2>/dev/null || echo 'sage-worker')"
 }
 
 run_setup_wizard() {
     print_step "Step 5/6: Worker Configuration"
 
-    print_info "Starting interactive setup wizard..."
+    # Default to sepolia for safety
+    NETWORK="sepolia"
+
+    print_info "Running worker setup for Sepolia testnet..."
     echo ""
 
     # Run the built-in setup wizard
     "$BIN_DIR/sage-worker" setup --network "$NETWORK"
 }
 
-start_worker() {
-    print_step "Step 6/6: Starting Worker"
+print_completion() {
+    print_step "Step 6/6: Installation Complete"
 
-    echo -e "  ${BOLD}How would you like to run the worker?${NC}\n"
-    echo -e "    1) Start now in foreground (recommended for testing)"
-    echo -e "    2) Start as systemd service (runs on boot)"
-    echo -e "    3) Start in tmux/screen session"
-    echo -e "    4) Don't start now (I'll start it manually)"
-    echo -e ""
-
-    echo -ne "  ${CYAN}Select option [1-4]:${NC} "
-    read -r start_option
-
-    case "$start_option" in
-        1)
-            print_info "Starting worker in foreground..."
-            print_info "Press Ctrl+C to stop"
-            echo ""
-            "$BIN_DIR/sage-worker" start
-            ;;
-        2)
-            print_info "Creating systemd service..."
-            sudo tee /etc/systemd/system/bitsage-worker.service > /dev/null << EOF
-[Unit]
-Description=BitSage GPU Worker
-After=network.target
-
-[Service]
-Type=simple
-User=$USER
-ExecStart=$BIN_DIR/sage-worker start
-Restart=always
-RestartSec=10
-Environment=RUST_LOG=info
-
-[Install]
-WantedBy=multi-user.target
-EOF
-            sudo systemctl daemon-reload
-            sudo systemctl enable bitsage-worker
-            sudo systemctl start bitsage-worker
-            print_success "Worker started as systemd service"
-            print_info "Check status: sudo systemctl status bitsage-worker"
-            print_info "View logs: sudo journalctl -u bitsage-worker -f"
-            ;;
-        3)
-            if command -v tmux &> /dev/null; then
-                tmux new-session -d -s bitsage "$BIN_DIR/sage-worker start"
-                print_success "Worker started in tmux session 'bitsage'"
-                print_info "Attach with: tmux attach -t bitsage"
-            elif command -v screen &> /dev/null; then
-                screen -dmS bitsage "$BIN_DIR/sage-worker" start
-                print_success "Worker started in screen session 'bitsage'"
-                print_info "Attach with: screen -r bitsage"
-            else
-                print_error "Neither tmux nor screen is installed"
-                print_info "Install with: sudo apt install tmux"
-            fi
-            ;;
-        *)
-            print_info "Worker not started. Start manually with:"
-            echo -e "    ${CYAN}sage-worker start${NC}"
-            ;;
-    esac
+    echo -e "${GREEN}"
+    echo "╔═══════════════════════════════════════════════════════════════════╗"
+    echo "║                  BITSAGE WORKER INSTALLED                         ║"
+    echo "╠═══════════════════════════════════════════════════════════════════╣"
+    echo "║                                                                   ║"
+    echo "║  Installation:  $INSTALL_DIR"
+    echo "║  Binary:        $BIN_DIR/sage-worker"
+    echo "║                                                                   ║"
+    echo "╠═══════════════════════════════════════════════════════════════════╣"
+    echo "║  QUICK START:                                                     ║"
+    echo "║                                                                   ║"
+    echo "║    sage-worker start     # Start earning SAGE                     ║"
+    echo "║    sage-worker status    # Check status & earnings                ║"
+    echo "║    sage-worker stake     # Stake tokens for priority              ║"
+    echo "║                                                                   ║"
+    echo "╠═══════════════════════════════════════════════════════════════════╣"
+    echo "║  RESOURCES:                                                       ║"
+    echo "║                                                                   ║"
+    echo "║    Dashboard:     https://dashboard.bitsage.network               ║"
+    echo "║    Documentation: https://docs.bitsage.network                    ║"
+    echo "║    Discord:       https://discord.gg/bitsage                      ║"
+    echo "║                                                                   ║"
+    echo "╚═══════════════════════════════════════════════════════════════════╝"
+    echo -e "${NC}"
 }
 
 print_summary() {
@@ -442,20 +442,27 @@ print_summary() {
 main() {
     print_banner
 
-    echo -e "  Welcome to the BitSage GPU Worker installation wizard!"
-    echo -e "  This will guide you through setting up your node to earn SAGE tokens."
+    echo -e "  ${BOLD}One-command installer for BitSage GPU Workers${NC}"
+    echo -e "  Earn SAGE tokens by providing GPU compute to the network."
     echo ""
-    echo -ne "  ${CYAN}Press Enter to continue or Ctrl+C to cancel...${NC}"
-    read -r
+
+    # Auto-detect or prompt
+    if [ -t 0 ]; then
+        echo -ne "  ${CYAN}Press Enter to begin installation...${NC}"
+        read -r
+    fi
 
     detect_os
-    detect_gpu
+    detect_system
     install_dependencies
-    download_worker
-    select_network
+    clone_repositories
+    build_worker
     run_setup_wizard
-    start_worker
-    print_summary
+    print_completion
+
+    echo ""
+    echo -e "  ${GREEN}Ready to start earning!${NC} Run: ${CYAN}sage-worker start${NC}"
+    echo ""
 }
 
 main "$@"
