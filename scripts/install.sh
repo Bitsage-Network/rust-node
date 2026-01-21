@@ -315,21 +315,20 @@ build_worker() {
     cd "$INSTALL_DIR/rust-node"
     source "$HOME/.cargo/env" 2>/dev/null || true
 
-    # Determine build features
-    BUILD_FEATURES=""
-    if [ "$HAS_GPU" = true ] && [ "$GPU_TYPE" = "NVIDIA" ]; then
-        BUILD_FEATURES="--features cuda"
-        print_info "Building with GPU acceleration (CUDA)..."
-    else
-        print_info "Building CPU-only version..."
-    fi
+    # Build the worker (GPU acceleration handled by STWO library)
+    print_info "Building sage-worker..."
 
     # Build the worker
     echo -e "${DIM}"
-    cargo build --release --bin sage-worker $BUILD_FEATURES 2>&1 | tail -10
+    if ! cargo build --release --bin sage-worker 2>&1 | tail -15; then
+        echo -e "${NC}"
+        print_error "Build failed. Check error messages above."
+        exit 1
+    fi
     echo -e "${NC}"
 
     # Copy to bin directory
+    mkdir -p "$BIN_DIR"
     cp "$INSTALL_DIR/rust-node/target/release/sage-worker" "$BIN_DIR/"
     chmod +x "$BIN_DIR/sage-worker"
 
@@ -342,7 +341,11 @@ build_worker() {
     fi
     export PATH="$BIN_DIR:$PATH"
 
-    print_success "Worker built: $(sage-worker --version 2>/dev/null || echo 'sage-worker')"
+    if [ "$HAS_GPU" = true ]; then
+        print_success "Worker built with GPU support (STWO GPU backend)"
+    else
+        print_success "Worker built (CPU mode)"
+    fi
 }
 
 run_setup_wizard() {
