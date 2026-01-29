@@ -71,6 +71,25 @@ keystore_password = "bitsage123"
 
 **Note:** Uses development keystore decryption (implement proper scrypt for production).
 
+### 2b. INVOKE_V3 Paymaster Support (100% Complete)
+
+**File:** `src/obelysk/starknet/starknet_client.rs`
+
+**Features:**
+- ✅ `ResourceBounds` struct for STRK fee market (L1/L2 gas)
+- ✅ `compute_invoke_v3_hash()` using Poseidon hash (not Pedersen)
+- ✅ `invoke_contract_v3()` with `paymaster_data`, `resource_bounds`, DA modes
+- ✅ `submit_proof_v3()` public API with automatic V1 fallback
+- ✅ `estimate_fee_v3()` for V3 fee estimation
+- ✅ `paymaster_address` in `StarknetClientConfig`
+
+**Configuration:**
+```bash
+PAYMASTER_ADDRESS=0x<funded_paymaster_contract>
+```
+
+Workers submit proofs without gas using a funded paymaster contract. The `paymaster_data` field in V3 transactions directs the sequencer to charge the paymaster instead of the sender.
+
 ---
 
 ### 3. Production Fraud Proof Client (100% Complete)

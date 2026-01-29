@@ -145,6 +145,27 @@ const proof = await prover.generateProof(traceData);
 const txHash = await client.submitProof(proof);
 ```
 
+## Gasless Proof Submission (V3 Paymaster)
+
+Workers can submit proofs without holding STRK for gas by using a paymaster contract that sponsors transaction fees.
+
+### Setup
+
+Add the paymaster address to your environment:
+
+```bash
+export PAYMASTER_ADDRESS=0x<funded_paymaster_contract>
+```
+
+Or add it to your `.env` file. The worker will automatically use INVOKE_V3 transactions with `paymaster_data` when this is set. If unset, standard V1 transactions are used (requires STRK for gas).
+
+### How It Works
+
+- V3 transactions use **STRK resource bounds** instead of `max_fee`
+- The `paymaster_data` field tells the sequencer which contract pays gas
+- Transaction hashes use **Poseidon** (not Pedersen) for V3
+- Falls back to V1 automatically if no paymaster is configured
+
 ## Troubleshooting
 
 ### CUDA Not Found
