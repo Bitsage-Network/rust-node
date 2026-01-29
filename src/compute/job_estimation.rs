@@ -317,6 +317,25 @@ impl JobEstimator {
                 let tasks = if *parallelizable { 4 } else { 1 };
                 (duration, 2048, false, tasks, 0.5)
             }
+
+            JobType::ModelTraining { num_gpus, .. } => {
+                (3600, 65536, true, *num_gpus, 0.4)
+            }
+
+            JobType::RLTraining { training_steps, .. } => {
+                let duration = (*training_steps / 50).max(120);
+                (duration, 32768, true, 1, 0.4)
+            }
+
+            JobType::FHECompute { .. } => (300, 16384, true, 1, 0.6),
+            JobType::ConfidentialAI { .. } => (600, 32768, true, 1, 0.5),
+            JobType::ModelDeploy { .. } => (120, 16384, true, 1, 0.7),
+            JobType::ModelInference { .. } => (10, 8192, true, 1, 0.8),
+            JobType::BatchInference { batch_size, .. } => {
+                let duration = (*batch_size as u64 * 5).max(10);
+                let tasks = (*batch_size as u32 / 10).max(1);
+                (duration, 16384, true, tasks, 0.75)
+            }
         }
     }
 

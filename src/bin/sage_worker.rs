@@ -1114,21 +1114,65 @@ async fn cmd_start(config_dir: &str, config_file: Option<PathBuf>, foreground: b
     }
     println!();
 
+    // Auto-detect local vLLM server
+    let vllm_endpoint = detect_vllm().await;
+    if let Some(ref ep) = vllm_endpoint {
+        println!("  vLLM:         {} (auto-detected)", ep);
+    } else {
+        println!("  vLLM:         Not detected (will use mock inference)");
+    }
+    println!();
+
     if foreground {
         println!("  Running in foreground... (Ctrl+C to stop)");
         println!();
-        run_worker(config).await?;
+        run_worker(config, vllm_endpoint).await?;
     } else {
         println!("  Starting in background...");
         // In production, this would daemonize
         // For now, just run in foreground
-        run_worker(config).await?;
+        run_worker(config, vllm_endpoint).await?;
     }
 
     Ok(())
 }
 
-async fn run_worker(config: WorkerConfig) -> Result<()> {
+/// Auto-detect vLLM server on localhost:8000
+async fn detect_vllm() -> Option<String> {
+    let endpoint = "http://localhost:8000";
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+        .ok()?;
+
+    // Check health endpoint
+    match client.get(format!("{}/health", endpoint)).send().await {
+        Ok(resp) if resp.status().is_success() => {}
+        _ => return None,
+    }
+
+    // Query available models
+    match client.get(format!("{}/v1/models", endpoint)).send().await {
+        Ok(resp) if resp.status().is_success() => {
+            if let Ok(body) = resp.json::<serde_json::Value>().await {
+                if let Some(models) = body["data"].as_array() {
+                    let model_names: Vec<&str> = models.iter()
+                        .filter_map(|m| m["id"].as_str())
+                        .collect();
+                    if !model_names.is_empty() {
+                        info!("🧠 vLLM detected: {}", model_names.join(", "));
+                        return Some(endpoint.to_string());
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+
+    None
+}
+
+async fn run_worker(config: WorkerConfig, vllm_endpoint: Option<String>) -> Result<()> {
     use bitsage_node::node::worker::{Worker, WorkerConfig as NodeWorkerConfig};
     use bitsage_node::types::{WorkerCapabilities, TeeType};
     use std::path::PathBuf;
@@ -1185,6 +1229,7 @@ async fn run_worker(config: WorkerConfig) -> Result<()> {
         auto_register_privacy: true,
         payment_claim_interval_secs: 30,
         payment_claim_batch_size: 10,
+        vllm_endpoint,
     };
 
     // Create and start worker (not async)

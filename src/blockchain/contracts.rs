@@ -295,6 +295,13 @@ impl JobManagerContract {
             crate::node::coordinator::JobType::ZKProof { .. } => (JobType::ProofGeneration, 80u32),
             crate::node::coordinator::JobType::DataPipeline { .. } => (JobType::DataPipeline, 90u32),
             crate::node::coordinator::JobType::ConfidentialVM { .. } => (JobType::ConfidentialVM, 100u32),
+            crate::node::coordinator::JobType::ModelTraining { .. } => (JobType::AITraining, 110u32),
+            crate::node::coordinator::JobType::RLTraining { .. } => (JobType::ReinforcementLearning, 120u32),
+            crate::node::coordinator::JobType::FHECompute { .. } => (JobType::ConfidentialVM, 130u32),
+            crate::node::coordinator::JobType::ConfidentialAI { .. } => (JobType::ConfidentialVM, 140u32),
+            crate::node::coordinator::JobType::ModelDeploy { .. } => (JobType::AIInference, 150u32),
+            crate::node::coordinator::JobType::ModelInference { .. } => (JobType::AIInference, 160u32),
+            crate::node::coordinator::JobType::BatchInference { .. } => (JobType::AIInference, 170u32),
         };
 
         // Compute input data hash using Keccak256

@@ -145,6 +145,51 @@ pub enum JobType {
         vcpu_count: u32,
         tee_type: String, // "TDX", "SEV-SNP"
     },
+    /// Model training job (full training, fine-tuning, LoRA/QLoRA)
+    ModelTraining {
+        base_model: String,
+        training_mode: String, // "full", "lora", "qlora", "freeze_layers"
+        dataset_path: String,
+        output_path: String,
+        framework: String, // "huggingface", "deepspeed", "pytorch"
+        num_gpus: u32,
+        hyperparameters: HashMap<String, serde_json::Value>,
+    },
+    /// Reinforcement learning training (DPO, PPO, RLHF)
+    RLTraining {
+        algorithm: String, // "dpo", "ppo", "rlhf", "grpo"
+        base_model: String,
+        dataset_path: String,
+        output_path: String,
+        training_steps: u64,
+        hyperparameters: HashMap<String, serde_json::Value>,
+    },
+    /// FHE computation
+    FHECompute {
+        operation: String,
+        input_count: usize,
+    },
+    /// Confidential AI (FHE + neural network)
+    ConfidentialAI {
+        model_type: String,
+        layer_count: usize,
+    },
+    /// Model deployment
+    ModelDeploy {
+        model_name: String,
+        source: String,
+        quantization: String,
+    },
+    /// Model inference
+    ModelInference {
+        model_id: String,
+        model_type: String,
+    },
+    /// Batch inference
+    BatchInference {
+        model_id: String,
+        batch_size: usize,
+    },
 }
 
 impl std::fmt::Display for JobType {
@@ -164,6 +209,13 @@ impl std::fmt::Display for JobType {
             JobType::Custom { .. } => write!(f, "Custom"),
             JobType::DataPipeline { .. } => write!(f, "DataPipeline"),
             JobType::ConfidentialVM { .. } => write!(f, "ConfidentialVM"),
+            JobType::ModelTraining { .. } => write!(f, "ModelTraining"),
+            JobType::RLTraining { .. } => write!(f, "RLTraining"),
+            JobType::FHECompute { .. } => write!(f, "FHECompute"),
+            JobType::ConfidentialAI { .. } => write!(f, "ConfidentialAI"),
+            JobType::ModelDeploy { .. } => write!(f, "ModelDeploy"),
+            JobType::ModelInference { .. } => write!(f, "ModelInference"),
+            JobType::BatchInference { .. } => write!(f, "BatchInference"),
         }
     }
 }
@@ -641,6 +693,13 @@ impl JobCoordinator {
             JobType::Custom { .. } => 1,
             JobType::DataPipeline { .. } => 2,
             JobType::ConfidentialVM { .. } => 4,
+            JobType::ModelTraining { .. } => 10,
+            JobType::RLTraining { .. } => 8,
+            JobType::FHECompute { .. } => 6,
+            JobType::ConfidentialAI { .. } => 8,
+            JobType::ModelDeploy { .. } => 2,
+            JobType::ModelInference { .. } => 1,
+            JobType::BatchInference { .. } => 2,
         };
 
         // GPU bonus (50% extra if GPU required)
@@ -1198,6 +1257,13 @@ impl JobCoordinator {
             JobType::Custom { .. } => "custom",
             JobType::DataPipeline { .. } => "data_pipeline",
             JobType::ConfidentialVM { .. } => "confidential_vm",
+            JobType::ModelTraining { .. } => "model_training",
+            JobType::RLTraining { .. } => "rl_training",
+            JobType::FHECompute { .. } => "fhe_compute",
+            JobType::ConfidentialAI { .. } => "confidential_ai",
+            JobType::ModelDeploy { .. } => "model_deploy",
+            JobType::ModelInference { .. } => "model_inference",
+            JobType::BatchInference { .. } => "batch_inference",
         };
 
         worker.capabilities.supported_job_types.contains(&job_type_str.to_string())
@@ -1457,6 +1523,24 @@ fn estimate_task_resources(job_type: &JobType, chunk_size: u32) -> (u64, u64, bo
             let duration = if *parallelizable { 60 } else { 120 };
             (duration, 2048, false)
         }
+
+        JobType::ModelTraining { num_gpus, .. } => {
+            (3600, 65536, *num_gpus > 0)
+        }
+
+        JobType::RLTraining { training_steps, .. } => {
+            let duration = (*training_steps / 50).max(120);
+            (duration, 32768, true)
+        }
+
+        JobType::FHECompute { .. } => (300, 16384, true),
+        JobType::ConfidentialAI { .. } => (600, 32768, true),
+        JobType::ModelDeploy { .. } => (120, 16384, true),
+        JobType::ModelInference { .. } => (10, 8192, true),
+        JobType::BatchInference { batch_size, .. } => {
+            let duration = (*batch_size as u64 * 5).max(10);
+            (duration, 16384, true)
+        }
     }
 }
 
@@ -1639,6 +1723,25 @@ impl JobSplitter {
             JobType::ConfidentialVM { .. } => {
                 // VMs are single atomic units of compute
                 Ok(ParallelizationStrategy::Sequential)
+            }
+            JobType::ModelTraining { num_gpus, .. } => {
+                if *num_gpus > 1 {
+                    // Multi-GPU training uses data parallelism across GPUs on a single worker
+                    Ok(ParallelizationStrategy::Sequential)
+                } else {
+                    Ok(ParallelizationStrategy::Sequential)
+                }
+            }
+            JobType::RLTraining { .. } => Ok(ParallelizationStrategy::Sequential),
+            JobType::FHECompute { .. } => Ok(ParallelizationStrategy::Sequential),
+            JobType::ConfidentialAI { .. } => Ok(ParallelizationStrategy::Sequential),
+            JobType::ModelDeploy { .. } => Ok(ParallelizationStrategy::Sequential),
+            JobType::ModelInference { .. } => Ok(ParallelizationStrategy::Sequential),
+            JobType::BatchInference { batch_size, .. } => {
+                Ok(ParallelizationStrategy::BatchBased {
+                    total_items: *batch_size as u32,
+                    batch_size: self.calculate_optimal_batch_size(*batch_size as u32),
+                })
             }
         }
     }

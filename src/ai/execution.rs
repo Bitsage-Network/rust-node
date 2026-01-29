@@ -498,15 +498,17 @@ impl AIExecutionEngine {
                 (0.50 * timeout_ratio) as f32
             };
 
-            // Parse output for metrics (framework-specific parsing could enhance this)
+            // Collect real GPU metrics via nvidia-smi
+            let (gpu_usage, gpu_memory_usage, memory_usage) = Self::collect_gpu_metrics().await;
+
             let execution_result = ExecutionResult {
                 success: output.status.success(),
                 stdout: String::from_utf8_lossy(&output.stdout).to_string(),
                 stderr: String::from_utf8_lossy(&output.stderr).to_string(),
                 cpu_usage,
-                memory_usage: 0, // Would need /proc or cgroup monitoring
-                gpu_usage: None,
-                gpu_memory_usage: None,
+                memory_usage,
+                gpu_usage,
+                gpu_memory_usage,
                 throughput: None,
                 accuracy: None,
                 confidence: None,
@@ -519,6 +521,35 @@ impl AIExecutionEngine {
             Ok(Ok(exec_result)) => Ok(exec_result),
             Ok(Err(e)) => Err(e),
             Err(_) => Err(anyhow!("Job execution timed out after {} seconds", timeout_seconds)),
+        }
+    }
+
+    /// Collect real GPU metrics via nvidia-smi
+    async fn collect_gpu_metrics() -> (Option<f32>, Option<u32>, u32) {
+        let smi_result = tokio::process::Command::new("nvidia-smi")
+            .args(["--query-gpu=utilization.gpu,memory.used,memory.total", "--format=csv,noheader,nounits"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .await;
+
+        match smi_result {
+            Ok(output) if output.status.success() => {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                // Parse "85, 12345, 81920" format (first GPU)
+                if let Some(line) = stdout.lines().next() {
+                    let parts: Vec<&str> = line.split(',').map(|s| s.trim()).collect();
+                    let gpu_util = parts.first().and_then(|s| s.parse::<f32>().ok()).map(|v| v / 100.0);
+                    let gpu_mem_used = parts.get(1).and_then(|s| s.parse::<u32>().ok());
+                    let mem_used = gpu_mem_used.unwrap_or(0);
+                    return (gpu_util, gpu_mem_used, mem_used);
+                }
+                (None, None, 0)
+            }
+            _ => {
+                // nvidia-smi not available — bare metal without NVIDIA GPU or inside container
+                (None, None, 0)
+            }
         }
     }
 

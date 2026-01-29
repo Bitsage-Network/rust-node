@@ -104,6 +104,9 @@ pub struct WorkerConfig {
     pub payment_claim_interval_secs: u64,
     /// Max batch size for payment claims
     pub payment_claim_batch_size: usize,
+
+    /// vLLM endpoint URL (e.g. "http://localhost:8000") for real inference
+    pub vllm_endpoint: Option<String>,
 }
 
 impl Default for WorkerConfig {
@@ -132,6 +135,7 @@ impl Default for WorkerConfig {
             auto_register_privacy: true,
             payment_claim_interval_secs: 30,
             payment_claim_batch_size: 10,
+            vllm_endpoint: None,
         }
     }
 }
@@ -344,7 +348,11 @@ impl Worker {
 
         // Create job executor
         let has_tee = capabilities.tee_type != TeeType::None;
-        let job_executor = Arc::new(JobExecutor::new(id_string.clone(), has_tee));
+        let mut executor = JobExecutor::new(id_string.clone(), has_tee);
+        if let Some(ref endpoint) = config.vllm_endpoint {
+            executor.set_vllm_endpoint(endpoint.clone());
+        }
+        let job_executor = Arc::new(executor);
 
         // Create event channel
         let (event_sender, event_receiver) = mpsc::unbounded_channel();

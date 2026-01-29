@@ -122,6 +122,7 @@ pub struct JobSlot {
     pub assigned_worker: Option<WorkerId>,
     pub retry_count: u32,
     pub max_retries: u32,
+    pub result: Option<Vec<u8>>,
 }
 
 // ==========================================
@@ -393,6 +394,7 @@ impl ProductionCoordinator {
             assigned_worker: None,
             retry_count: 0,
             max_retries: 3,
+            result: None,
         };
 
         {
@@ -559,7 +561,8 @@ impl ProductionCoordinator {
         if let Some(job) = jobs.get_mut(&job_id) {
             job.status = JobStatus::Completed;
             job.completed_at = Some(Utc::now());
-            
+            job.result = Some(result.clone());
+
             if let Some(wid) = &job.assigned_worker {
                 if let Some(worker) = workers.get_mut(wid) {
                     worker.current_load = (worker.current_load - 1.0).max(0.0);
@@ -632,6 +635,11 @@ impl ProductionCoordinator {
     pub async fn get_job_status(&self, job_id: &str) -> Option<JobStatus> {
         let jobs = self.jobs.read().await;
         jobs.get(job_id).map(|j| j.status.clone())
+    }
+
+    pub async fn get_job_result(&self, job_id: &str) -> Option<Vec<u8>> {
+        let jobs = self.jobs.read().await;
+        jobs.get(job_id).and_then(|j| j.result.clone())
     }
 
     // ---------------------------------------------------------

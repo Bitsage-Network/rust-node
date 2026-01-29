@@ -380,6 +380,14 @@ async fn main() -> Result<()> {
         .route("/api/models/:id/inference", post(model_inference))
         .route("/api/models/:id/status", get(model_status))
         .route("/api/models/list", get(list_models))
+        // ─────────────────────────────────────────────────────────────────────
+        // Model Training APIs
+        // ─────────────────────────────────────────────────────────────────────
+        .route("/api/training/submit", post(submit_training_job))
+        .route("/api/training/:id/status", get(training_job_status))
+        .route("/api/training/:id/cancel", post(cancel_training_job))
+        .route("/api/training/:id/checkpoints", get(list_training_checkpoints))
+        .route("/api/rl/submit", post(submit_rl_training_job))
 
         .with_state(app_state)
 
@@ -616,6 +624,9 @@ async fn network_config_handler() -> Json<serde_json::Value> {
     let network = std::env::var("STARKNET_NETWORK")
         .unwrap_or_else(|_| "sepolia".to_string());
 
+    let vllm_endpoint = std::env::var("VLLM_ENDPOINT")
+        .unwrap_or_default();
+
     Json(serde_json::json!({
         "network": network,
         "rpc_url": starknet_rpc,
@@ -624,6 +635,7 @@ async fn network_config_handler() -> Json<serde_json::Value> {
         "stwo_verifier_address": stwo_verifier,
         "staking_contract_address": staking_contract,
         "sage_token_address": sage_token,
+        "vllm_endpoint": vllm_endpoint,
     }))
 }
 
@@ -882,6 +894,11 @@ async fn estimate_job(
         // Rendering - GPU intensive
         "Render3D" => (180, 30, true),
         "VideoProcessing" => (120, 20, true),
+
+        // Training workloads — GPU-hours
+        "ModelTraining" | "AITraining" | "FineTune" => (3600, 60, true),
+        "LoRA" => (1800, 30, true),
+        "ReinforcementLearning" | "RLHF" | "DPO" => (7200, 120, true),
 
         // Light workloads
         "ComputerVision" => (5, 2, true),
@@ -1208,6 +1225,289 @@ async fn list_models(
         "supported_sources": ["huggingface", "s3", "ipfs", "url"],
         "supported_quantizations": ["fp16", "int8", "int4", "none"]
     }))
+}
+
+// =============================================================================
+// Model Training Handlers
+// =============================================================================
+
+#[derive(Debug, Deserialize)]
+struct TrainingJobApiRequest {
+    /// Base model (e.g. "meta-llama/Llama-3.1-8B")
+    base_model: String,
+    /// "full", "lora", "qlora", "freeze_layers"
+    #[serde(default = "default_lora_mode")]
+    training_mode: String,
+    /// S3, local, or HuggingFace dataset path
+    dataset_path: String,
+    /// Dataset format: "jsonl", "parquet", "csv", "hf_dataset"
+    #[serde(default = "default_jsonl_fmt")]
+    dataset_format: String,
+    /// Output directory for checkpoints
+    #[serde(default = "default_output_path")]
+    output_path: String,
+    /// Framework: "huggingface", "deepspeed", "pytorch"
+    #[serde(default = "default_huggingface")]
+    framework: String,
+    /// Number of GPUs
+    #[serde(default = "default_one")]
+    num_gpus: u32,
+    /// Learning rate
+    #[serde(default = "default_lr")]
+    learning_rate: f64,
+    /// Batch size
+    #[serde(default = "default_batch_4")]
+    batch_size: u32,
+    /// Number of epochs
+    #[serde(default = "default_epochs")]
+    num_epochs: u32,
+    /// Max training steps (0 = use epochs)
+    #[serde(default)]
+    max_steps: u64,
+    /// LoRA rank (for lora/qlora modes)
+    #[serde(default = "default_lora_rank")]
+    lora_rank: u32,
+    /// LoRA alpha
+    #[serde(default = "default_lora_alpha")]
+    lora_alpha: f32,
+    /// Evaluation dataset path (optional)
+    eval_dataset_path: Option<String>,
+}
+
+fn default_lora_mode() -> String { "lora".to_string() }
+fn default_jsonl_fmt() -> String { "jsonl".to_string() }
+fn default_output_path() -> String { "/outputs/training".to_string() }
+fn default_one() -> u32 { 1 }
+fn default_lr() -> f64 { 2e-5 }
+fn default_batch_4() -> u32 { 4 }
+fn default_epochs() -> u32 { 3 }
+fn default_lora_rank() -> u32 { 16 }
+fn default_lora_alpha() -> f32 { 32.0 }
+
+async fn submit_training_job(
+    State(state): State<AppState>,
+    Json(req): Json<TrainingJobApiRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let payload = serde_json::to_vec(&serde_json::json!({
+        "base_model": req.base_model,
+        "training_mode": req.training_mode,
+        "dataset_path": req.dataset_path,
+        "dataset_format": req.dataset_format,
+        "output_path": req.output_path,
+        "framework": req.framework,
+        "num_gpus": req.num_gpus,
+        "hyperparameters": {
+            "learning_rate": req.learning_rate,
+            "per_device_train_batch_size": req.batch_size,
+            "num_train_epochs": req.num_epochs,
+            "max_steps": req.max_steps,
+        },
+        "lora_config": if req.training_mode == "lora" || req.training_mode == "qlora" {
+            Some(serde_json::json!({
+                "rank": req.lora_rank,
+                "alpha": req.lora_alpha,
+                "use_qlora": req.training_mode == "qlora",
+            }))
+        } else {
+            None
+        },
+        "eval_dataset_path": req.eval_dataset_path,
+    })).unwrap_or_default();
+
+    let vram_required = match req.training_mode.as_str() {
+        "qlora" => 16384,
+        "lora" => 24576,
+        "freeze_layers" => 40960,
+        _ => 81920, // full training needs max VRAM
+    };
+
+    let job_type = match req.training_mode.as_str() {
+        "lora" | "qlora" => "LoRA",
+        _ => "ModelTraining",
+    };
+
+    let job_req = JobRequest {
+        id: None,
+        requirements: JobRequirements {
+            min_vram_mb: vram_required,
+            min_gpu_count: req.num_gpus as u8,
+            required_job_type: job_type.to_string(),
+            timeout_seconds: 86400, // 24h max for training
+            requires_tee: false,
+        },
+        payload,
+        priority: 50, // Lower priority than inference
+    };
+
+    let job_id = state.coordinator
+        .submit_job(job_req)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(serde_json::json!({
+        "status": "training_submitted",
+        "job_id": job_id,
+        "base_model": req.base_model,
+        "training_mode": req.training_mode,
+        "framework": req.framework,
+        "num_gpus": req.num_gpus,
+        "estimated_vram_mb": vram_required,
+        "status_endpoint": format!("/api/training/{}/status", job_id),
+        "checkpoints_endpoint": format!("/api/training/{}/checkpoints", job_id),
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+struct RLTrainingApiRequest {
+    /// Base model to align
+    base_model: String,
+    /// Algorithm: "dpo", "ppo", "rlhf", "grpo"
+    #[serde(default = "default_dpo")]
+    algorithm: String,
+    /// Dataset path (preference pairs for DPO, prompts for PPO)
+    dataset_path: String,
+    /// Output directory
+    #[serde(default = "default_output_path")]
+    output_path: String,
+    /// Training steps
+    #[serde(default = "default_rl_steps")]
+    training_steps: u64,
+    /// Learning rate
+    #[serde(default = "default_lr")]
+    learning_rate: f64,
+    /// Beta for DPO
+    #[serde(default = "default_beta")]
+    beta: f64,
+    /// Number of GPUs
+    #[serde(default = "default_one")]
+    num_gpus: u32,
+}
+
+fn default_dpo() -> String { "dpo".to_string() }
+fn default_rl_steps() -> u64 { 1000 }
+fn default_beta() -> f64 { 0.1 }
+
+async fn submit_rl_training_job(
+    State(state): State<AppState>,
+    Json(req): Json<RLTrainingApiRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let payload = serde_json::to_vec(&serde_json::json!({
+        "base_model": req.base_model,
+        "algorithm": req.algorithm,
+        "dataset_path": req.dataset_path,
+        "output_path": req.output_path,
+        "training_steps": req.training_steps,
+        "learning_rate": req.learning_rate,
+        "beta": req.beta,
+        "num_gpus": req.num_gpus,
+    })).unwrap_or_default();
+
+    let job_type = match req.algorithm.as_str() {
+        "dpo" => "DPO",
+        "ppo" | "rlhf" => "RLHF",
+        _ => "ReinforcementLearning",
+    };
+
+    let job_req = JobRequest {
+        id: None,
+        requirements: JobRequirements {
+            min_vram_mb: 40960,
+            min_gpu_count: req.num_gpus as u8,
+            required_job_type: job_type.to_string(),
+            timeout_seconds: 86400,
+            requires_tee: false,
+        },
+        payload,
+        priority: 50,
+    };
+
+    let job_id = state.coordinator
+        .submit_job(job_req)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(serde_json::json!({
+        "status": "rl_training_submitted",
+        "job_id": job_id,
+        "base_model": req.base_model,
+        "algorithm": req.algorithm,
+        "training_steps": req.training_steps,
+        "status_endpoint": format!("/api/training/{}/status", job_id),
+    })))
+}
+
+async fn training_job_status(
+    State(state): State<AppState>,
+    Path(job_id): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    match state.coordinator.get_job_status(&job_id).await {
+        Some(status) => {
+            let result = state.coordinator.get_job_result(&job_id).await;
+            let mut response = serde_json::json!({
+                "job_id": job_id,
+                "status": format!("{:?}", status),
+            });
+
+            // If completed, parse training metrics from result
+            if let Some(result_bytes) = result {
+                if let Ok(result_str) = String::from_utf8(result_bytes) {
+                    if let Ok(metrics) = serde_json::from_str::<serde_json::Value>(&result_str) {
+                        response["result"] = metrics;
+                    } else {
+                        response["result_raw"] = serde_json::Value::String(result_str);
+                    }
+                }
+            }
+
+            Ok(Json(response))
+        }
+        None => Err((StatusCode::NOT_FOUND, format!("Training job {} not found", job_id)))
+    }
+}
+
+async fn cancel_training_job(
+    State(state): State<AppState>,
+    Path(job_id): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    state.coordinator
+        .fail_job(job_id.clone(), "Cancelled by user".to_string())
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(serde_json::json!({
+        "status": "cancelled",
+        "job_id": job_id,
+    })))
+}
+
+async fn list_training_checkpoints(
+    State(state): State<AppState>,
+    Path(job_id): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    // Verify job exists
+    match state.coordinator.get_job_status(&job_id).await {
+        Some(status) => {
+            let result = state.coordinator.get_job_result(&job_id).await;
+            let mut checkpoints = Vec::new();
+
+            if let Some(result_bytes) = result {
+                if let Ok(result_str) = String::from_utf8(result_bytes) {
+                    if let Ok(metrics) = serde_json::from_str::<serde_json::Value>(&result_str) {
+                        if let Some(cp_list) = metrics.get("checkpoints").and_then(|v| v.as_array()) {
+                            checkpoints = cp_list.clone();
+                        }
+                    }
+                }
+            }
+
+            Ok(Json(serde_json::json!({
+                "job_id": job_id,
+                "status": format!("{:?}", status),
+                "checkpoints": checkpoints,
+            })))
+        }
+        None => Err((StatusCode::NOT_FOUND, format!("Training job {} not found", job_id)))
+    }
 }
 
 // =============================================================================
