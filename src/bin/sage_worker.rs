@@ -164,6 +164,9 @@ struct WorkerConfig {
     pub settings: WorkerSettings,
     #[serde(default)]
     pub session_key: SessionKeyConfig,
+    /// Paymaster address for V3 gasless proof submission
+    #[serde(default)]
+    pub paymaster_address: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -412,6 +415,7 @@ async fn cmd_setup(
         gpu: gpu_config,
         settings: WorkerSettings::default(),
         session_key: SessionKeyConfig::default(), // Session key will be generated on first start
+        paymaster_address: std::env::var("PAYMASTER_ADDRESS").ok(),
     };
 
     let config_file = config_path.join("worker.toml");

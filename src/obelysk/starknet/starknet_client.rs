@@ -15,7 +15,7 @@ use super::proof_compression::{
     OnChainCompressedProof,
 };
 use serde::{Deserialize, Serialize};
-use starknet_crypto::{pedersen_hash, sign, rfc6979_generate_k, FieldElement as StarkFelt};
+use starknet_crypto::{pedersen_hash, poseidon_hash_many, sign, rfc6979_generate_k, FieldElement as StarkFelt};
 use std::time::Duration;
 use tracing::{debug, warn};
 
@@ -35,7 +35,7 @@ impl StarknetNetwork {
     pub fn rpc_url(&self) -> &str {
         match self {
             StarknetNetwork::Mainnet => "https://starknet-mainnet-rpc.publicnode.com",
-            StarknetNetwork::Sepolia => "https://starknet-sepolia-rpc.publicnode.com",
+            StarknetNetwork::Sepolia => "https://rpc.starknet-testnet.lava.build",
             StarknetNetwork::Devnet { url } => url,
         }
     }
@@ -65,6 +65,24 @@ pub struct StarknetClientConfig {
     pub max_fee: u64,
     /// Transaction timeout
     pub timeout: Duration,
+    /// Paymaster address for V3 gasless proof submission
+    pub paymaster_address: Option<Felt252>,
+}
+
+/// Resource bounds for V3 transactions (STRK fee market)
+#[derive(Clone, Debug)]
+pub struct ResourceBounds {
+    pub max_amount: u64,
+    pub max_price_per_unit: u128,
+}
+
+impl Default for ResourceBounds {
+    fn default() -> Self {
+        Self {
+            max_amount: 0x2000,             // ~8K gas units
+            max_price_per_unit: 0x3b9aca00, // 1 gwei
+        }
+    }
 }
 
 impl Default for StarknetClientConfig {
@@ -76,6 +94,7 @@ impl Default for StarknetClientConfig {
             private_key: None,
             max_fee: 1_000_000_000_000_000, // 0.001 ETH
             timeout: Duration::from_secs(60),
+            paymaster_address: None,
         }
     }
 }
@@ -739,6 +758,268 @@ impl StarknetClient {
 
         Felt252::from_hex(tx_hash_str)
             .map_err(|_| StarknetError::InvalidResponse("Invalid tx hash format".to_string()))
+    }
+
+    /// Compute the INVOKE_V3 transaction hash for signing
+    ///
+    /// V3 uses Poseidon hash over:
+    /// h("invoke", 3, sender, tip, l1_bounds, l2_bounds, paymaster_hash,
+    ///   chain_id, nonce, da_modes, account_deploy_hash, calldata_hash)
+    fn compute_invoke_v3_hash(
+        &self,
+        sender: &Felt252,
+        calldata: &[Felt252],
+        resource_bounds: &ResourceBounds,
+        paymaster_data: &[Felt252],
+        chain_id: &str,
+        nonce: u64,
+    ) -> Result<StarkFelt, StarknetError> {
+        let to_stark = |f: &Felt252| -> Result<StarkFelt, StarknetError> {
+            StarkFelt::from_byte_slice_be(&f.0)
+                .map_err(|e| StarknetError::InvalidResponse(format!("Invalid felt: {:?}", e)))
+        };
+
+        // "invoke" prefix
+        let prefix = StarkFelt::from_byte_slice_be(b"invoke")
+            .map_err(|e| StarknetError::InvalidResponse(format!("Invalid prefix: {:?}", e)))?;
+
+        let version = StarkFelt::THREE;
+        let sender_felt = to_stark(sender)?;
+
+        // Tip (always 0)
+        let tip = StarkFelt::ZERO;
+
+        // Resource bounds: packed as (resource_type, max_amount, max_price_per_unit)
+        // L1 gas bounds: 0x00 | max_amount (8 bytes) | max_price_per_unit (16 bytes) = 1 felt
+        let l1_gas_bound = {
+            let mut bytes = [0u8; 32];
+            // resource type L1_GAS = 0x0001 at bytes[6..8], max_amount at [8..16], max_price at [16..32]
+            bytes[7] = 0x01; // L1_GAS
+            bytes[8..16].copy_from_slice(&resource_bounds.max_amount.to_be_bytes());
+            bytes[16..32].copy_from_slice(&resource_bounds.max_price_per_unit.to_be_bytes());
+            StarkFelt::from_bytes_be(&bytes)
+                .map_err(|e| StarknetError::InvalidResponse(format!("Invalid l1 bounds: {:?}", e)))?
+        };
+
+        // L2 gas bounds (zero for now)
+        let l2_gas_bound = StarkFelt::ZERO;
+
+        // Paymaster data hash
+        let paymaster_hash = if paymaster_data.is_empty() {
+            poseidon_hash_many(&[])
+        } else {
+            let felts: Result<Vec<StarkFelt>, _> = paymaster_data.iter().map(|f| to_stark(f)).collect();
+            poseidon_hash_many(&felts?)
+        };
+
+        let chain_id_felt = compute_chain_id_felt(chain_id);
+        let nonce_felt = StarkFelt::from(nonce);
+
+        // DA modes: both L1 (0x0000_0000)
+        let da_modes = StarkFelt::ZERO;
+
+        // Account deployment data hash (empty for invoke)
+        let account_deploy_hash = poseidon_hash_many(&[]);
+
+        // Calldata hash
+        let calldata_felts: Result<Vec<StarkFelt>, _> = calldata.iter().map(|f| to_stark(f)).collect();
+        let calldata_hash = poseidon_hash_many(&calldata_felts?);
+
+        let tx_hash = poseidon_hash_many(&[
+            prefix,
+            version,
+            sender_felt,
+            tip,
+            l1_gas_bound,
+            l2_gas_bound,
+            paymaster_hash,
+            chain_id_felt,
+            nonce_felt,
+            da_modes,
+            account_deploy_hash,
+            calldata_hash,
+        ]);
+
+        debug!(
+            tx_hash = format!("0x{:x}", tx_hash),
+            sender = sender.to_hex(),
+            nonce = nonce,
+            "Computed INVOKE_V3 transaction hash"
+        );
+
+        Ok(tx_hash)
+    }
+
+    /// Invoke a contract function using INVOKE_V3 with paymaster support
+    ///
+    /// V3 transactions use STRK resource bounds instead of max_fee
+    /// and support paymaster_data for gasless submission.
+    async fn invoke_contract_v3(
+        &self,
+        calldata: &[Felt252],
+        resource_bounds: &ResourceBounds,
+        paymaster_data: &[Felt252],
+    ) -> Result<Felt252, StarknetError> {
+        let account = self.config.account_address
+            .ok_or(StarknetError::NoAccount)?;
+
+        if self.config.private_key.is_none() {
+            warn!("No private key configured - transaction will fail signature validation");
+            return Err(StarknetError::NoAccount);
+        }
+
+        let nonce = self.get_nonce().await?;
+        let chain_id = self.config.network.chain_id();
+
+        let tx_hash = self.compute_invoke_v3_hash(
+            &account,
+            calldata,
+            resource_bounds,
+            paymaster_data,
+            chain_id,
+            nonce,
+        )?;
+
+        let (r, s) = self.sign_transaction(&tx_hash)?;
+
+        debug!(
+            sender = account.to_hex(),
+            nonce = nonce,
+            paymaster_data_len = paymaster_data.len(),
+            chain_id = chain_id,
+            "Submitting signed INVOKE_V3 transaction"
+        );
+
+        let request = json_rpc_request(
+            "starknet_addInvokeTransaction",
+            serde_json::json!({
+                "invoke_transaction": {
+                    "type": "INVOKE",
+                    "sender_address": account.to_hex(),
+                    "calldata": calldata.iter().map(|f| f.to_hex()).collect::<Vec<_>>(),
+                    "version": "0x3",
+                    "signature": [r, s],
+                    "nonce": format!("0x{:x}", nonce),
+                    "resource_bounds": {
+                        "l1_gas": {
+                            "max_amount": format!("0x{:x}", resource_bounds.max_amount),
+                            "max_price_per_unit": format!("0x{:x}", resource_bounds.max_price_per_unit),
+                        },
+                        "l2_gas": {
+                            "max_amount": "0x0",
+                            "max_price_per_unit": "0x0",
+                        }
+                    },
+                    "tip": "0x0",
+                    "paymaster_data": paymaster_data.iter().map(|f| f.to_hex()).collect::<Vec<_>>(),
+                    "account_deployment_data": [],
+                    "nonce_data_availability_mode": "L1",
+                    "fee_data_availability_mode": "L1",
+                }
+            }),
+        );
+
+        let response = self.rpc_call(&request).await?;
+
+        let tx_hash_str = response.get("transaction_hash")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| StarknetError::InvalidResponse("Missing transaction_hash".to_string()))?;
+
+        debug!(
+            tx_hash = tx_hash_str,
+            "V3 transaction submitted successfully"
+        );
+
+        Felt252::from_hex(tx_hash_str)
+            .map_err(|_| StarknetError::InvalidResponse("Invalid tx hash format".to_string()))
+    }
+
+    /// Submit a proof using INVOKE_V3 with paymaster for gasless submission
+    ///
+    /// If no paymaster is configured, falls back to V1 submission.
+    pub async fn submit_proof_v3(
+        &self,
+        proof: &CairoSerializedProof,
+    ) -> Result<SubmissionResult, StarknetError> {
+        let paymaster_address = match &self.config.paymaster_address {
+            Some(addr) => addr.clone(),
+            None => {
+                debug!("No paymaster configured, falling back to V1 submission");
+                return self.submit_proof(proof).await;
+            }
+        };
+
+        let calldata = self.build_verify_calldata(proof)?;
+        let resource_bounds = ResourceBounds::default();
+        let paymaster_data = vec![paymaster_address];
+
+        let tx_hash = self.invoke_contract_v3(
+            &calldata,
+            &resource_bounds,
+            &paymaster_data,
+        ).await?;
+
+        Ok(SubmissionResult {
+            transaction_hash: tx_hash,
+            block_number: None,
+            status: SubmissionStatus::Pending,
+            gas_used: None,
+            actual_fee: None, // Paid by paymaster
+        })
+    }
+
+    /// Estimate fee for a V3 transaction
+    async fn estimate_fee_v3(&self, calldata: &[Felt252]) -> Result<u64, StarknetError> {
+        let account = self.config.account_address
+            .ok_or(StarknetError::NoAccount)?;
+
+        let nonce = self.get_nonce().await?;
+        let resource_bounds = ResourceBounds::default();
+
+        let request = json_rpc_request(
+            "starknet_estimateFee",
+            serde_json::json!({
+                "request": [{
+                    "type": "INVOKE",
+                    "sender_address": account.to_hex(),
+                    "calldata": calldata.iter().map(|f| f.to_hex()).collect::<Vec<_>>(),
+                    "version": "0x3",
+                    "nonce": format!("0x{:x}", nonce),
+                    "resource_bounds": {
+                        "l1_gas": {
+                            "max_amount": format!("0x{:x}", resource_bounds.max_amount),
+                            "max_price_per_unit": format!("0x{:x}", resource_bounds.max_price_per_unit),
+                        },
+                        "l2_gas": {
+                            "max_amount": "0x0",
+                            "max_price_per_unit": "0x0",
+                        }
+                    },
+                    "tip": "0x0",
+                    "paymaster_data": [],
+                    "account_deployment_data": [],
+                    "nonce_data_availability_mode": "L1",
+                    "fee_data_availability_mode": "L1",
+                }],
+                "simulation_flags": [],
+                "block_id": "latest"
+            }),
+        );
+
+        let response = self.rpc_call(&request).await?;
+
+        let fee_array = response.as_array()
+            .ok_or_else(|| StarknetError::InvalidResponse("Expected array".to_string()))?;
+
+        let fee_obj = fee_array.first()
+            .ok_or_else(|| StarknetError::InvalidResponse("Empty fee array".to_string()))?;
+
+        let fee_str = fee_obj.get("overall_fee")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| StarknetError::InvalidResponse("Missing overall_fee".to_string()))?;
+
+        u64::from_str_radix(fee_str.trim_start_matches("0x"), 16)
+            .map_err(|_| StarknetError::InvalidResponse("Invalid fee format".to_string()))
     }
 
     /// Make a view call to a contract
