@@ -565,30 +565,29 @@ async fn detect_amd_gpu() -> Result<GpuConfig> {
 
 async fn generate_new_wallet(config_path: &PathBuf) -> Result<WalletConfig> {
     use rand::RngCore;
-    use sha2::{Sha256, Digest};
+    use starknet::signers::SigningKey;
+    use starknet::core::types::FieldElement;
 
     let keys_dir = config_path.join("keys");
     std::fs::create_dir_all(&keys_dir)?;
 
-    // Generate Starknet private key (random 252-bit number)
-    let mut rng = rand::thread_rng();
-    let mut private_key_bytes = [0u8; 32];
-    rng.fill_bytes(&mut private_key_bytes);
+    // Generate random Starknet keypair via starknet-rs (proper EC derivation)
+    let signing_key = SigningKey::from_random();
+    let private_key_hex = format!("0x{}", hex::encode(signing_key.secret_scalar().to_bytes_be()));
 
-    // Ensure it's a valid Starknet private key (< curve order ~2^251)
-    private_key_bytes[0] &= 0x07; // Reduce to ~251 bits
+    // Derive real Starknet public key from the private key on the STARK curve
+    let verifying_key = signing_key.verifying_key();
+    let public_key = verifying_key.scalar();
 
-    let private_key_hex = format!("0x{}", hex::encode(&private_key_bytes));
-
-    // Derive public key / address (simplified - in production use starknet-rs)
-    let mut hasher = Sha256::new();
-    hasher.update(&private_key_bytes);
-    hasher.update(b"STARKNET_ACCOUNT");
-    let mut address_bytes: [u8; 32] = hasher.finalize().into();
-    // Ensure address is within Starknet field (< 2^251 + 17*2^192 + 1)
-    // By masking the high bits to ~250 bits
-    address_bytes[0] &= 0x07;
-    let address = format!("0x{}", hex::encode(&address_bytes[..32]));
+    // Compute contract address using OpenZeppelin account class hash
+    let oz_class_hash = FieldElement::from_hex_be("0x061dac032f228abef9c6626f1dcb1d4e56c1b923412cf9da27b2dab1e3e0b3a8").unwrap();
+    let address_felt = starknet::core::utils::get_contract_address(
+        public_key,        // salt
+        oz_class_hash,     // class_hash
+        &[public_key],     // constructor calldata
+        FieldElement::ZERO,// deployer_address
+    );
+    let address = format!("{:#066x}", address_felt);
 
     // Save private key (encrypted in production)
     let pk_path = keys_dir.join("starknet.key");
@@ -602,6 +601,7 @@ async fn generate_new_wallet(config_path: &PathBuf) -> Result<WalletConfig> {
     }
 
     // Generate ElGamal keypair for privacy payments
+    let mut rng = rand::thread_rng();
     let mut elgamal_secret = [0u8; 32];
     rng.fill_bytes(&mut elgamal_secret);
 
@@ -622,28 +622,30 @@ async fn generate_new_wallet(config_path: &PathBuf) -> Result<WalletConfig> {
 }
 
 async fn import_wallet_from_key(config_path: &PathBuf, private_key: &str) -> Result<WalletConfig> {
-    use sha2::{Sha256, Digest};
+    use starknet::signers::SigningKey;
+    use starknet::core::types::FieldElement;
 
     let keys_dir = config_path.join("keys");
     std::fs::create_dir_all(&keys_dir)?;
 
     // Parse and validate private key
-    let pk_clean = private_key.strip_prefix("0x").unwrap_or(private_key);
-    let pk_bytes = hex::decode(pk_clean)
-        .context("Invalid private key format")?;
+    let private_key_felt = FieldElement::from_hex_be(private_key)
+        .context("Invalid private key hex format")?;
 
-    if pk_bytes.len() != 32 {
-        anyhow::bail!("Private key must be 32 bytes");
-    }
+    // Derive public key and address using proper EC curve math
+    let signing_key = SigningKey::from_secret_scalar(private_key_felt);
+    let verifying_key = signing_key.verifying_key();
+    let public_key = verifying_key.scalar();
 
-    // Derive address
-    let mut hasher = Sha256::new();
-    hasher.update(&pk_bytes);
-    hasher.update(b"STARKNET_ACCOUNT");
-    let mut address_bytes: [u8; 32] = hasher.finalize().into();
-    // Ensure address is within Starknet field (< 2^251 + 17*2^192 + 1)
-    address_bytes[0] &= 0x07;
-    let address = format!("0x{}", hex::encode(&address_bytes[..32]));
+    // Compute contract address using OpenZeppelin account class hash
+    let oz_class_hash = FieldElement::from_hex_be("0x061dac032f228abef9c6626f1dcb1d4e56c1b923412cf9da27b2dab1e3e0b3a8").unwrap();
+    let address_felt = starknet::core::utils::get_contract_address(
+        public_key,        // salt
+        oz_class_hash,     // class_hash
+        &[public_key],     // constructor calldata
+        FieldElement::ZERO,// deployer_address
+    );
+    let address = format!("{:#066x}", address_felt);
 
     // Save keys
     let pk_path = keys_dir.join("starknet.key");
@@ -995,6 +997,7 @@ async fn register_with_coordinator(
             },
             "max_concurrent_jobs": 4,
             "disk_gb": 500,
+            "bandwidth_mbps": 1000,
         },
         "wallet_address": wallet_address,
     });
