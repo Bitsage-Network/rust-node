@@ -1094,6 +1094,26 @@ async fn cmd_start(config_dir: &str, config_file: Option<PathBuf>, foreground: b
     }
     println!();
 
+    // Fetch network config from coordinator (paymaster address, contract addresses)
+    // This eliminates the need for workers to configure these in their local .env
+    match fetch_network_config(&config.coordinator_url).await {
+        Ok(net_config) => {
+            if let Some(paymaster) = net_config.get("paymaster_address").and_then(|v| v.as_str()) {
+                if !paymaster.is_empty() && paymaster != "0x0" {
+                    config.paymaster_address = Some(paymaster.to_string());
+                    println!("  Paymaster:    {}...{} (from coordinator)",
+                        &paymaster[..10.min(paymaster.len())],
+                        &paymaster[paymaster.len().saturating_sub(6)..]);
+                }
+            }
+            println!("  Network Config: fetched from coordinator");
+        }
+        Err(e) => {
+            eprintln!("  Network Config: failed to fetch from coordinator ({}), using local config", e);
+        }
+    }
+    println!();
+
     if foreground {
         println!("  Running in foreground... (Ctrl+C to stop)");
         println!();
@@ -1176,6 +1196,26 @@ async fn run_worker(config: WorkerConfig) -> Result<()> {
     worker.start().await?;
 
     Ok(())
+}
+
+// =============================================================================
+// NETWORK CONFIG FETCH
+// =============================================================================
+
+/// Fetch network configuration from the coordinator.
+/// Returns contract addresses (paymaster, verifiers, etc.) so workers
+/// don't need to configure them locally.
+async fn fetch_network_config(coordinator_url: &str) -> Result<serde_json::Value> {
+    let url = format!("{}/api/network/config", coordinator_url);
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()?;
+    let resp = client.get(&url).send().await?;
+    if !resp.status().is_success() {
+        anyhow::bail!("coordinator returned {}", resp.status());
+    }
+    let config: serde_json::Value = resp.json().await?;
+    Ok(config)
 }
 
 // =============================================================================

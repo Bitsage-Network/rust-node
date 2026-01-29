@@ -325,6 +325,7 @@ async fn main() -> Result<()> {
         .route("/", get(root_handler))
         .route("/api/health", get(health_handler))
         .route("/api/stats", get(stats_handler))
+        .route("/api/network/config", get(network_config_handler))
 
         // ─────────────────────────────────────────────────────────────────────
         // Worker Orchestration APIs (from prod_coordinator)
@@ -594,6 +595,35 @@ async fn stats_handler(State(state): State<AppState>) -> Json<serde_json::Value>
     Json(serde_json::json!({
         "coordinator": stats,
         "websocket_subscribers": ws_subscribers
+    }))
+}
+
+/// Network configuration endpoint — workers fetch this on startup
+/// instead of requiring local .env configuration for contract addresses.
+async fn network_config_handler() -> Json<serde_json::Value> {
+    let paymaster_address = std::env::var("PAYMASTER_ADDRESS")
+        .unwrap_or_default();
+    let proof_verifier = std::env::var("PROOF_VERIFIER_ADDRESS")
+        .unwrap_or_default();
+    let stwo_verifier = std::env::var("STWO_VERIFIER_ADDRESS")
+        .unwrap_or_default();
+    let staking_contract = std::env::var("STAKING_CONTRACT_ADDRESS")
+        .unwrap_or_default();
+    let sage_token = std::env::var("SAGE_TOKEN_ADDRESS")
+        .unwrap_or_default();
+    let starknet_rpc = std::env::var("STARKNET_RPC_URL")
+        .unwrap_or_default();
+    let network = std::env::var("STARKNET_NETWORK")
+        .unwrap_or_else(|_| "sepolia".to_string());
+
+    Json(serde_json::json!({
+        "network": network,
+        "rpc_url": starknet_rpc,
+        "paymaster_address": paymaster_address,
+        "proof_verifier_address": proof_verifier,
+        "stwo_verifier_address": stwo_verifier,
+        "staking_contract_address": staking_contract,
+        "sage_token_address": sage_token,
     }))
 }
 
