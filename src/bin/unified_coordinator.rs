@@ -560,7 +560,7 @@ async fn main() -> Result<()> {
     info!("Press Ctrl+C to shutdown...");
 
     // Run with graceful shutdown
-    axum::serve(listener, app)
+    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
         .with_graceful_shutdown(shutdown_signal())
         .await?;
 

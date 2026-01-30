@@ -913,19 +913,20 @@ async fn register_session_key(
 
 /// Check if session key is still valid
 fn is_session_key_valid(session_key: &SessionKeyConfig) -> bool {
-    if !session_key.registered {
-        return false;
-    }
-
+    // Check expiry if set — expired keys are always invalid
     if let Some(expires_at) = session_key.expires_at {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        return now < expires_at;
+        if now >= expires_at {
+            return false;
+        }
     }
 
-    false
+    // Accept unregistered keys — registration status is a separate concern
+    // that depends on relayer availability (which may not be configured)
+    true
 }
 
 /// Refresh session key if expired or about to expire

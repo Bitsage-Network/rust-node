@@ -686,6 +686,8 @@ impl Worker {
                     let error_msg = e.to_string();
                     if error_msg.contains("already registered") {
                         debug!("Privacy account already registered");
+                    } else if error_msg.contains("ContractNotFound") || error_msg.contains("contract not found") {
+                        warn!("Privacy router contract not deployed — skipping privacy registration");
                     } else {
                         warn!("Failed to register privacy account: {}", e);
                     }
@@ -1710,8 +1712,13 @@ impl Worker {
                             .or_insert_with(HashSet::new)
                             .insert(claim.asset_id);
                     } else if error_msg.contains("not found") || error_msg.contains("no payment") {
-                        warn!("No {} payment found for job {} (may not be ready yet)",
-                              claim.asset_id.name(), claim.job_id);
+                        if claim.retry_count == 0 {
+                            warn!("No {} payment found for job {} (may not be ready yet)",
+                                  claim.asset_id.name(), claim.job_id);
+                        } else {
+                            debug!("No {} payment found for job {} (retry {})",
+                                   claim.asset_id.name(), claim.job_id, claim.retry_count);
+                        }
                         Self::requeue_with_limits(pending, claim).await;
                     } else if error_msg.contains("Proof verification failed") || error_msg.contains("Invalid proof") {
                         warn!("❌ Proof verification failed for job {}: {}",
@@ -1766,7 +1773,7 @@ impl Worker {
         pending: &RwLock<VecDeque<PendingPaymentClaim>>,
         claim: PendingPaymentClaim,
     ) {
-        const MAX_CLAIM_RETRIES: u32 = 10;
+        const MAX_CLAIM_RETRIES: u32 = 3;
         const CLAIM_TTL_SECS: u64 = 3600;
 
         let mut claim = claim;
@@ -1779,7 +1786,7 @@ impl Worker {
         let age = now_secs.saturating_sub(claim.queued_at);
 
         if claim.retry_count > MAX_CLAIM_RETRIES || age > CLAIM_TTL_SECS {
-            warn!("Dropping stale payment claim for job {} ({} retries, {}s old)",
+            info!("Abandoning payment claim for job {} after {} retries ({}s old)",
                   claim.job_id, claim.retry_count, age);
         } else {
             pending.write().await.push_back(claim);
