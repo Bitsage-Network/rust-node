@@ -363,12 +363,15 @@ impl ProductionCoordinator {
         if let Some(worker) = workers.get_mut(&heartbeat.worker_id) {
             worker.last_heartbeat = Utc::now();
             worker.current_load = heartbeat.current_load;
-            
+
             if worker.status == WorkerStatus::Offline {
                 worker.status = WorkerStatus::Online;
                 info!("🔄 Worker {} reconnected", heartbeat.worker_id);
             }
-            
+
+            drop(workers);
+            self.schedule_jobs().await;
+
             Ok(())
         } else {
             Err(anyhow!("Unknown worker. Please register first."))
