@@ -19,6 +19,7 @@ use tokio::sync::RwLock;
 use tracing::{info, debug, warn};
 use rand::Rng;
 use sha3::{Sha3_256, Digest};
+use x25519_dalek::{StaticSecret, PublicKey as DalekPublicKey};
 
 use crate::types::{JobId, WorkerId};
 
@@ -43,60 +44,37 @@ impl std::fmt::Debug for X25519SecretKey {
 }
 
 impl X25519SecretKey {
-    /// Generate a new random secret key
+    /// Generate a new random secret key using OS randomness
     pub fn generate() -> Self {
-        let mut rng = rand::thread_rng();
-        let mut bytes = [0u8; 32];
-        rng.fill(&mut bytes);
+        let secret = StaticSecret::random_from_rng(rand::rngs::OsRng);
+        Self(secret.to_bytes())
+    }
+
+    /// Create from raw bytes
+    pub fn from_bytes(bytes: [u8; 32]) -> Self {
         Self(bytes)
     }
 
-    /// Derive public key from secret
-    pub fn public_key(&self) -> X25519PublicKey {
-        // Simplified - in production use x25519-dalek
-        let mut hasher = Sha3_256::new();
-        hasher.update(&self.0);
-        hasher.update(b"PUBLIC_KEY");
-        let result = hasher.finalize();
-        let mut pubkey = [0u8; 32];
-        pubkey.copy_from_slice(&result[..32]);
-        X25519PublicKey(pubkey)
+    /// Get raw bytes (for persistence)
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
     }
 
-    /// Perform ECDH key exchange
-    /// Note: This is a simplified simulation. In production, use x25519-dalek.
+    /// Derive public key from secret using real Curve25519 scalar multiplication
+    pub fn public_key(&self) -> X25519PublicKey {
+        let secret = StaticSecret::from(self.0);
+        let public = DalekPublicKey::from(&secret);
+        X25519PublicKey(public.to_bytes())
+    }
+
+    /// Perform X25519 Diffie-Hellman key exchange using x25519-dalek.
+    /// Returns a shared secret that both parties can independently compute
+    /// from their own secret key and the other party's public key.
     pub fn diffie_hellman(&self, their_public: &X25519PublicKey) -> SharedSecret {
-        // Get our public key
-        let our_public = self.public_key();
-
-        // Create symmetric shared secret by hashing both public keys in sorted order
-        // Plus a contribution from our secret to prove we own the private key
-        let (first, second) = if our_public.0 < their_public.0 {
-            (&our_public.0, &their_public.0)
-        } else {
-            (&their_public.0, &our_public.0)
-        };
-
-        // Shared secret = hash(sorted_publics || secret_contribution)
-        // where secret_contribution = hash(secret || their_public)
-        let mut secret_hasher = Sha3_256::new();
-        secret_hasher.update(&self.0);
-        secret_hasher.update(&their_public.0);
-        let _secret_contribution = secret_hasher.finalize();
-
-        let mut hasher = Sha3_256::new();
-        hasher.update(first);
-        hasher.update(second);
-        // XOR the secret contribution into the computation in a way that's symmetric
-        // by using the hash of sorted publics as the base
-        hasher.update(b"ECDH_SHARED");
-
-        // The symmetric part comes from the sorted public keys
-        // The asymmetric secret contribution ensures we actually have the secret
-        let result = hasher.finalize();
-        let mut shared = [0u8; 32];
-        shared.copy_from_slice(&result[..32]);
-        SharedSecret(shared)
+        let our_secret = StaticSecret::from(self.0);
+        let their_dalek_public = DalekPublicKey::from(their_public.0);
+        let shared = our_secret.diffie_hellman(&their_dalek_public);
+        SharedSecret(shared.to_bytes())
     }
 }
 
@@ -127,7 +105,7 @@ pub struct Nonce(pub [u8; 12]);
 
 impl Nonce {
     pub fn generate() -> Self {
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rngs::OsRng;
         let mut bytes = [0u8; 12];
         rng.fill(&mut bytes);
         Self(bytes)
@@ -270,88 +248,51 @@ pub struct DecryptedJobResult {
 // ============================================================================
 
 /// Generate keystream block using hash-based derivation
-fn generate_keystream_block(key: &[u8; 32], nonce: &[u8; 12], block_index: u64) -> [u8; 32] {
-    let mut hasher = Sha3_256::new();
-    hasher.update(key);
-    hasher.update(nonce);
-    hasher.update(&block_index.to_le_bytes());
-    let hash = hasher.finalize();
-    let mut block = [0u8; 32];
-    block.copy_from_slice(&hash);
-    block
-}
-
-/// Encrypt data using hash-based stream cipher with auth tag
+/// Encrypt data using ChaCha20-Poly1305 AEAD.
+/// Returns (ciphertext, 16-byte auth tag).
 pub fn encrypt_data(
     plaintext: &[u8],
     key: &EncryptionKey,
     nonce: &Nonce,
 ) -> (Vec<u8>, [u8; 16]) {
-    // Generate keystream and XOR with plaintext
-    let mut ciphertext = plaintext.to_vec();
-    let mut block_index = 0u64;
-    let mut keystream_pos = 32; // Start at end to trigger first block generation
-    let mut current_block = [0u8; 32];
+    use chacha20poly1305::{ChaCha20Poly1305, KeyInit, AeadInPlace};
+    use chacha20poly1305::aead::generic_array::GenericArray;
 
-    for byte in ciphertext.iter_mut() {
-        if keystream_pos >= 32 {
-            current_block = generate_keystream_block(&key.0, &nonce.0, block_index);
-            block_index += 1;
-            keystream_pos = 0;
-        }
-        *byte ^= current_block[keystream_pos];
-        keystream_pos += 1;
-    }
+    let cipher = ChaCha20Poly1305::new(GenericArray::from_slice(&key.0));
+    let chacha_nonce = GenericArray::from_slice(&nonce.0);
 
-    // Compute auth tag
-    let mut hasher = Sha3_256::new();
-    hasher.update(&key.0);
-    hasher.update(&nonce.0);
-    hasher.update(&ciphertext);
-    let hash = hasher.finalize();
+    let mut buffer = plaintext.to_vec();
+    // ChaCha20-Poly1305 encrypt_in_place_detached only fails if the nonce/key sizes are wrong,
+    // which can't happen since we construct them from fixed-size arrays. Safe to unwrap.
+    let tag = cipher.encrypt_in_place_detached(chacha_nonce, b"", &mut buffer)
+        .expect("ChaCha20-Poly1305 encryption failed: invalid key/nonce size (should be unreachable)");
+
     let mut auth_tag = [0u8; 16];
-    auth_tag.copy_from_slice(&hash[..16]);
+    auth_tag.copy_from_slice(tag.as_slice());
 
-    (ciphertext, auth_tag)
+    (buffer, auth_tag)
 }
 
-/// Decrypt data
+/// Decrypt data using ChaCha20-Poly1305 AEAD.
+/// Verifies the auth tag before returning plaintext.
 pub fn decrypt_data(
     ciphertext: &[u8],
     key: &EncryptionKey,
     nonce: &Nonce,
     expected_tag: &[u8; 16],
 ) -> Result<Vec<u8>> {
-    // Verify auth tag first
-    let mut hasher = Sha3_256::new();
-    hasher.update(&key.0);
-    hasher.update(&nonce.0);
-    hasher.update(ciphertext);
-    let hash = hasher.finalize();
-    let mut computed_tag = [0u8; 16];
-    computed_tag.copy_from_slice(&hash[..16]);
+    use chacha20poly1305::{ChaCha20Poly1305, KeyInit, AeadInPlace};
+    use chacha20poly1305::aead::generic_array::GenericArray;
 
-    if &computed_tag != expected_tag {
-        return Err(anyhow::anyhow!("Authentication failed"));
-    }
+    let cipher = ChaCha20Poly1305::new(GenericArray::from_slice(&key.0));
+    let chacha_nonce = GenericArray::from_slice(&nonce.0);
+    let tag = GenericArray::from_slice(expected_tag);
 
-    // Decrypt using hash-based keystream (same as encryption - XOR is symmetric)
-    let mut plaintext = ciphertext.to_vec();
-    let mut block_index = 0u64;
-    let mut keystream_pos = 32; // Start at end to trigger first block generation
-    let mut current_block = [0u8; 32];
+    let mut buffer = ciphertext.to_vec();
+    cipher.decrypt_in_place_detached(chacha_nonce, b"", &mut buffer, tag)
+        .map_err(|_| anyhow::anyhow!("ChaCha20-Poly1305 authentication failed — ciphertext tampered or wrong key"))?;
 
-    for byte in plaintext.iter_mut() {
-        if keystream_pos >= 32 {
-            current_block = generate_keystream_block(&key.0, &nonce.0, block_index);
-            block_index += 1;
-            keystream_pos = 0;
-        }
-        *byte ^= current_block[keystream_pos];
-        keystream_pos += 1;
-    }
-
-    Ok(plaintext)
+    Ok(buffer)
 }
 
 // ============================================================================
@@ -423,6 +364,38 @@ impl EncryptedJobManager {
     /// Get our public key for receiving encrypted jobs
     pub fn public_key(&self) -> &X25519PublicKey {
         &self.node_pubkey
+    }
+
+    /// Try to decrypt a payload that may be an encrypted envelope.
+    /// The envelope format is: [32-byte ephemeral pubkey][12-byte nonce][16-byte auth tag][ciphertext...]
+    /// Returns Err if the payload is not in this format or cannot be decrypted.
+    pub fn try_decrypt_payload(&self, payload: &[u8]) -> Result<Vec<u8>> {
+        // Minimum size: 32 (pubkey) + 12 (nonce) + 16 (tag) + 1 (at least 1 byte ciphertext)
+        if payload.len() < 61 {
+            return Err(anyhow::anyhow!("Payload too short to be encrypted envelope"));
+        }
+
+        let ephemeral_pubkey = X25519PublicKey({
+            let mut k = [0u8; 32];
+            k.copy_from_slice(&payload[..32]);
+            k
+        });
+        let nonce = Nonce({
+            let mut n = [0u8; 12];
+            n.copy_from_slice(&payload[32..44]);
+            n
+        });
+        let auth_tag: [u8; 16] = {
+            let mut t = [0u8; 16];
+            t.copy_from_slice(&payload[44..60]);
+            t
+        };
+        let ciphertext = &payload[60..];
+
+        let shared = self.node_secret.diffie_hellman(&ephemeral_pubkey);
+        let key = shared.derive_encryption_key();
+
+        decrypt_data(ciphertext, &key, &nonce, &auth_tag)
     }
 
     /// Create encrypted job announcement for specific workers
@@ -732,6 +705,80 @@ impl EncryptedJobManager {
 }
 
 // ============================================================================
+// ENCRYPTED RESULT (E2E Worker→Customer)
+// ============================================================================
+
+/// Encrypted inference result for E2E encrypted inference pipeline.
+/// Contains everything the customer needs to decrypt and verify the result.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EncryptedResult {
+    /// Encrypted result ciphertext
+    pub ciphertext: Vec<u8>,
+    /// Nonce used for encryption
+    pub nonce: Nonce,
+    /// Ephemeral public key used by worker for ECDH
+    pub ephemeral_pubkey: X25519PublicKey,
+    /// TEE attestation covering the computation
+    pub tee_attestation: Option<Vec<u8>>,
+    /// IO-bound proof (serialized STARK proof)
+    pub io_proof: Option<Vec<u8>>,
+    /// Hash of inputs used (for proof verification)
+    pub input_hash: [u8; 32],
+    /// Hash of outputs produced (for proof verification)
+    pub output_hash: [u8; 32],
+    /// Authentication tag
+    pub auth_tag: [u8; 16],
+}
+
+/// Encrypt a job result for the customer (worker-side).
+/// Uses an ephemeral X25519 keypair so the worker's long-term key isn't exposed.
+pub fn encrypt_job_result(
+    plaintext_result: &[u8],
+    customer_pubkey: &X25519PublicKey,
+    input_hash: [u8; 32],
+    output_hash: [u8; 32],
+    tee_attestation: Option<Vec<u8>>,
+    io_proof: Option<Vec<u8>>,
+) -> Result<EncryptedResult> {
+    let ephemeral_secret = X25519SecretKey::generate();
+    let ephemeral_pubkey = ephemeral_secret.public_key();
+
+    let shared = ephemeral_secret.diffie_hellman(customer_pubkey);
+    let encryption_key = shared.derive_encryption_key();
+
+    let nonce = Nonce::generate();
+    let (ciphertext, auth_tag) = encrypt_data(plaintext_result, &encryption_key, &nonce);
+
+    Ok(EncryptedResult {
+        ciphertext,
+        nonce,
+        ephemeral_pubkey,
+        tee_attestation,
+        io_proof,
+        input_hash,
+        output_hash,
+        auth_tag,
+    })
+}
+
+/// Decrypt a job result (customer-side).
+/// The customer uses their secret key + the worker's ephemeral pubkey to derive the shared secret.
+pub fn decrypt_job_result(
+    encrypted: &EncryptedResult,
+    customer_secret: &X25519SecretKey,
+) -> Result<Vec<u8>> {
+    let shared = customer_secret.diffie_hellman(&encrypted.ephemeral_pubkey);
+    let encryption_key = shared.derive_encryption_key();
+
+    decrypt_data(
+        &encrypted.ciphertext,
+        &encryption_key,
+        &encrypted.nonce,
+        &encrypted.auth_tag,
+    )
+}
+
+// ============================================================================
 // CAPABILITY GROUPS FOR BROADCAST ENCRYPTION
 // ============================================================================
 
@@ -920,5 +967,71 @@ mod tests {
         let decrypted = worker_manager.try_decrypt_announcement(&announcements[0]).unwrap();
         assert_eq!(decrypted.job_id, job_spec.job_id);
         assert_eq!(decrypted.computation_id, "llama-7b");
+    }
+
+    #[test]
+    fn test_encrypt_decrypt_job_result() {
+        // Customer generates keypair
+        let customer_secret = X25519SecretKey::generate();
+        let customer_pubkey = customer_secret.public_key();
+
+        let plaintext_result = b"inference output: The answer is 42";
+        let input_hash = [1u8; 32];
+        let output_hash = [2u8; 32];
+
+        // Worker encrypts result for customer
+        let encrypted = encrypt_job_result(
+            plaintext_result,
+            &customer_pubkey,
+            input_hash,
+            output_hash,
+            Some(b"TEE_ATTESTATION_DATA".to_vec()),
+            None,
+        ).unwrap();
+
+        assert_ne!(encrypted.ciphertext, plaintext_result.to_vec());
+        assert_eq!(encrypted.input_hash, input_hash);
+        assert_eq!(encrypted.output_hash, output_hash);
+
+        // Customer decrypts result
+        let decrypted = decrypt_job_result(&encrypted, &customer_secret).unwrap();
+        assert_eq!(decrypted, plaintext_result.to_vec());
+    }
+
+    #[test]
+    fn test_try_decrypt_payload_roundtrip() {
+        let worker_manager = EncryptedJobManager::new(EncryptedJobConfig::default());
+        let worker_pubkey = worker_manager.public_key().clone();
+
+        // Customer encrypts payload for worker using the envelope format:
+        // [32-byte ephemeral pubkey][12-byte nonce][16-byte auth tag][ciphertext]
+        let plaintext = b"secret inference input data";
+        let ephemeral_secret = X25519SecretKey::generate();
+        let ephemeral_pubkey = ephemeral_secret.public_key();
+        let shared = ephemeral_secret.diffie_hellman(&worker_pubkey);
+        let key = shared.derive_encryption_key();
+        let nonce = Nonce::generate();
+        let (ciphertext, auth_tag) = encrypt_data(plaintext, &key, &nonce);
+
+        // Build envelope
+        let mut envelope = Vec::new();
+        envelope.extend_from_slice(&ephemeral_pubkey.0);
+        envelope.extend_from_slice(&nonce.0);
+        envelope.extend_from_slice(&auth_tag);
+        envelope.extend_from_slice(&ciphertext);
+
+        // Worker decrypts
+        let decrypted = worker_manager.try_decrypt_payload(&envelope).unwrap();
+        assert_eq!(decrypted, plaintext.to_vec());
+    }
+
+    #[test]
+    fn test_try_decrypt_payload_rejects_plaintext() {
+        let worker_manager = EncryptedJobManager::new(EncryptedJobConfig::default());
+        // Short plaintext should fail (too short for envelope)
+        assert!(worker_manager.try_decrypt_payload(b"short").is_err());
+        // Random 100 bytes should fail (wrong key/tag)
+        let random_data = vec![42u8; 100];
+        assert!(worker_manager.try_decrypt_payload(&random_data).is_err());
     }
 }

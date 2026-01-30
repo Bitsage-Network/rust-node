@@ -363,6 +363,9 @@ pub struct WorkerCapabilities {
     pub cuda_compute_capability: Option<String>,
     #[serde(default)]
     pub secure_enclave_memory_mb: u32, // Memory available inside the TEE
+    /// GPU hardware UUIDs for deduplication (e.g. "GPU-a1b2c3d4-...")
+    #[serde(default)]
+    pub gpu_uuids: Vec<String>,
 }
 
 impl Default for WorkerCapabilities {
@@ -390,6 +393,7 @@ impl Default for WorkerCapabilities {
             supports_int8: false,
             cuda_compute_capability: None,
             secure_enclave_memory_mb: 0,
+            gpu_uuids: Vec::new(),
         }
     }
 }

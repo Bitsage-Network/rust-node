@@ -151,6 +151,9 @@ relation!(OpcodeRelation, 2);
 /// Number of trace columns in the production AIR
 pub const NUM_TRACE_COLUMNS: usize = 26;
 
+/// Number of M31 elements used to embed IO commitment
+pub const IO_COMMITMENT_COLS: usize = 8;
+
 /// Obelysk VM constraint evaluator for Stwo
 ///
 /// This implements the AIR (Algebraic Intermediate Representation) for our VM.
@@ -679,6 +682,9 @@ pub fn prove_with_stwo(
     let elapsed = start.elapsed();
     metrics.total_ms = elapsed.as_millis();
     
+    // Extract IO commitment from trace (if present)
+    let io_commitment = trace.io_commitment;
+
     let proof = StarkProof {
         trace_commitment: proof_data.trace_commitment,
         fri_layers: proof_data.fri_layers,
@@ -692,6 +698,7 @@ pub fn prove_with_stwo(
             proof_size_bytes: stark_proof.size_estimate(),
             prover_version: "obelysk-stwo-real-0.1.0".to_string(),
         },
+        io_commitment,
     };
 
     // 12. Validate security properties
@@ -713,20 +720,84 @@ pub fn prove_with_stwo(
 }
 
 // =============================================================================
+// TRUE PROOF OF COMPUTATION - IO BINDING
+// =============================================================================
+
+/// Entry point for TRUE PROOF OF COMPUTATION with IO binding
+///
+/// This is the production entry point that:
+/// 1. Ensures IO commitment is embedded in the proof
+/// 2. Uses GPU acceleration if available
+/// 3. Generates cryptographically verifiable proofs
+///
+/// # Arguments
+/// * `trace` - Execution trace with io_commitment set
+/// * `security_bits` - Target security level (e.g., 128)
+/// * `job_id` - Job ID for replay protection
+/// * `worker_id` - Worker ID for attribution
+///
+/// # Returns
+/// A StarkProof with io_commitment embedded for on-chain verification
+pub fn prove_with_io_binding(
+    trace: &ExecutionTrace,
+    security_bits: usize,
+    job_id: &str,
+    worker_id: &str,
+) -> Result<StarkProof, ProverError> {
+    use crate::obelysk::io_binder::IOCommitmentBuilder;
+
+    // Ensure trace has IO commitment, or compute one
+    let io_commitment = trace.io_commitment.unwrap_or_else(|| {
+        IOCommitmentBuilder::new()
+            .with_vm_inputs(&trace.public_inputs)
+            .with_vm_outputs(&trace.public_outputs)
+            .with_trace_metadata(trace.steps.len(), NUM_TRACE_COLUMNS)
+            .with_job_id(job_id)
+            .with_worker_id(worker_id)
+            .with_timestamp(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs()
+            )
+            .build()
+            .commitment
+    });
+
+    // Create trace with IO commitment embedded
+    let mut trace_with_io = trace.clone();
+    trace_with_io.io_commitment = Some(io_commitment);
+
+    // Generate proof using best available backend
+    let mut proof = prove_with_stwo_gpu(&trace_with_io, security_bits)?;
+
+    // Ensure IO commitment is in the final proof
+    proof.io_commitment = Some(io_commitment);
+
+    tracing::info!(
+        "Generated TRUE PROOF OF COMPUTATION: io_commitment={}, job={}",
+        hex::encode(&io_commitment[..8]),
+        job_id
+    );
+
+    Ok(proof)
+}
+
+// =============================================================================
 // GPU-ACCELERATED PROVING
 // =============================================================================
 
 /// GPU-accelerated proof generation
-/// 
+///
 /// This is the preferred entry point for production use. It automatically:
 /// 1. Detects available GPU (CUDA/ROCm)
 /// 2. Uses GPU for FFT operations (50-100x speedup on large proofs)
 /// 3. Falls back to CPU if no GPU available
-/// 
+///
 /// # Performance
 /// - Small proofs (<16K elements): CPU is used (GPU overhead not worth it)
 /// - Large proofs (>16K elements): GPU provides 50-100x speedup
-/// 
+///
 /// # Example
 /// ```ignore
 /// let proof = prove_with_stwo_gpu(&trace, 128)?;
@@ -739,6 +810,10 @@ pub fn prove_with_stwo_gpu(
     // 1. Stwo's native GpuBackend (requires cuda-runtime feature, fastest)
     // 2. Our custom CUDA/ROCm backend (requires cuda feature)
     // 3. Fallback to SIMD (CPU, still fast via AVX2/NEON)
+
+    // Initialize GPU context if not already done (needed for gpu feature without cuda-runtime)
+    use stwo_prover::prover::backend::gpu::gpu_context;
+    gpu_context::initialize();
 
     if GpuBackend::is_available() {
         tracing::info!("🚀 GPU acceleration: Stwo native GpuBackend");
@@ -989,6 +1064,9 @@ fn prove_with_stwo_gpu_backend(
     let elapsed = start.elapsed();
     metrics.total_ms = elapsed.as_millis();
 
+    // Extract IO commitment from trace (if present)
+    let io_commitment = trace.io_commitment;
+
     let proof = StarkProof {
         trace_commitment: proof_data.trace_commitment,
         fri_layers: proof_data.fri_layers,
@@ -1002,6 +1080,7 @@ fn prove_with_stwo_gpu_backend(
             proof_size_bytes: stark_proof.size_estimate(),
             prover_version: "obelysk-stwo-gpu-v1.0.0".to_string(),
         },
+        io_commitment,
     };
 
     validate_proof_security(&proof)?;
@@ -1089,6 +1168,7 @@ fn generate_mock_proof(
             proof_size_bytes: 256, // Approximate mock proof size
             prover_version: "obelysk-mock-v1".to_string(),
         },
+        io_commitment: trace.io_commitment,
     })
 }
 
@@ -1123,6 +1203,8 @@ struct ExtractedProofData {
     fri_layers: Vec<FRILayer>,
     openings: Vec<Opening>,
     public_outputs: Vec<M31>,
+    /// IO commitment binding proof to inputs/outputs
+    io_commitment: Option<[u8; 32]>,
 }
 
 /// Extract proof data from Stwo's StarkProof  
@@ -1360,6 +1442,7 @@ fn extract_proof_data(
         fri_layers,
         openings,
         public_outputs,
+        io_commitment: None, // Set by caller based on trace
     })
 }
 

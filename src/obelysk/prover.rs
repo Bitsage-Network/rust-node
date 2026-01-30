@@ -52,21 +52,27 @@ impl Default for ProverConfig {
 pub struct StarkProof {
     /// Commitments to trace polynomials
     pub trace_commitment: Vec<u8>,
-    
+
     /// FRI proof components
     pub fri_layers: Vec<FRILayer>,
-    
+
     /// Query openings
     pub openings: Vec<Opening>,
-    
+
     /// Public inputs (for verification)
     pub public_inputs: Vec<M31>,
-    
+
     /// Public outputs (for verification)
     pub public_outputs: Vec<M31>,
-    
+
     /// Proof metadata
     pub metadata: ProofMetadata,
+
+    /// IO Commitment: H(public_inputs || public_outputs)
+    /// This binds the proof to specific inputs/outputs, preventing reuse.
+    /// CRITICAL: Must be verified on-chain at proof_data[4].
+    #[serde(default)]
+    pub io_commitment: Option<[u8; 32]>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
