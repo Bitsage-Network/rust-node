@@ -61,6 +61,9 @@ pub struct SubmitJobRequest {
     pub container_image: Option<String>,
     pub encrypted_data: Option<bool>,
     pub require_tee: Option<bool>,
+    /// Customer's X25519 public key (32 bytes, hex-encoded) for E2E encrypted inference.
+    /// When provided, the worker encrypts the result so only the customer can decrypt it.
+    pub customer_pubkey: Option<String>,
 }
 
 /// Job submission response
@@ -265,6 +268,16 @@ fn parse_job_request(payload: SubmitJobRequest) -> Result<JobRequest, String> {
         callback_url: payload.callback_url,
         data: vec![], // Already embedded in job_type
         max_duration_secs: 3600, // Default 1 hour
+        customer_pubkey: payload.customer_pubkey.as_ref().and_then(|hex_str| {
+            let bytes = hex::decode(hex_str.trim_start_matches("0x")).ok()?;
+            if bytes.len() == 32 {
+                let mut key = [0u8; 32];
+                key.copy_from_slice(&bytes);
+                Some(key)
+            } else {
+                None
+            }
+        }),
     })
 }
 
@@ -289,6 +302,7 @@ mod tests {
             container_image: None,
             encrypted_data: None,
             require_tee: None,
+            customer_pubkey: None,
         };
         
         let result = parse_job_request(payload);
@@ -312,6 +326,7 @@ mod tests {
             container_image: None,
             encrypted_data: None,
             require_tee: None,
+            customer_pubkey: None,
         };
         
         let result = parse_job_request(payload);
@@ -335,6 +350,7 @@ mod tests {
             container_image: None,
             encrypted_data: None,
             require_tee: None,
+            customer_pubkey: None,
         };
         
         let result = parse_job_request(payload);

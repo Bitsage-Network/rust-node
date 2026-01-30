@@ -930,7 +930,7 @@ async fn generate_stealth_address(
     // Use cryptographically secure random bytes for server-side entropy
     // Client MUST combine this with their own randomness for full security
     use rand::RngCore;
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rngs::OsRng;
 
     let mut server_entropy = [0u8; 32];
     rng.fill_bytes(&mut server_entropy);

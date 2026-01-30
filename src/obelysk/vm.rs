@@ -90,6 +90,11 @@ pub struct ExecutionTrace {
     pub final_registers: [M31; 32],
     pub public_inputs: Vec<M31>,
     pub public_outputs: Vec<M31>,
+    /// IO commitment: H(public_inputs || public_outputs)
+    /// This binds the proof to specific inputs/outputs and prevents reuse.
+    /// The 32-byte commitment is embedded in the proof trace.
+    #[serde(default)]
+    pub io_commitment: Option<[u8; 32]>,
 }
 
 /// Obelysk Virtual Machine
@@ -187,6 +192,67 @@ impl ObelyskVM {
         }
     }
 
+    /// Compute IO commitment binding proof to inputs and outputs
+    ///
+    /// This creates a cryptographic commitment H(public_inputs || public_outputs)
+    /// that is embedded in the proof trace, ensuring the proof cannot be
+    /// reused for different inputs/outputs.
+    ///
+    /// # Returns
+    /// A 32-byte SHA-256 commitment that uniquely identifies this execution.
+    pub fn compute_io_commitment(&self) -> [u8; 32] {
+        use super::io_binder::IOCommitmentBuilder;
+
+        let outputs = self.get_public_outputs();
+
+        IOCommitmentBuilder::new()
+            .with_vm_inputs(&self.public_inputs)
+            .with_vm_outputs(&outputs)
+            .with_trace_metadata(self.trace.len(), 26) // 26 trace columns
+            .build()
+            .commitment
+    }
+
+    /// Compute IO commitment with additional job context
+    ///
+    /// This version includes job ID and timestamp for replay protection.
+    pub fn compute_io_commitment_with_context(
+        &self,
+        job_id: &str,
+        timestamp: u64,
+    ) -> [u8; 32] {
+        use super::io_binder::IOCommitmentBuilder;
+
+        let outputs = self.get_public_outputs();
+
+        IOCommitmentBuilder::new()
+            .with_vm_inputs(&self.public_inputs)
+            .with_vm_outputs(&outputs)
+            .with_trace_metadata(self.trace.len(), 26)
+            .with_job_id(job_id)
+            .with_timestamp(timestamp)
+            .build()
+            .commitment
+    }
+
+    /// Compute IO commitment as M31 elements for trace embedding
+    ///
+    /// The commitment is split into 8 M31 elements that can be embedded
+    /// in the first 8 columns of trace row 0 for constraint verification.
+    pub fn compute_io_commitment_m31(&self) -> [M31; 8] {
+        use super::io_binder::IOCommitmentBuilder;
+
+        let outputs = self.get_public_outputs();
+
+        let commitment = IOCommitmentBuilder::new()
+            .with_vm_inputs(&self.public_inputs)
+            .with_vm_outputs(&outputs)
+            .with_trace_metadata(self.trace.len(), 26)
+            .build();
+
+        commitment.commitment_m31
+    }
+
     /// Read a matrix from memory (descriptor: [rows, cols, data...])
     pub fn read_matrix(&self, address: usize) -> Result<Matrix, VMError> {
         let rows_m31 = self.memory.get(&address).ok_or(VMError::InvalidMatrixDescriptor(address))?;
@@ -227,12 +293,16 @@ impl ObelyskVM {
         
         // Extract public outputs from r0-r3
         self.public_outputs = self.registers[0..4].to_vec();
-        
+
+        // Compute IO commitment binding proof to inputs/outputs
+        let io_commitment = self.compute_io_commitment();
+
         Ok(ExecutionTrace {
             steps: self.trace.clone(),
             final_registers: self.registers,
             public_inputs: self.public_inputs.clone(),
             public_outputs: self.public_outputs.clone(),
+            io_commitment: Some(io_commitment),
         })
     }
     

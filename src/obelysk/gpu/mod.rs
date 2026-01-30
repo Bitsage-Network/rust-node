@@ -21,7 +21,7 @@
 //! 4. Multi-GPU parallel execution (193% scaling!)
 
 use anyhow::Result;
-use tracing::info;
+use tracing::{info, warn};
 use crate::obelysk::field::M31;
 
 #[cfg(feature = "cuda")]

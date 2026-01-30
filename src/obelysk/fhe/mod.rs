@@ -20,6 +20,7 @@ pub mod keys;
 pub mod encryption;
 pub mod compute;
 pub mod types;
+pub mod gpu_acceleration;
 
 // Re-exports for convenience
 pub use keys::{
@@ -35,10 +36,18 @@ pub use compute::{
     FheCompute, ComputeResult, HomomorphicOperation,
     homomorphic_add, homomorphic_sub, homomorphic_mul,
     homomorphic_compare, homomorphic_max, homomorphic_min,
+    // FHE with IO binding
+    FheIOBinder, FheComputeWithIO,
+    homomorphic_add_with_io, homomorphic_mul_with_io,
 };
 pub use types::{
     FheError, FheConfig, SerializedKey, SerializedCiphertext,
-    ComputeRequest, ComputeResponse,
+    ComputeRequest, ComputeResponse, FheIOCommitment,
+};
+pub use gpu_acceleration::{
+    GpuFheEngine, GpuFheConfig, GpuFheStats, GpuFheError,
+    FheScheme, GpuInfo, ModelInfo, InferenceEstimate,
+    compare_schemes, print_scheme_comparison,
 };
 
 /// FHE configuration for BitSage Network

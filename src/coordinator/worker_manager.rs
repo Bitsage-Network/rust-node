@@ -286,15 +286,26 @@ impl WorkerManager {
     }
 
     /// Register a new worker
+    ///
+    /// Uses a write lock through both validation and insertion to prevent
+    /// TOCTOU race conditions (two workers with same node_id or GPU UUID
+    /// both passing validation concurrently).
     pub async fn register_worker(&self, worker_info: WorkerInfo) -> Result<WorkerId> {
         info!("Registering new worker: {:?}", worker_info.node_id);
-        
-        // Validate worker info
-        self.validate_worker_info(&worker_info).await?;
-        
+
+        // Hold write lock through validation AND insertion to prevent races
+        let mut workers = self.active_workers.write().await;
+
+        // Validate uniqueness checks under write lock
+        self.validate_worker_uniqueness(&workers, &worker_info)?;
+
+        // Validate remaining info (blockchain queries, capability checks)
+        // These are safe to do while holding the lock since they're external calls
+        self.validate_worker_requirements(&worker_info).await?;
+
         // Generate worker ID
         let worker_id = self.generate_worker_id().await;
-        
+
         // Create worker details
         let worker_details = WorkerDetails {
             id: worker_id,
@@ -319,11 +330,12 @@ impl WorkerManager {
             average_completion_time_secs: 0,
             tags: self.extract_worker_tags(&worker_info),
         };
-        
-        // Store worker
-        self.active_workers.write().await.insert(worker_id, worker_details.clone());
-        
-        // Initialize worker load
+
+        // Atomically insert under same write lock
+        workers.insert(worker_id, worker_details.clone());
+        drop(workers);
+
+        // Initialize worker load (separate lock, fine)
         let worker_load = WorkerLoad {
             current_load: 0.0,
             max_load: self.calculate_max_load(&worker_info.capabilities),
@@ -774,26 +786,44 @@ impl WorkerManager {
     async fn start_health_monitoring(&self) -> Result<()> {
         let config = self.config.clone();
         let active_workers = Arc::clone(&self.active_workers);
+        let worker_loads = Arc::clone(&self.worker_loads);
         let event_sender = self.event_sender.clone();
+
+        // Evict workers that have been offline for 3x the timeout period
+        let eviction_threshold = config.worker_timeout_secs * 3;
 
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(config.health_check_interval_secs));
-            
+
             loop {
                 interval.tick().await;
-                
+
                 let now = chrono::Utc::now().timestamp() as u64;
                 let mut workers = active_workers.write().await;
                 let mut timed_out_workers = Vec::new();
-                
+                let mut evicted_workers = Vec::new();
+
                 for (worker_id, worker_details) in workers.iter_mut() {
-                    // Check if worker has timed out
-                    if now - worker_details.last_seen > config.worker_timeout_secs {
+                    let offline_duration = now.saturating_sub(worker_details.last_seen);
+                    if offline_duration > eviction_threshold {
+                        // Worker has been offline long enough to evict
+                        evicted_workers.push(*worker_id);
+                    } else if offline_duration > config.worker_timeout_secs {
                         worker_details.health.status = WorkerStatus::Offline;
                         timed_out_workers.push(*worker_id);
                     }
                 }
-                
+
+                // Evict stale offline workers
+                if !evicted_workers.is_empty() {
+                    let mut loads = worker_loads.write().await;
+                    for worker_id in &evicted_workers {
+                        workers.remove(worker_id);
+                        loads.remove(worker_id);
+                        info!("Evicted offline worker {} (exceeded {}s grace period)", worker_id, eviction_threshold);
+                    }
+                }
+
                 // Send timeout events
                 for worker_id in timed_out_workers {
                     if let Err(e) = event_sender.send(WorkerEvent::WorkerTimeout(worker_id)) {
@@ -990,14 +1020,59 @@ impl WorkerManager {
     /// 1. STWO proof verification (cryptographic proof of correct computation)
     /// 2. Reputation built from successful job completions
     /// 3. Optional staking for premium benefits (priority jobs, validator voting)
-    async fn validate_worker_info(&self, worker_info: &WorkerInfo) -> Result<()> {
-        // Check if worker already exists
-        let workers = self.active_workers.read().await;
+    /// Validate worker uniqueness constraints (node_id, GPU UUIDs).
+    /// Must be called while holding the write lock on active_workers.
+    fn validate_worker_uniqueness(
+        &self,
+        workers: &HashMap<WorkerId, WorkerDetails>,
+        worker_info: &WorkerInfo,
+    ) -> Result<()> {
+        // Enforce max workers limit to prevent unbounded growth
+        if workers.len() >= self.config.registration.max_workers.unwrap_or(10_000) as usize {
+            return Err(anyhow::anyhow!("Maximum worker capacity reached"));
+        }
+
+        // Check if worker already exists by node_id
         if workers.values().any(|w| w.info.node_id == worker_info.node_id) {
             return Err(anyhow::anyhow!("Worker with node ID {} already registered", worker_info.node_id));
         }
-        drop(workers); // Release lock before async call
 
+        // GPU UUID deduplication
+        for uuid in &worker_info.capabilities.gpu_uuids {
+            let uuid_trimmed = uuid.trim();
+            if uuid_trimmed.is_empty() {
+                continue;
+            }
+
+            let valid_format = uuid_trimmed.starts_with("GPU-") || uuid_trimmed.starts_with("0x");
+            if !valid_format {
+                return Err(anyhow::anyhow!(
+                    "Invalid GPU UUID format: '{}'. Expected NVIDIA (GPU-...) or AMD (0x...) format.",
+                    uuid_trimmed
+                ));
+            }
+
+            for existing in workers.values() {
+                if existing.capabilities.gpu_uuids.iter().any(|u| u.trim() == uuid_trimmed) {
+                    let same_wallet = match (&existing.info.wallet_address, &worker_info.wallet_address) {
+                        (Some(a), Some(b)) => a == b,
+                        _ => false,
+                    };
+                    if !same_wallet {
+                        return Err(anyhow::anyhow!(
+                            "GPU {} already registered under a different wallet",
+                            uuid_trimmed
+                        ));
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Validate worker requirements (wallet, stake, capabilities) — async checks
+    async fn validate_worker_requirements(&self, worker_info: &WorkerInfo) -> Result<()> {
         // Wallet address required for receiving payments (Starknet wallet: ArgentX, Braavos, etc.)
         let wallet_address = worker_info.wallet_address.as_ref()
             .ok_or_else(|| anyhow::anyhow!(

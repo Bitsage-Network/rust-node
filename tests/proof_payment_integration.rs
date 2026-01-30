@@ -24,6 +24,7 @@ async fn test_job_proof_payment_integration() {
             requires_tee: false,
         },
         priority: 1,
+        customer_pubkey: None,
     };
 
     // Execute job with proof generation

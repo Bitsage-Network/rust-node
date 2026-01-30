@@ -14,12 +14,15 @@ mod real_blockchain_tests {
     // REAL DEPLOYED CONTRACT ADDRESS ON STARKNET SEPOLIA
     const REAL_JOB_MANAGER_ADDRESS: &str = "0x00bf025663b8a7c7e43393f082b10afe66bd9ddb06fb5e521e3adbcf693094bd";
     
-    // Use real Starknet Sepolia RPC (Lava public endpoint)
-    const STARKNET_RPC: &str = "https://rpc.starknet-testnet.lava.build";
+    // Use real Starknet Sepolia RPC (configurable via env var)
+    fn starknet_rpc_url() -> String {
+        std::env::var("STARKNET_RPC_URL")
+            .unwrap_or_else(|_| "https://api.cartridge.gg/x/starknet/sepolia".to_string())
+    }
 
     // Helper to create a real client connected to Sepolia testnet
     fn create_real_client() -> Arc<StarknetClient> {
-        Arc::new(StarknetClient::new(STARKNET_RPC.to_string()).unwrap())
+        Arc::new(StarknetClient::new(starknet_rpc_url()).unwrap())
     }
 
     // Helper to create a contract instance with the real deployed address

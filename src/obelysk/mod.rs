@@ -13,6 +13,7 @@ pub mod vm;           // Obelysk VM (OVM) - M31-optimized execution
 pub mod prover;       // Stwo proof generation pipeline
 pub mod field;        // Mersenne-31 field operations and helpers
 pub mod circuit;      // Circuit building abstractions
+pub mod io_binder;    // IO commitment binding for proof integrity (Phase 17) 🔗
 pub mod tee_types;    // TEE attestation types (Phase 2) ✅
 pub mod tee_verifier; // TEE attestation verification circuit (Phase 2) ✅
 pub mod ecdsa;        // ECDSA verification for TEE quotes (Phase 3) ✅
@@ -36,6 +37,7 @@ pub mod threshold_decryption; // Threshold Decryption Ceremonies (Phase 13) 🔓
 pub mod nullifier_tree;       // Incremental Merkle Tree for Nullifiers (Phase 14) 🌳
 pub mod fhe;                  // Fully Homomorphic Encryption (Phase 15) 🔒
 pub mod compute_invoice;      // Proof-as-Invoice System (Phase 16) 📜
+pub mod privacy_state;        // Privacy State Machine (Phase 17) 🔐
 
 // Re-exports for convenience
 pub use vm::{ObelyskVM, OpCode, Instruction, ExecutionTrace};
@@ -184,4 +186,27 @@ pub use compute_invoice::{
     InvoiceBuilder,
     // Verification
     verify_invoice_locally,
+};
+pub use io_binder::{
+    // Core types
+    IOBinder, IOCommitment, IOCommitmentBuilder,
+    // Conversion utilities
+    commitment_to_m31_array, m31_array_to_commitment,
+    // Constants
+    IO_COMMITMENT_SIZE, IO_COMMITMENT_M31_COUNT,
+};
+pub use privacy_state::{
+    // Privacy state machine
+    PrivacyState, PrivacyTransition, TransitionOperation,
+    // Data wrapper
+    PrivateData, PrivateDataInner,
+    // Encryption types
+    EncryptionAlgorithm,
+    TeeType as PrivacyTeeType,  // Renamed to avoid conflict
+    FheOperationType,
+    ProofType as PrivacyProofType,  // Renamed to avoid conflict
+    // Proofs and audit
+    AttachedProof, TeeAttestationRef, EncryptedAuditEntry, AuditEntryType,
+    // Errors
+    PrivacyError,
 };

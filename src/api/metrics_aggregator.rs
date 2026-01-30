@@ -190,8 +190,7 @@ impl MetricsAggregator {
 
         // Determine if active (has stake and recent heartbeat)
         let is_active = staked_amount != "0" &&
-                       last_heartbeat.is_some() &&
-                       last_heartbeat.unwrap() > (chrono::Utc::now().timestamp() as u64 - 300);
+                       matches!(last_heartbeat, Some(ts) if ts > (chrono::Utc::now().timestamp() as u64 - 300));
 
         let is_registered = staked_amount != "0";
 

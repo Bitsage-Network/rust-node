@@ -226,6 +226,7 @@ impl BlockchainBridge {
             callback_url: None,
             data: request.payload.clone(),
             max_duration_secs: request.requirements.timeout_seconds,
+            customer_pubkey: None,
         })
     }
 
@@ -1028,6 +1029,7 @@ mod tests {
             },
             payload: vec![1, 2, 3, 4],
             priority: 5,
+            customer_pubkey: None,
         };
 
         let result = bridge.convert_to_coordinator_job_request(&request);
@@ -1064,6 +1066,7 @@ mod tests {
                 },
                 payload: vec![],
                 priority: 10,
+                customer_pubkey: None,
             };
 
             let result = bridge.convert_to_coordinator_job_request(&request);

@@ -167,54 +167,49 @@ async fn list_proofs(
     let limit = params.limit.unwrap_or(20).min(100);
     let offset = (page - 1) * limit;
     
-    // Build conditions
-    let mut conditions = vec!["1=1".to_string()];
-    
-    if let Some(ref worker) = params.worker {
-        conditions.push(format!("worker_id = '{}'", worker));
-    }
-    if let Some(ref job_id) = params.job_id {
-        conditions.push(format!("job_id = '{}'", job_id));
-    }
-    if let Some(is_valid) = params.is_valid {
-        conditions.push(format!("is_valid = {}", is_valid));
-    }
-    if let Some(ref proof_type) = params.proof_type {
-        conditions.push(format!("proof_type = '{}'", proof_type));
-    }
-    
-    let where_clause = conditions.join(" AND ");
-    
-    // Get total
-    let count_query = format!(
-        "SELECT COUNT(*) FROM proofs WHERE {}",
-        where_clause
-    );
-    
-    let total: i64 = sqlx::query_scalar(&count_query)
-        .fetch_one(state.pool.as_ref())
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    
-    // Get proofs
-    let proofs_query = format!(
+    // Get total (parameterized)
+    let total: i64 = sqlx::query_scalar(
         r#"
-        SELECT 
+        SELECT COUNT(*) FROM proofs
+        WHERE ($1::text IS NULL OR worker_id = $1)
+          AND ($2::text IS NULL OR job_id = $2)
+          AND ($3::bool IS NULL OR is_valid = $3)
+          AND ($4::text IS NULL OR proof_type = $4)
+        "#
+    )
+    .bind(&params.worker)
+    .bind(&params.job_id)
+    .bind(&params.is_valid)
+    .bind(&params.proof_type)
+    .fetch_one(state.pool.as_ref())
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database query failed: {}", e)))?;
+
+    // Get proofs (parameterized)
+    let proofs: Vec<ProofResponse> = sqlx::query_as(
+        r#"
+        SELECT
             id::text, job_id, worker_id, proof_hash, proof_type, circuit_type,
             proof_size_bytes, generation_time_ms, security_bits, is_valid,
             verification_time_ms, verified_at, verifier_address, tx_hash, block_number
-        FROM proofs 
-        WHERE {}
+        FROM proofs
+        WHERE ($1::text IS NULL OR worker_id = $1)
+          AND ($2::text IS NULL OR job_id = $2)
+          AND ($3::bool IS NULL OR is_valid = $3)
+          AND ($4::text IS NULL OR proof_type = $4)
         ORDER BY verified_at DESC NULLS LAST
-        LIMIT {} OFFSET {}
-        "#,
-        where_clause, limit, offset
-    );
-    
-    let proofs: Vec<ProofResponse> = sqlx::query_as(&proofs_query)
-        .fetch_all(state.pool.as_ref())
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        LIMIT $5 OFFSET $6
+        "#
+    )
+    .bind(&params.worker)
+    .bind(&params.job_id)
+    .bind(&params.is_valid)
+    .bind(&params.proof_type)
+    .bind(limit)
+    .bind(offset)
+    .fetch_all(state.pool.as_ref())
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database query failed: {}", e)))?;
     
     let total_pages = (total + limit - 1) / limit;
     

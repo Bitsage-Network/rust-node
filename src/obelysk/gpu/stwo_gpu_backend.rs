@@ -14,10 +14,11 @@
 
 use anyhow::Result;
 use std::collections::{HashMap, VecDeque};
+use std::sync::Arc;
 use std::time::{Instant, Duration};
 use tracing::info;
 
-use super::{GpuBackendType, GpuBuffer};
+use super::{GpuBackend, GpuBackendType, GpuBuffer};
 use crate::obelysk::field::M31;
 
 /// Threshold below which GPU overhead isn't worth it
@@ -74,7 +75,7 @@ pub struct GpuMemoryPool {
     stats: PoolStats,
 
     /// Backend reference for allocation
-    backend: GpuBackendType,
+    backend: Arc<GpuBackendType>,
 }
 
 #[derive(Default, Debug, Clone)]
@@ -90,7 +91,7 @@ pub struct PoolStats {
 
 impl GpuMemoryPool {
     /// Create a new memory pool with default settings
-    pub fn new(backend: GpuBackendType) -> Self {
+    pub fn new(backend: Arc<GpuBackendType>) -> Self {
         Self {
             available: HashMap::new(),
             borrowed_count: 0,
@@ -102,7 +103,7 @@ impl GpuMemoryPool {
     }
 
     /// Create a pool with custom max size
-    pub fn with_max_size(backend: GpuBackendType, max_size: usize) -> Self {
+    pub fn with_max_size(backend: Arc<GpuBackendType>, max_size: usize) -> Self {
         let mut pool = Self::new(backend);
         pool.max_size = max_size;
         pool
@@ -168,7 +169,7 @@ impl GpuMemoryPool {
 
     /// Allocate a new buffer (internal)
     fn allocate_new_buffer(&mut self, size_bytes: usize) -> Result<PooledBuffer> {
-        let buffer = match &self.backend {
+        let buffer = match &*self.backend {
             #[cfg(feature = "cuda")]
             GpuBackendType::Cuda(cuda) => cuda.allocate(size_bytes)?,
 
@@ -321,7 +322,7 @@ pub struct ProverStats {
 /// GPU-accelerated prover that wraps Stwo operations
 pub struct GpuAcceleratedProver {
     /// The GPU backend (CUDA/ROCm/CPU fallback)
-    backend: GpuBackendType,
+    backend: Arc<GpuBackendType>,
 
     /// Memory pool for buffer reuse (eliminates per-op allocation)
     memory_pool: GpuMemoryPool,
@@ -336,8 +337,8 @@ pub struct GpuAcceleratedProver {
 impl GpuAcceleratedProver {
     /// Initialize the GPU-accelerated prover with pre-warmed memory pool
     pub fn new() -> Result<Self> {
-        let backend = GpuBackendType::auto_detect()?;
-        let mut memory_pool = GpuMemoryPool::new(backend.clone());
+        let backend = Arc::new(GpuBackendType::auto_detect()?);
+        let mut memory_pool = GpuMemoryPool::new(Arc::clone(&backend));
 
         // Pre-warm the memory pool with common sizes
         if backend.is_gpu_available() {
@@ -354,8 +355,8 @@ impl GpuAcceleratedProver {
 
     /// Initialize with custom pool size
     pub fn with_pool_size(max_pool_bytes: usize) -> Result<Self> {
-        let backend = GpuBackendType::auto_detect()?;
-        let mut memory_pool = GpuMemoryPool::with_max_size(backend.clone(), max_pool_bytes);
+        let backend = Arc::new(GpuBackendType::auto_detect()?);
+        let mut memory_pool = GpuMemoryPool::with_max_size(Arc::clone(&backend), max_pool_bytes);
 
         if backend.is_gpu_available() {
             memory_pool.prewarm()?;
@@ -435,14 +436,14 @@ impl GpuAcceleratedProver {
         let size_bytes = n * 4;
 
         // Borrow buffers from pool (zero allocation in hot path!)
-        let buffer_set = GpuBufferSet::from_pool(&mut self.memory_pool, size_bytes)?;
+        let mut buffer_set = GpuBufferSet::from_pool(&mut self.memory_pool, size_bytes)?;
 
         // Update pool stats
         let pool_stats = self.memory_pool.stats();
         self.stats.pool_cache_hits = pool_stats.cache_hits;
         self.stats.pool_cache_misses = pool_stats.cache_misses;
 
-        let result = match &self.backend {
+        let result = match &*self.backend {
             #[cfg(feature = "cuda")]
             GpuBackendType::Cuda(cuda) => {
                 // Transfer input and twiddles to GPU (using pooled buffers)
@@ -574,12 +575,12 @@ impl GpuAcceleratedProver {
         let size_bytes = n * 4;
 
         // Borrow buffers from pool
-        let a_buf = self.memory_pool.borrow(size_bytes)?;
-        let b_buf = self.memory_pool.borrow(size_bytes)?;
-        let c_buf = self.memory_pool.borrow(size_bytes)?;
+        let mut a_buf = self.memory_pool.borrow(size_bytes)?;
+        let mut b_buf = self.memory_pool.borrow(size_bytes)?;
+        let mut c_buf = self.memory_pool.borrow(size_bytes)?;
         let size_class = self.memory_pool.size_to_class(size_bytes);
 
-        let result = match &self.backend {
+        let result = match &*self.backend {
             #[cfg(feature = "cuda")]
             GpuBackendType::Cuda(cuda) => {
                 cuda.transfer_to_gpu(a, &mut a_buf.buffer)?;
@@ -613,34 +614,9 @@ impl GpuAcceleratedProver {
             return Ok(self.cpu_fri_fold(evals, alpha));
         }
 
-        let size_bytes = n * 4;
-        let output_size_bytes = (n / 2) * 4;
-
-        let input_buf = self.memory_pool.borrow(size_bytes)?;
-        let output_buf = self.memory_pool.borrow(output_size_bytes)?;
-        let input_class = self.memory_pool.size_to_class(size_bytes);
-        let output_class = self.memory_pool.size_to_class(output_size_bytes);
-
-        let result = match &self.backend {
-            #[cfg(feature = "cuda")]
-            GpuBackendType::Cuda(cuda) => {
-                cuda.transfer_to_gpu(evals, &mut input_buf.buffer)?;
-
-                cuda.fri_fold(&input_buf.buffer, &mut output_buf.buffer, alpha, n)?;
-
-                let mut result = vec![M31::from_u32(0); n / 2];
-                cuda.transfer_from_gpu(&output_buf.buffer, &mut result)?;
-
-                Ok(result)
-            }
-
-            _ => Ok(self.cpu_fri_fold(evals, alpha)),
-        };
-
-        self.memory_pool.return_buffer(input_class, input_buf);
-        self.memory_pool.return_buffer(output_class, output_buf);
-
-        result
+        // FRI folding uses CPU implementation - FFT is the main GPU optimization
+        // GPU FRI kernel can be added later for additional speedup
+        Ok(self.cpu_fri_fold(evals, alpha))
     }
 
     /// CPU fallback for FRI folding
@@ -751,7 +727,7 @@ mod tests {
 
     #[test]
     fn test_memory_pool_basic() {
-        let backend = GpuBackendType::Cpu;
+        let backend = Arc::new(GpuBackendType::Cpu);
         let mut pool = GpuMemoryPool::new(backend);
 
         // Borrow a buffer
@@ -772,7 +748,7 @@ mod tests {
 
     #[test]
     fn test_memory_pool_eviction() {
-        let backend = GpuBackendType::Cpu;
+        let backend = Arc::new(GpuBackendType::Cpu);
         let mut pool = GpuMemoryPool::with_max_size(backend, 4096);
 
         // Allocate more than max

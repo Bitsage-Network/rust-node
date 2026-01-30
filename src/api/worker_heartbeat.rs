@@ -397,7 +397,15 @@ async fn record_reward_claim(
     match result {
         Ok(row) => {
             use sqlx::Row;
-            let id: uuid::Uuid = row.try_get("id").unwrap();
+            let id: uuid::Uuid = match row.try_get("id") {
+                Ok(id) => id,
+                Err(e) => {
+                    tracing::error!("Failed to read reward claim id: {}", e);
+                    return Err((StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse {
+                        error: "Failed to read claim record".to_string(),
+                    })));
+                }
+            };
 
             // Get total claimed
             let total_result = sqlx::query(

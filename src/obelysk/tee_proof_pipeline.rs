@@ -695,6 +695,7 @@ fn create_encryption_trace(amount: u64) -> super::vm::ExecutionTrace {
         final_registers: registers_after,
         public_inputs: vec![M31::new(amount as u32)],
         public_outputs: vec![M31::new(1)],
+        io_commitment: None,
     }
 }
 
@@ -765,6 +766,7 @@ fn create_balance_trace(balance: u64, transfer: u64) -> super::vm::ExecutionTrac
         final_registers: registers_after,
         public_inputs: vec![M31::new(balance as u32), M31::new(transfer as u32)],
         public_outputs: vec![M31::new(difference as u32)],
+        io_commitment: None,
     }
 }
 
@@ -856,6 +858,7 @@ fn create_swap_trace(
         final_registers: registers_after,
         public_inputs: vec![M31::new(amount_a as u32), M31::new(rate as u32), M31::new(amount_b as u32)],
         public_outputs: vec![M31::new(product)],
+        io_commitment: None,
     }
 }
 
@@ -894,6 +897,7 @@ mod tests {
                 proof_size_bytes: 2000,
                 prover_version: "test".to_string(),
             },
+            io_commitment: None,
         }
     }
 

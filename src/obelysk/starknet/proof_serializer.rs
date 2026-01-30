@@ -270,6 +270,31 @@ impl ProofSerializer {
     }
 
     // =========================================================================
+    // IO Commitment Serialization
+    // =========================================================================
+
+    /// Serialize a 32-byte IO commitment as a single felt252
+    ///
+    /// The IO commitment binds the proof to specific inputs/outputs.
+    /// It is placed at position [4] in the proof array for Cairo verification.
+    pub fn serialize_io_commitment(&mut self, commitment: &[u8; 32]) {
+        // Convert 32-byte commitment to felt252 (take first 31 bytes to fit)
+        let mut bytes = [0u8; 32];
+        bytes[1..32].copy_from_slice(&commitment[0..31]);
+        self.output.push(Felt252(bytes));
+    }
+
+    /// Serialize IO commitment from optional value
+    ///
+    /// If commitment is None, serializes zero (no binding).
+    pub fn serialize_io_commitment_optional(&mut self, commitment: Option<&[u8; 32]>) {
+        match commitment {
+            Some(c) => self.serialize_io_commitment(c),
+            None => self.output.push(Felt252::ZERO),
+        }
+    }
+
+    // =========================================================================
     // FRI Configuration Serialization
     // =========================================================================
 
@@ -398,10 +423,79 @@ impl ProofSerializer {
     pub fn serialize_stark_proof(&mut self, proof: &StarkProofData) -> CairoSerializedProof {
         self.clear();
         self.serialize_commitment_scheme_proof(&proof.commitment_scheme_proof);
-        
+
         let data = self.take_output();
         let serialized_elements = data.len();
-        
+
+        CairoSerializedProof {
+            data,
+            metadata: ProofMetadata {
+                original_size_bytes: proof.original_size_bytes,
+                serialized_elements,
+                public_input_hash: proof.public_input_hash,
+                config: ProofConfig {
+                    log_blowup_factor: proof.commitment_scheme_proof.config.fri_config.log_blowup_factor,
+                    log_last_layer_degree_bound: proof.commitment_scheme_proof.config.fri_config.log_last_layer_degree_bound,
+                    n_queries: proof.commitment_scheme_proof.config.fri_config.n_queries,
+                    pow_bits: proof.commitment_scheme_proof.config.pow_bits,
+                },
+                generated_at: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs(),
+            },
+        }
+    }
+
+    /// Serialize a STARK proof with IO commitment binding
+    ///
+    /// This version embeds the IO commitment at position [4] in the proof array,
+    /// which is verified on-chain by the Cairo verifier.
+    ///
+    /// # Cairo Proof Format with IO Binding:
+    /// ```text
+    /// [0-3]:   PCS Config (pow_bits, blowup, last_layer, n_queries)
+    /// [4]:     IO Commitment (CRITICAL: binds proof to inputs/outputs)
+    /// [5]:     Trace Commitment
+    /// [6]:     Composition Commitment
+    /// [7+]:    FRI Layers, Decommitments, etc.
+    /// [last]:  PoW Nonce
+    /// ```
+    pub fn serialize_proof_with_io_binding(
+        &mut self,
+        proof: &StarkProofData,
+        io_commitment: &[u8; 32],
+    ) -> CairoSerializedProof {
+        self.clear();
+
+        // 1. Serialize PCS config first [0-3]
+        self.serialize_pcs_config(&proof.commitment_scheme_proof.config);
+
+        // 2. Serialize IO commitment at position [4]
+        // This is the CRITICAL binding that prevents proof reuse
+        self.serialize_io_commitment(io_commitment);
+
+        // 3. Serialize commitments (trace at [5], composition at [6])
+        self.serialize_blake2s_hash_array_no_prefix(&proof.commitment_scheme_proof.commitments);
+
+        // 4. Serialize sampled values
+        self.serialize_sampled_values(&proof.commitment_scheme_proof.sampled_values);
+
+        // 5. Serialize Merkle decommitments
+        self.serialize_merkle_decommitment_array(&proof.commitment_scheme_proof.decommitments);
+
+        // 6. Serialize queried values
+        self.serialize_queried_values(&proof.commitment_scheme_proof.queried_values);
+
+        // 7. Serialize FRI proof
+        self.serialize_fri_proof(&proof.commitment_scheme_proof.fri_proof);
+
+        // 8. Serialize PoW nonce (MUST BE LAST)
+        self.serialize_u64(proof.commitment_scheme_proof.proof_of_work);
+
+        let data = self.take_output();
+        let serialized_elements = data.len();
+
         CairoSerializedProof {
             data,
             metadata: ProofMetadata {

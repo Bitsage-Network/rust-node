@@ -11,7 +11,7 @@ mod tests {
 
     // Helper to create a test client
     fn create_test_client() -> Arc<StarknetClient> {
-        Arc::new(StarknetClient::new("https://rpc.starknet-testnet.lava.build".to_string()).unwrap())
+        Arc::new(StarknetClient::new(std::env::var("STARKNET_RPC_URL").unwrap_or_else(|_| "https://api.cartridge.gg/x/starknet/sepolia".to_string()).to_string()).unwrap())
     }
 
     // Helper to create a test contract
@@ -39,12 +39,13 @@ mod tests {
             callback_url: Some("http://callback.example.com".to_string()),
             data: vec![1, 2, 3],
             max_duration_secs: 3600,
+            customer_pubkey: None,
         }
     }
 
     #[test]
     fn test_starknet_client_creation() {
-        let client = StarknetClient::new("https://rpc.starknet-testnet.lava.build".to_string());
+        let client = StarknetClient::new(std::env::var("STARKNET_RPC_URL").unwrap_or_else(|_| "https://api.cartridge.gg/x/starknet/sepolia".to_string()).to_string());
         assert!(client.is_ok());
         
         let client = client.unwrap();

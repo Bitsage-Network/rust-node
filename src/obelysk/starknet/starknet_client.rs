@@ -1465,8 +1465,8 @@ mod tests {
 
     #[test]
     fn test_network_urls() {
-        // Lava mainnet uses rpc.starknet.lava.build (no "mainnet" in URL)
-        assert!(StarknetNetwork::Mainnet.rpc_url().contains("starknet.lava"));
+        // Mainnet uses PublicNode
+        assert!(StarknetNetwork::Mainnet.rpc_url().contains("publicnode.com"));
         // Lava sepolia uses rpc.starknet-testnet.lava.build
         assert!(StarknetNetwork::Sepolia.rpc_url().contains("testnet"));
     }

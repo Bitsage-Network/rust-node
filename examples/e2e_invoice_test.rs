@@ -84,6 +84,7 @@ async fn main() -> Result<()> {
             requires_tee: false,
         },
         priority: 1,
+        customer_pubkey: None,
     };
 
     println!("   📤 Submitting job: Ping");

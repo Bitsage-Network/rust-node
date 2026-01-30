@@ -429,11 +429,12 @@ impl SupplyRouter {
         // Sort by: reputation (desc), load (asc), price (asc)
         candidates.sort_by(|a, b| {
             b.reputation.cmp(&a.reputation)
-                .then(a.current_load.partial_cmp(&b.current_load).unwrap())
+                .then(a.current_load.partial_cmp(&b.current_load).unwrap_or(std::cmp::Ordering::Equal))
                 .then(a.hourly_rate_cents.cmp(&b.hourly_rate_cents))
         });
 
-        let best_miner = candidates.first().unwrap().clone();
+        // Safe: candidates is non-empty (checked above)
+        let best_miner = candidates[0].clone();
 
         // Calculate cost breakdown (80/20 split)
         let total_cost = best_miner.hourly_rate_cents;
@@ -494,7 +495,8 @@ impl SupplyRouter {
             return Err(anyhow!("No cloud instances matching GPU model requirement"));
         }
 
-        let best = instances.first().unwrap().clone();
+        // Safe: instances is non-empty (checked above)
+        let best = instances[0].clone();
 
         // Cloud pricing: provider cost + 20% markup (already calculated in bitsage_price_cents)
         let total_cost = best.bitsage_price_cents;

@@ -79,7 +79,7 @@ impl NodeId {
     /// Create a new random node ID
     pub fn random() -> Self {
         let mut id = [0u8; ID_SIZE];
-        rand::thread_rng().fill_bytes(&mut id);
+        rand::rngs::OsRng.fill_bytes(&mut id);
         Self(id)
     }
 

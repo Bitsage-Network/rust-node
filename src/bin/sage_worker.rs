@@ -199,6 +199,9 @@ struct GpuConfig {
     pub compute_capability: String,
     pub tee_supported: bool,
     pub cuda_version: Option<String>,
+    /// GPU hardware UUIDs for deduplication (e.g. "GPU-a1b2c3d4-...")
+    #[serde(default)]
+    pub gpu_uuids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -252,6 +255,7 @@ async fn cmd_setup(
             compute_capability: "0.0".to_string(),
             tee_supported: false,
             cuda_version: None,
+            gpu_uuids: Vec::new(),
         }
     } else {
         detect_gpu().await?
@@ -474,6 +478,7 @@ async fn detect_gpu() -> Result<GpuConfig> {
         compute_capability: "0.0".to_string(),
         tee_supported: false,
         cuda_version: None,
+        gpu_uuids: Vec::new(),
     })
 }
 
@@ -520,6 +525,21 @@ async fn detect_nvidia_gpu() -> Result<GpuConfig> {
     // Check for TEE support (H100 Confidential Computing)
     let tee_supported = model.contains("H100") || model.contains("H200") || model.contains("B100") || model.contains("B200");
 
+    // Collect GPU UUIDs for hardware binding
+    let gpu_uuids = match std::process::Command::new("nvidia-smi")
+        .args(["--query-gpu=uuid", "--format=csv,noheader"])
+        .output()
+    {
+        Ok(uuid_output) if uuid_output.status.success() => {
+            String::from_utf8_lossy(&uuid_output.stdout)
+                .lines()
+                .map(|l| l.trim().to_string())
+                .filter(|l| !l.is_empty())
+                .collect()
+        }
+        _ => Vec::new(),
+    };
+
     Ok(GpuConfig {
         detected: true,
         count: gpu_count.max(1),
@@ -528,6 +548,7 @@ async fn detect_nvidia_gpu() -> Result<GpuConfig> {
         compute_capability: compute_cap,
         tee_supported,
         cuda_version,
+        gpu_uuids,
     })
 }
 
@@ -552,6 +573,24 @@ async fn detect_amd_gpu() -> Result<GpuConfig> {
         "AMD GPU".to_string()
     };
 
+    // AMD GPUs don't have nvidia-smi UUIDs; collect via rocm-smi if available
+    let gpu_uuids = match std::process::Command::new("rocm-smi")
+        .args(["--showuniqueid"])
+        .output()
+    {
+        Ok(uuid_output) if uuid_output.status.success() => {
+            String::from_utf8_lossy(&uuid_output.stdout)
+                .lines()
+                .filter_map(|l| {
+                    // rocm-smi output format: "GPU[N] : Unique ID: 0x..."
+                    l.split("Unique ID:").nth(1).map(|id| id.trim().to_string())
+                })
+                .filter(|l| !l.is_empty())
+                .collect()
+        }
+        _ => Vec::new(),
+    };
+
     Ok(GpuConfig {
         detected: true,
         count: 1,
@@ -560,6 +599,7 @@ async fn detect_amd_gpu() -> Result<GpuConfig> {
         compute_capability: "gfx942".to_string(),
         tee_supported: false,
         cuda_version: None,
+        gpu_uuids,
     })
 }
 
@@ -605,7 +645,7 @@ async fn generate_new_wallet(config_path: &PathBuf) -> Result<WalletConfig> {
     }
 
     // Generate ElGamal keypair for privacy payments
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rngs::OsRng;
     let mut elgamal_secret = [0u8; 32];
     rng.fill_bytes(&mut elgamal_secret);
 
@@ -662,7 +702,7 @@ async fn import_wallet_from_key(config_path: &PathBuf, private_key: &str) -> Res
     }
 
     // Generate ElGamal key
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rngs::OsRng;
     let mut elgamal_secret = [0u8; 32];
     rand::RngCore::fill_bytes(&mut rng, &mut elgamal_secret);
 
@@ -781,7 +821,7 @@ fn generate_session_key(config_path: &std::path::PathBuf) -> Result<SessionKeyCo
     std::fs::create_dir_all(&keys_dir)?;
 
     // Generate session key (ECDSA private key within Starknet field)
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rngs::OsRng;
     let mut session_key_bytes = [0u8; 32];
     rng.fill_bytes(&mut session_key_bytes);
 
@@ -1175,7 +1215,67 @@ async fn detect_vllm() -> Option<String> {
 async fn run_worker(config: WorkerConfig, vllm_endpoint: Option<String>) -> Result<()> {
     use bitsage_node::node::worker::{Worker, WorkerConfig as NodeWorkerConfig};
     use bitsage_node::types::{WorkerCapabilities, TeeType};
+    use bitsage_node::network::encrypted_jobs::X25519SecretKey;
     use std::path::PathBuf;
+
+    // =========================================================================
+    // E2E Encryption: Generate or load X25519 keypair
+    // =========================================================================
+    let config_path = expand_path("~/.bitsage");
+    let x25519_key_path = config_path.join("x25519_secret.key");
+
+    let x25519_secret = if x25519_key_path.exists() {
+        let key_bytes = std::fs::read(&x25519_key_path)
+            .context("Failed to read X25519 secret key")?;
+        if key_bytes.len() != 32 {
+            warn!("Invalid X25519 key file, generating new keypair");
+            let secret = X25519SecretKey::generate();
+            // Store raw 32 bytes
+            let pubkey = secret.public_key();
+            info!("🔐 Encryption: New X25519 keypair generated, pubkey={}", hex::encode(&pubkey.0[..8]));
+            secret
+        } else {
+            let secret = X25519SecretKey::from_bytes({
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(&key_bytes);
+                arr
+            });
+            let pubkey = secret.public_key();
+            info!("🔐 Encryption: X25519 keypair loaded, pubkey={}", hex::encode(&pubkey.0[..8]));
+            secret
+        }
+    } else {
+        let secret = X25519SecretKey::generate();
+        // Save key for persistence
+        if let Err(e) = std::fs::write(&x25519_key_path, &secret.as_bytes()) {
+            warn!("Failed to persist X25519 key: {}", e);
+        }
+        let pubkey = secret.public_key();
+        info!("🔐 Encryption: X25519 keypair generated, pubkey={}", hex::encode(&pubkey.0[..8]));
+        secret
+    };
+
+    let encryption_pubkey_bytes = x25519_secret.public_key().0;
+
+    // Note: EncryptedJobManager is now initialized inside Worker::new()
+    // based on the encryption_pubkey in WorkerConfig. We just need to pass the pubkey.
+
+    // =========================================================================
+    // TEE Detection
+    // =========================================================================
+    let tee_type = if std::path::Path::new("/sys/kernel/config/tsm/report").exists() {
+        info!("🔒 TEE: TDX detected (Intel Trust Domain Extensions)");
+        "TDX"
+    } else if std::path::Path::new("/dev/sev-guest").exists() {
+        info!("🔒 TEE: SEV-SNP detected (AMD Secure Encrypted Virtualization)");
+        "SEV-SNP"
+    } else {
+        info!("ℹ️  TEE: No hardware TEE detected (running in software mode)");
+        "None"
+    };
+
+    let tee_enforced = tee_type != "None" || config.gpu.tee_supported;
+    info!("🔒 TEE enforcement: {}", if tee_enforced { "ENABLED" } else { "DISABLED" });
 
     // Build capabilities matching the actual WorkerCapabilities struct
     let capabilities = WorkerCapabilities {
@@ -1223,6 +1323,7 @@ async fn run_worker(config: WorkerConfig, vllm_endpoint: Option<String>) -> Resu
         supports_int8: true,
         cuda_compute_capability: Some(config.gpu.compute_capability.clone()),
         secure_enclave_memory_mb: if config.gpu.tee_supported { config.gpu.memory_gb * 1024 } else { 0 },
+        gpu_uuids: config.gpu.gpu_uuids.clone(),
     };
 
     // Build node config - using the actual WorkerConfig struct from node/worker.rs
@@ -1251,6 +1352,9 @@ async fn run_worker(config: WorkerConfig, vllm_endpoint: Option<String>) -> Resu
         payment_claim_interval_secs: 30,
         payment_claim_batch_size: 10,
         vllm_endpoint,
+        encryption_pubkey: Some(encryption_pubkey_bytes),
+        encryption_secret: Some(*x25519_secret.as_bytes()),
+        auto_claim_rewards: config.settings.auto_claim_rewards,
     };
 
     // Create and start worker (not async)

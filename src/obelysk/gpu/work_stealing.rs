@@ -663,6 +663,7 @@ mod tests {
             final_registers: [M31::new(0); 32],
             public_inputs: vec![M31::new(1)],
             public_outputs: vec![M31::new(2)],
+            io_commitment: None,
         }
     }
 

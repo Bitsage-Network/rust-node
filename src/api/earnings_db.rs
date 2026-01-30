@@ -278,52 +278,60 @@ async fn get_earnings_history(
     let limit = params.limit.unwrap_or(20).min(100);
     let offset = (page - 1) * limit;
     
-    let mut conditions = vec![format!("worker_address = '{}'", address)];
-    
-    if let Some(ref payment_type) = params.payment_type {
-        conditions.push(format!("payment_type = '{}'", payment_type));
-    }
-    if let Some(ref token) = params.token {
-        conditions.push(format!("token = '{}'", token));
-    }
-    if let Some(ref period) = params.period {
-        let interval = match period.as_str() {
-            "7d" => "7 days",
-            "30d" => "30 days",
-            "90d" => "90 days",
-            _ => "1000 years", // 'all'
-        };
-        conditions.push(format!("created_at > NOW() - INTERVAL '{}'", interval));
-    }
-    
-    let where_clause = conditions.join(" AND ");
-    
-    // Get total
-    let total: i64 = sqlx::query_scalar(&format!(
-        "SELECT COUNT(*) FROM payments WHERE {}",
-        where_clause
-    ))
+    // Whitelist period to safe interval string
+    let interval = match params.period.as_deref() {
+        Some("7d") => "7 days",
+        Some("30d") => "30 days",
+        Some("90d") => "90 days",
+        _ => "1000 years", // 'all'
+    };
+
+    // Build query with parameterized inputs (interval is whitelisted, safe to interpolate)
+    let count_sql = format!(
+        r#"
+        SELECT COUNT(*) FROM payments
+        WHERE worker_address = $1
+          AND ($2::text IS NULL OR payment_type = $2)
+          AND ($3::text IS NULL OR token = $3)
+          AND created_at > NOW() - INTERVAL '{}'
+        "#,
+        interval
+    );
+
+    let total: i64 = sqlx::query_scalar(&count_sql)
+    .bind(&address)
+    .bind(&params.payment_type)
+    .bind(&params.token)
     .fetch_one(state.pool.as_ref())
     .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    
-    // Get payments
-    let payments: Vec<PaymentResponse> = sqlx::query_as(&format!(
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database query failed: {}", e)))?;
+
+    let list_sql = format!(
         r#"
-        SELECT 
+        SELECT
             id::text, job_id, worker_address, amount::text as amount,
             payment_type, token, COALESCE(privacy_enabled, false) as privacy_enabled,
             created_at, tx_hash, block_number
-        FROM payments 
-        WHERE {}
+        FROM payments
+        WHERE worker_address = $1
+          AND ($2::text IS NULL OR payment_type = $2)
+          AND ($3::text IS NULL OR token = $3)
+          AND created_at > NOW() - INTERVAL '{}'
         ORDER BY created_at DESC
-        LIMIT {} OFFSET {}
+        LIMIT $4 OFFSET $5
         "#,
-        where_clause, limit, offset
-    ))
+        interval
+    );
+
+    let payments: Vec<PaymentResponse> = sqlx::query_as(&list_sql)
+    .bind(&address)
+    .bind(&params.payment_type)
+    .bind(&params.token)
+    .bind(limit)
+    .bind(offset)
     .fetch_all(state.pool.as_ref())
     .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database query failed: {}", e)))?;
     
     Ok(Json(EarningsHistoryResponse {
         payments,

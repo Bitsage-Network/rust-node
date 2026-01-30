@@ -478,6 +478,9 @@ pub struct JobRequest {
     pub callback_url: Option<String>,
     pub data: Vec<u8>,
     pub max_duration_secs: u64,
+    /// Customer's X25519 public key for encrypting results back
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub customer_pubkey: Option<[u8; 32]>,
 }
 
 /// Privacy payment configuration for coordinator
@@ -570,6 +573,9 @@ pub struct WorkerInfo {
     /// ElGamal public key for encrypted privacy payments
     #[serde(skip_serializing_if = "Option::is_none")]
     pub privacy_public_key: Option<ECPoint>,
+    /// X25519 public key for E2E encrypted job communication
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encryption_pubkey: Option<[u8; 32]>,
 }
 
 impl JobCoordinator {

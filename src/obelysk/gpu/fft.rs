@@ -77,21 +77,28 @@ impl GpuFft {
     pub fn new() -> Result<Self> {
         let device = CudaDevice::new(0)
             .context("Failed to initialize CUDA device")?;
-        
+
         // Compile FFT kernels
         let fft_source = include_str!("kernels/circle_fft.cu");
         let ptx = compile_ptx(fft_source)
             .context("Failed to compile Circle FFT kernels")?;
-        
-        let fft_layer = device.get_func("circle_fft_layer", &ptx.to_string())
+
+        // Load PTX module with all required functions
+        device.load_ptx(
+            ptx,
+            "circle_fft",
+            &["circle_fft_layer", "circle_ifft_layer", "bit_reverse_permute"],
+        ).context("Failed to load circle_fft module")?;
+
+        let fft_layer = device.get_func("circle_fft", "circle_fft_layer")
             .context("Failed to load circle_fft_layer kernel")?;
-        let ifft_layer = device.get_func("circle_ifft_layer", &ptx.to_string())
+        let ifft_layer = device.get_func("circle_fft", "circle_ifft_layer")
             .context("Failed to load circle_ifft_layer kernel")?;
-        let bit_reverse = device.get_func("bit_reverse_permute", &ptx.to_string())
+        let bit_reverse = device.get_func("circle_fft", "bit_reverse_permute")
             .context("Failed to load bit_reverse_permute kernel")?;
-        
+
         Ok(Self {
-            device: std::sync::Arc::new(device),
+            device,  // CudaDevice::new already returns Arc<CudaDevice>
             fft_layer_kernel: fft_layer,
             ifft_layer_kernel: ifft_layer,
             bit_reverse_kernel: bit_reverse,
@@ -139,7 +146,7 @@ impl GpuFft {
             };
             
             unsafe {
-                self.fft_layer_kernel.launch(
+                self.fft_layer_kernel.clone().launch(
                     cfg,
                     (&mut data_gpu, &twiddles_gpu, n as i32, layer, log_n),
                 )?;
@@ -192,7 +199,7 @@ impl GpuFft {
             };
             
             unsafe {
-                self.ifft_layer_kernel.launch(
+                self.ifft_layer_kernel.clone().launch(
                     cfg,
                     (&mut data_gpu, &itwiddles_gpu, n as i32, layer, log_n),
                 )?;

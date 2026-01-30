@@ -93,7 +93,7 @@ struct WalletConfig {
     elgamal_key_path: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct GpuConfig {
     detected: bool,
     count: u32,
@@ -256,7 +256,7 @@ fn detect_gpu() -> GpuConfig {
 /// Generate a valid Starknet address (within field bounds)
 fn generate_starknet_address() -> String {
     use rand::RngCore;
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rngs::OsRng;
 
     // Generate 31 bytes (248 bits) to stay well within the 251-bit Starknet field
     let mut bytes = [0u8; 32];
@@ -270,7 +270,7 @@ fn generate_starknet_address() -> String {
 /// Generate a private key for Starknet
 fn generate_private_key() -> String {
     use rand::RngCore;
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rngs::OsRng;
 
     // Generate 31 bytes for private key (within Starknet field)
     let mut bytes = [0u8; 32];
@@ -284,7 +284,7 @@ fn generate_private_key() -> String {
 /// Generate ElGamal keypair for privacy
 fn generate_elgamal_keypair() -> (String, String) {
     use rand::RngCore;
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rngs::OsRng;
 
     // Private key: random 32 bytes
     let mut sk = [0u8; 32];
@@ -333,7 +333,7 @@ async fn run_setup(network: &str) -> Result<()> {
             println!("  ⚠️  Mainnet selected - real tokens will be used!");
             (
                 "https://coordinator.bitsage.network".to_string(),
-                "https://starknet-mainnet.public.blastapi.io".to_string(),
+                "https://starknet-mainnet-rpc.publicnode.com".to_string(),
                 "https://dashboard.bitsage.network".to_string(),
             )
         }
@@ -489,6 +489,7 @@ async fn run_start() -> Result<()> {
         supports_int8: true,
         cuda_compute_capability: Some(config.gpu.compute_capability.clone()),
         secure_enclave_memory_mb: if config.gpu.tee_supported { 4096 } else { 0 },
+        gpu_uuids: Vec::new(),
     };
 
     let worker_config = WorkerConfig {

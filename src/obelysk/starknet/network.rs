@@ -600,8 +600,8 @@ mod tests {
 
     #[test]
     fn test_network_rpc_urls() {
-        // Mainnet uses Lava: rpc.starknet.lava.build
-        assert!(StarknetNetwork::Mainnet.default_rpc_url().contains("starknet.lava"));
+        // Mainnet uses PublicNode
+        assert!(StarknetNetwork::Mainnet.default_rpc_url().contains("publicnode.com"));
         // Sepolia uses Cartridge: api.cartridge.gg/x/starknet/sepolia
         assert!(StarknetNetwork::Sepolia.default_rpc_url().contains("sepolia"));
         assert!(StarknetNetwork::Sepolia.default_rpc_url().contains("cartridge"));

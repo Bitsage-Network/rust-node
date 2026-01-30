@@ -392,9 +392,10 @@ mod tests {
             callback_url: None,
             data: vec![],
             max_duration_secs: 300,
+            customer_pubkey: None,
         }
     }
-    
+
     fn create_test_result() -> JobResult {
         JobResult {
             job_id: JobId::new(),

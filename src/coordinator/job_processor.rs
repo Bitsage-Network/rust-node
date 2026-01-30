@@ -865,6 +865,22 @@ impl JobProcessor {
                     }
                 }
                 
+                // Prune completed/failed jobs older than 1 hour to prevent unbounded growth
+                const JOB_RETENTION_SECS: u64 = 3600;
+                let before_count = jobs.len();
+                jobs.retain(|_job_id, job_info| {
+                    match job_info.completed_at {
+                        Some(completed_at) if matches!(job_info.status, JobStatus::Completed | JobStatus::Failed) => {
+                            now.saturating_sub(completed_at) < JOB_RETENTION_SECS
+                        }
+                        _ => true, // Keep pending/running jobs and jobs without completed_at
+                    }
+                });
+                let pruned = before_count - jobs.len();
+                if pruned > 0 {
+                    info!("Pruned {} completed/failed jobs older than {}s", pruned, JOB_RETENTION_SECS);
+                }
+
                 // Send timeout events
                 for job_id in timed_out_jobs {
                     if let Err(e) = event_sender.send(JobEvent::JobTimeout(job_id)) {

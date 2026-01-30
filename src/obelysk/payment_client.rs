@@ -1165,6 +1165,7 @@ pub mod pipeline_integration {
                 proof_size_bytes: 256,
                 prover_version: "payment-v1".to_string(),
             },
+            io_commitment: None,
         }
     }
 
@@ -1199,6 +1200,7 @@ pub mod pipeline_integration {
                 proof_size_bytes: 128,
                 prover_version: "encrypted-payment-v1".to_string(),
             },
+            io_commitment: None,
         }
     }
 }

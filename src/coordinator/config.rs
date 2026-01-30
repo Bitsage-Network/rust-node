@@ -262,6 +262,14 @@ pub struct WorkerRegistrationConfig {
     /// They can work but receive reduced rewards until they stake
     #[serde(default = "default_allow_probationary")]
     pub allow_probationary_workers: bool,
+
+    /// Maximum number of active workers (prevents unbounded memory growth)
+    #[serde(default = "default_max_workers")]
+    pub max_workers: Option<u32>,
+}
+
+fn default_max_workers() -> Option<u32> {
+    Some(10_000)
 }
 
 fn default_allow_probationary() -> bool {
@@ -610,6 +618,7 @@ impl Default for WorkerRegistrationConfig {
             // SECURITY: Stake required by default for mainnet security
             require_stake: !is_dev,
             allow_probationary_workers: is_dev, // Only allow unstaked workers in dev
+            max_workers: default_max_workers(),
         }
     }
 }

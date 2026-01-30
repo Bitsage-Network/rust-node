@@ -22,6 +22,7 @@ async fn test_job_execution_generates_proof() {
             requires_tee: false,
         },
         priority: 1,
+        customer_pubkey: None,
     };
 
     // Execute job with proof generation
@@ -79,6 +80,7 @@ async fn test_different_job_types_generate_proofs() {
                 requires_tee: job_type == "ConfidentialVM",
             },
             priority: 1,
+            customer_pubkey: None,
         };
 
         let result = executor.execute(request).await;
@@ -124,6 +126,7 @@ async fn test_proof_generation_can_be_disabled() {
             requires_tee: false,
         },
         priority: 1,
+        customer_pubkey: None,
     };
 
     let result = executor.execute(request).await;

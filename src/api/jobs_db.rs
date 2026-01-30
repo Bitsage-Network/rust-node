@@ -158,57 +158,65 @@ async fn list_jobs_db(
     let limit = params.limit.unwrap_or(20).min(100);
     let offset = (page - 1) * limit;
     
-    let sort_by = params.sort_by.as_deref().unwrap_or("created_at");
-    let sort_order = params.sort_order.as_deref().unwrap_or("desc");
-    
-    // Build dynamic query
-    let mut conditions = vec!["1=1".to_string()];
-    
-    if let Some(ref status) = params.status {
-        conditions.push(format!("status = '{}'", status));
-    }
-    if let Some(ref client) = params.client {
-        conditions.push(format!("client_address = '{}'", client));
-    }
-    if let Some(ref worker) = params.worker {
-        conditions.push(format!("worker_address = '{}'", worker));
-    }
-    if let Some(ref job_type) = params.job_type {
-        conditions.push(format!("job_type = '{}'", job_type));
-    }
-    
-    let where_clause = conditions.join(" AND ");
-    
-    // Get total count
-    let count_query = format!(
-        "SELECT COUNT(*) as count FROM jobs WHERE {}",
-        where_clause
-    );
-    
-    let total: i64 = sqlx::query_scalar(&count_query)
-        .fetch_one(state.pool.as_ref())
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    
-    // Get jobs
+    // Whitelist sort_by to prevent SQL injection via ORDER BY
+    let sort_by = match params.sort_by.as_deref() {
+        Some("created_at") => "created_at",
+        Some("completed_at") => "completed_at",
+        Some("priority") => "priority",
+        Some("status") => "status",
+        _ => "created_at",
+    };
+    let sort_order = match params.sort_order.as_deref() {
+        Some("asc") | Some("ASC") => "ASC",
+        _ => "DESC",
+    };
+
+    // Get total count (parameterized)
+    let total: i64 = sqlx::query_scalar(
+        r#"
+        SELECT COUNT(*) FROM jobs
+        WHERE ($1::text IS NULL OR status = $1)
+          AND ($2::text IS NULL OR client_address = $2)
+          AND ($3::text IS NULL OR worker_address = $3)
+          AND ($4::text IS NULL OR job_type = $4)
+        "#
+    )
+    .bind(&params.status)
+    .bind(&params.client)
+    .bind(&params.worker)
+    .bind(&params.job_type)
+    .fetch_one(state.pool.as_ref())
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database query failed: {}", e)))?;
+
+    // Get jobs (sort_by and sort_order are whitelisted, safe to interpolate)
     let jobs_query = format!(
         r#"
-        SELECT 
+        SELECT
             id::text, job_id, client_address, worker_address, job_type, status,
-            priority, payment_amount::text as payment_amount, created_at, 
+            priority, payment_amount::text as payment_amount, created_at,
             assigned_at, completed_at, execution_time_ms, result_hash, error_message
-        FROM jobs 
-        WHERE {}
+        FROM jobs
+        WHERE ($1::text IS NULL OR status = $1)
+          AND ($2::text IS NULL OR client_address = $2)
+          AND ($3::text IS NULL OR worker_address = $3)
+          AND ($4::text IS NULL OR job_type = $4)
         ORDER BY {} {}
-        LIMIT {} OFFSET {}
+        LIMIT $5 OFFSET $6
         "#,
-        where_clause, sort_by, sort_order, limit, offset
+        sort_by, sort_order
     );
-    
+
     let jobs: Vec<JobResponse> = sqlx::query_as(&jobs_query)
+        .bind(&params.status)
+        .bind(&params.client)
+        .bind(&params.worker)
+        .bind(&params.job_type)
+        .bind(limit)
+        .bind(offset)
         .fetch_all(state.pool.as_ref())
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database query failed: {}", e)))?;
     
     let total_pages = (total + limit - 1) / limit;
     

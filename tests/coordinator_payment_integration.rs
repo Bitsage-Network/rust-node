@@ -90,6 +90,7 @@ async fn test_worker_registration_with_privacy_key() {
         Some("0x1234567890abcdef".to_string()),
         Some(public_key),
         Some(signature),
+        None,
     )
     .await
     .expect("Should register worker with privacy key");
@@ -131,6 +132,7 @@ async fn test_worker_registration_with_invalid_signature() {
         None,
         Some(public_key),
         Some(signature),
+        None,
     ).await;
 
     assert!(result.is_err(), "Should reject invalid signature");
@@ -163,6 +165,7 @@ async fn test_worker_registration_with_stale_timestamp() {
         None,
         Some(public_key),
         Some(signature),
+        None,
     ).await;
 
     assert!(result.is_err(), "Should reject stale timestamp");
@@ -328,6 +331,7 @@ async fn test_coordinator_stores_worker_public_key() {
         Some("0xwallet".to_string()),
         Some(public_key.clone()),
         Some(signature),
+        None,
     )
     .await
     .expect("Should register");
@@ -363,6 +367,7 @@ async fn test_multiple_workers_with_different_keys() {
             None,
             Some(public_key),
             Some(signature),
+        None,
         )
         .await
         .expect("Should register worker");
@@ -617,6 +622,7 @@ async fn test_coordinator_multi_asset_worker_registration() {
             wallet.map(|s| s.to_string()),
             Some(public_key),
             Some(signature),
+        None,
         )
         .await
         .expect("Should register worker");

@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use chrono::Utc;
 use tracing::{info, warn, error};
 
 use crate::obelysk::starknet::{FaucetClient, FaucetStatus};
@@ -267,6 +268,78 @@ async fn claim_tokens(
         }
     }
 
+    // Persistent cooldown checks: address-based AND IP-based (both survive restarts)
+    if let Some(ref pool) = state.db_pool {
+        let cooldown_secs: i64 = 86400; // 24 hours
+        let now = Utc::now().timestamp();
+
+        // 1. Address-based cooldown
+        let addr_cooldown = sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT EXTRACT(EPOCH FROM claimed_at)::bigint
+            FROM faucet_claims
+            WHERE claimer_address = $1
+            ORDER BY claimed_at DESC
+            LIMIT 1
+            "#
+        )
+        .bind(&request.address)
+        .fetch_optional(pool.as_ref())
+        .await;
+
+        if let Ok(Some(last_claim_epoch)) = addr_cooldown {
+            let elapsed = now - last_claim_epoch;
+            if elapsed < cooldown_secs {
+                let remaining = cooldown_secs - elapsed;
+                return Err((
+                    StatusCode::TOO_MANY_REQUESTS,
+                    Json(ErrorResponse {
+                        error: format!(
+                            "Cannot claim yet. {} remaining before next claim.",
+                            format_duration(remaining as u64)
+                        ),
+                        code: "COOLDOWN_ACTIVE".to_string(),
+                    }),
+                ));
+            }
+        }
+
+        // 2. IP-based cooldown: prevent multiple wallets from same IP within 24h
+        let ip_cooldown = sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT EXTRACT(EPOCH FROM claimed_at)::bigint
+            FROM faucet_claims
+            WHERE claimer_ip = $1
+            ORDER BY claimed_at DESC
+            LIMIT 1
+            "#
+        )
+        .bind(&ip)
+        .fetch_optional(pool.as_ref())
+        .await;
+
+        if let Ok(Some(last_ip_epoch)) = ip_cooldown {
+            let elapsed = now - last_ip_epoch;
+            if elapsed < cooldown_secs {
+                let remaining = cooldown_secs - elapsed;
+                warn!(
+                    "IP {} attempted faucet claim for {} during cooldown ({} remaining)",
+                    ip, request.address, format_duration(remaining as u64)
+                );
+                return Err((
+                    StatusCode::TOO_MANY_REQUESTS,
+                    Json(ErrorResponse {
+                        error: format!(
+                            "Rate limited. {} remaining before next claim from this network.",
+                            format_duration(remaining as u64)
+                        ),
+                        code: "COOLDOWN_ACTIVE".to_string(),
+                    }),
+                ));
+            }
+        }
+    }
+
     info!("Processing faucet claim for {} from IP {}", request.address, ip);
 
     // Attempt claim
@@ -283,13 +356,14 @@ async fn claim_tokens(
             if let Some(ref pool) = state.db_pool {
                 let save_result = sqlx::query(
                     r#"
-                    INSERT INTO faucet_claims (claimer_address, amount, claim_type, tx_hash)
-                    VALUES ($1, $2, 'standard', $3)
+                    INSERT INTO faucet_claims (claimer_address, amount, claim_type, tx_hash, claimer_ip)
+                    VALUES ($1, $2, 'standard', $3, $4)
                     "#
                 )
                 .bind(&request.address)
                 .bind(result.amount.to_string())
                 .bind(&tx_hash_str)
+                .bind(&ip)
                 .execute(pool.as_ref())
                 .await;
 

@@ -760,58 +760,36 @@ async fn get_recent_jobs(
         });
     };
 
-    // Build query based on status filter
-    let (jobs_query, count_query) = if let Some(ref status) = status_filter {
-        (
-            format!(
-                r#"
-                SELECT
-                    job_id,
-                    job_type,
-                    status,
-                    EXTRACT(EPOCH FROM created_at)::bigint as submitted_at,
-                    EXTRACT(EPOCH FROM completed_at)::bigint as completed_at,
-                    execution_time_ms / 1000 as duration_secs,
-                    payment_amount::text as reward,
-                    client_address
-                FROM jobs
-                WHERE status = '{}'
-                ORDER BY created_at DESC
-                LIMIT $1
-                "#,
-                status
-            ),
-            format!("SELECT COUNT(*) FROM jobs WHERE status = '{}'", status),
-        )
-    } else {
-        (
-            r#"
-            SELECT
-                job_id,
-                job_type,
-                status,
-                EXTRACT(EPOCH FROM created_at)::bigint as submitted_at,
-                EXTRACT(EPOCH FROM completed_at)::bigint as completed_at,
-                execution_time_ms / 1000 as duration_secs,
-                payment_amount::text as reward,
-                client_address
-            FROM jobs
-            ORDER BY created_at DESC
-            LIMIT $1
-            "#.to_string(),
-            "SELECT COUNT(*) FROM jobs".to_string(),
-        )
-    };
+    // Parameterized query for status filter
+    let jobs_query = r#"
+        SELECT
+            job_id,
+            job_type,
+            status,
+            EXTRACT(EPOCH FROM created_at)::bigint as submitted_at,
+            EXTRACT(EPOCH FROM completed_at)::bigint as completed_at,
+            execution_time_ms / 1000 as duration_secs,
+            payment_amount::text as reward,
+            client_address
+        FROM jobs
+        WHERE ($1::text IS NULL OR status = $1)
+        ORDER BY created_at DESC
+        LIMIT $2
+    "#;
+
+    let count_query = "SELECT COUNT(*) FROM jobs WHERE ($1::text IS NULL OR status = $1)";
 
     // Get total count
-    let total_count: u64 = sqlx::query_scalar(&count_query)
+    let total_count: u64 = sqlx::query_scalar(count_query)
+        .bind(&status_filter)
         .fetch_one(db)
         .await
         .map(|c: i64| c as u64)
         .unwrap_or(0);
 
     // Get recent jobs
-    let jobs = match sqlx::query(&jobs_query)
+    let jobs = match sqlx::query(jobs_query)
+        .bind(&status_filter)
         .bind(limit)
         .fetch_all(db)
         .await
@@ -1213,7 +1191,7 @@ fn format_with_commas(n: u128) -> String {
     chunks
         .iter()
         .rev()
-        .map(|chunk| String::from_utf8(chunk.clone()).unwrap())
+        .filter_map(|chunk| String::from_utf8(chunk.clone()).ok())
         .collect::<Vec<_>>()
         .join(",")
 }

@@ -184,44 +184,41 @@ async fn get_staking_history(
     let limit = params.limit.unwrap_or(50).min(100);
     let offset = (page - 1) * limit;
     
-    let mut conditions = vec![format!("(worker_address = '{}' OR worker_id = '{}')", address, address)];
-    
-    if let Some(ref event_type) = params.event_type {
-        conditions.push(format!("event_type = '{}'", event_type));
-    }
-    
-    let where_clause = conditions.join(" AND ");
-    
-    // Get total
-    let count_query = format!(
-        "SELECT COUNT(*) FROM staking_events WHERE {}",
-        where_clause
-    );
-    
-    let total: i64 = sqlx::query_scalar(&count_query)
-        .fetch_one(state.pool.as_ref())
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    
-    // Get events
-    let events_query = format!(
+    // Get total (parameterized query)
+    let total: i64 = sqlx::query_scalar(
         r#"
-        SELECT 
-            id::text, worker_id, worker_address, event_type, 
+        SELECT COUNT(*) FROM staking_events
+        WHERE (worker_address = $1 OR worker_id = $1)
+          AND ($2::text IS NULL OR event_type = $2)
+        "#
+    )
+    .bind(&address)
+    .bind(&params.event_type)
+    .fetch_one(state.pool.as_ref())
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database query failed: {}", e)))?;
+
+    // Get events (parameterized query)
+    let events: Vec<StakingEventResponse> = sqlx::query_as(
+        r#"
+        SELECT
+            id::text, worker_id, worker_address, event_type,
             amount::text as amount, gpu_tier, has_tee, reason,
             created_at, tx_hash, block_number
-        FROM staking_events 
-        WHERE {}
+        FROM staking_events
+        WHERE (worker_address = $1 OR worker_id = $1)
+          AND ($2::text IS NULL OR event_type = $2)
         ORDER BY created_at DESC
-        LIMIT {} OFFSET {}
-        "#,
-        where_clause, limit, offset
-    );
-    
-    let events: Vec<StakingEventResponse> = sqlx::query_as(&events_query)
-        .fetch_all(state.pool.as_ref())
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        LIMIT $3 OFFSET $4
+        "#
+    )
+    .bind(&address)
+    .bind(&params.event_type)
+    .bind(limit)
+    .bind(offset)
+    .fetch_all(state.pool.as_ref())
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database query failed: {}", e)))?;
     
     Ok(Json(StakingHistoryResponse {
         events,

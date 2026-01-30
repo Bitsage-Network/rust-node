@@ -20,6 +20,7 @@ pub mod consensus_init;
 pub mod gpu_pricing;
 pub mod supply_router;
 pub mod settlement;
+pub mod proof_verification; // Batched proof verification coordinator
 
 use std::sync::Arc;
 use tokio::sync::RwLock;

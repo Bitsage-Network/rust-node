@@ -2524,6 +2524,7 @@ mod tests {
                 proof_size_bytes: 2000,
                 prover_version: "test-v1".to_string(),
             },
+            io_commitment: None,
         }
     }
 

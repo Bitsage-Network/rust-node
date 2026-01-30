@@ -220,7 +220,44 @@ pub enum ActivationFunction {
     Step,
 }
 
-/// Result of a computation including optional proof
+/// FHE-specific IO commitment that binds proof to encrypted inputs/outputs
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FheIOCommitment {
+    /// The 32-byte commitment hash H(inputs || outputs || operation || metadata)
+    pub commitment: [u8; 32],
+    /// Number of encrypted inputs included
+    pub input_count: usize,
+    /// Number of encrypted outputs included
+    pub output_count: usize,
+    /// The homomorphic operation performed
+    pub operation: Option<super::compute::HomomorphicOperation>,
+    /// Optional job ID for replay protection
+    pub job_id: Option<String>,
+    /// Timestamp when commitment was created
+    pub created_at: u64,
+}
+
+impl FheIOCommitment {
+    /// Convert commitment to hex string for display/logging
+    pub fn to_hex(&self) -> String {
+        hex::encode(&self.commitment)
+    }
+
+    /// Convert commitment to felt252 (first 31 bytes) for Cairo verification
+    pub fn to_felt252(&self) -> [u8; 32] {
+        let mut felt = [0u8; 32];
+        // Clear top byte to ensure it fits in felt252
+        felt[1..32].copy_from_slice(&self.commitment[0..31]);
+        felt
+    }
+
+    /// Verify this commitment is non-trivial (not all zeros)
+    pub fn is_valid(&self) -> bool {
+        !self.commitment.iter().all(|&b| b == 0)
+    }
+}
+
+/// Result of a computation including optional proof and IO commitment
 #[derive(Debug)]
 pub struct ComputeResultWithProof<T> {
     /// The computed result
@@ -229,6 +266,8 @@ pub struct ComputeResultWithProof<T> {
     pub proof: Option<Vec<u8>>,
     /// Proof commitment for on-chain verification
     pub proof_commitment: Option<[u8; 32]>,
+    /// IO commitment binding proof to inputs/outputs (for FHE operations)
+    pub io_commitment: Option<FheIOCommitment>,
 }
 
 impl<T> ComputeResultWithProof<T> {
@@ -237,6 +276,7 @@ impl<T> ComputeResultWithProof<T> {
             result,
             proof: None,
             proof_commitment: None,
+            io_commitment: None,
         }
     }
 
@@ -244,6 +284,22 @@ impl<T> ComputeResultWithProof<T> {
         self.proof = Some(proof);
         self.proof_commitment = Some(commitment);
         self
+    }
+
+    /// Add IO commitment to bind this computation to specific inputs/outputs
+    pub fn with_io_commitment(mut self, io_commitment: FheIOCommitment) -> Self {
+        self.io_commitment = Some(io_commitment);
+        self
+    }
+
+    /// Check if this result has a valid IO commitment
+    pub fn has_io_binding(&self) -> bool {
+        self.io_commitment.as_ref().map(|c| c.is_valid()).unwrap_or(false)
+    }
+
+    /// Get the IO commitment hash if present
+    pub fn get_io_commitment_hash(&self) -> Option<[u8; 32]> {
+        self.io_commitment.as_ref().map(|c| c.commitment)
     }
 }
 

@@ -343,32 +343,52 @@ impl FaucetClient {
         })
     }
 
-    /// Execute the claim transaction
+    /// Execute the claim transaction by POSTing to the coordinator's faucet API.
+    ///
+    /// The faucet runs on the coordinator, so workers submit claims via HTTP
+    /// rather than signing Starknet transactions directly.
     async fn execute_claim(
         &self,
         recipient: FieldElement,
         amount: FieldElement,
     ) -> Result<FieldElement> {
-        // In production, this would:
-        // 1. Build the transaction
-        // 2. Sign with faucet's private key
-        // 3. Submit to network
-        // 4. Return transaction hash
-
-        // For now, return a mock transaction hash
-        // The actual implementation would use the coordinator's credentials
         debug!(
             "Executing claim: recipient={:#x}, amount={:#x}",
             recipient, amount
         );
 
-        // Generate a pseudo-random tx hash for demo purposes
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
+        let address = format!("{:#066x}", recipient);
 
-        let tx_hash = FieldElement::from(now as u64);
+        let client = reqwest::Client::builder()
+            .timeout(self.config.timeout)
+            .build()
+            .map_err(|e| anyhow!("Failed to create HTTP client: {}", e))?;
+
+        let payload = serde_json::json!({
+            "address": address,
+        });
+
+        let response = client
+            .post(format!("{}/api/faucet/claim", self.config.rpc_url))
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|e| anyhow!("Faucet claim request failed: {}", e))?;
+
+        if !response.status().is_success() {
+            let error_text = response.text().await.unwrap_or_default();
+            return Err(anyhow!("Faucet claim failed: {}", error_text));
+        }
+
+        let body: serde_json::Value = response.json().await
+            .map_err(|e| anyhow!("Failed to parse faucet response: {}", e))?;
+
+        let tx_hash_str = body.get("transaction_hash")
+            .and_then(|v| v.as_str())
+            .unwrap_or("0x0");
+
+        let tx_hash = FieldElement::from_hex_be(tx_hash_str)
+            .unwrap_or_else(|_| FieldElement::ZERO);
 
         Ok(tx_hash)
     }
