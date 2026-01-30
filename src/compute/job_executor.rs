@@ -912,7 +912,9 @@ impl JobExecutor {
             // Generate invoice with real proof data
             let invoice = if self.enable_proofs {
                 if let (Some(ph), Some(pa), Some(pc)) = (proof_hash, proof_attestation, proof_commitment) {
-                    let gpu_seconds = execution_time_ms as f64 / 1000.0;
+                    // Use actual proof compute time for billing, not wall-clock
+                    let compute_time_ms = proof_time_ms.unwrap_or(execution_time_ms);
+                    let gpu_seconds = compute_time_ms as f64 / 1000.0;
                     let program_identifier = format!("{}:{}", job_type, self.gpu_model);
 
                     let mut inv = InvoiceBuilder::new(
@@ -1051,8 +1053,8 @@ impl JobExecutor {
         let invoice = if self.enable_proofs && proof_hash.is_some() {
             info!("📜 Generating compute invoice for job {}", job_id);
 
-            // Calculate GPU seconds from execution time
-            let gpu_seconds = execution_time_ms as f64 / 1000.0;
+            // Use actual proof compute time for billing, not wall-clock
+            let gpu_seconds = proof_time_ms.unwrap_or(execution_time_ms) as f64 / 1000.0;
 
             // Build the invoice
             // Compute program hash from job type + backend + model identifier

@@ -45,14 +45,14 @@ p256 = { version = "0.13", features = ["ecdsa", "sha256"] }  # ECDSA P-256 for T
 # Note: Stwo is StarkWare's next-gen prover using Circle STARKs over Mersenne-31
 # VENDORED: Using local copy in ../libs/stwo to apply patches for latest nightly compatibility
 # The gpu feature provides kernel source, cuda-runtime enables actual CUDA execution
-stwo-prover = { path = "../libs/stwo/crates/stwo", package = "stwo", features = ["prover", "parallel", "gpu"] }
-stwo-constraint-framework = { path = "../libs/stwo/crates/constraint-framework", features = ["prover", "parallel", "gpu"] }
+stwo-prover = { path = "../libs/stwo/crates/stwo", package = "stwo", features = ["prover", "parallel", "gpu", "cuda-runtime"] }
+stwo-constraint-framework = { path = "../libs/stwo/crates/constraint-framework", features = ["prover", "parallel", "gpu", "cuda-runtime"] }
 itertools = "0.12"  # Used for polynomial operations and by Stwo
 num-traits = "0.2"  # Numerical traits
 
 # ===== GPU Acceleration (Optional) =====
 # CUDA support for 50-100x speedup on proof generation
-cudarc = { version = "0.11", optional = true, features = ["driver", "nvrtc"] }
+cudarc = { version = "0.9", optional = true, features = ["driver", "nvrtc"] }
 half = { version = "2.3", optional = true }  # f16 support for GPU
 nvml-wrapper = { version = "0.10", optional = true }  # NVIDIA Management Library for GPU metrics
 
@@ -140,6 +140,7 @@ hmac = "0.12"  # HMAC for keystore MAC verification
 chacha20poly1305 = "0.10"  # ChaCha20-Poly1305 AEAD for AE hints (fast decryption)
 rsa = "0.9.6"
 ed25519-dalek = "2.1.1"
+x25519-dalek = { version = "2.0", features = ["static_secrets"] }
 hex = "0.4.3"
 jsonwebtoken = "9.2"  # JWT authentication
 bcrypt = "0.15"  # Password hashing
