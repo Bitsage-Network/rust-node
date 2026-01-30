@@ -45,8 +45,8 @@ p256 = { version = "0.13", features = ["ecdsa", "sha256"] }  # ECDSA P-256 for T
 # Note: Stwo is StarkWare's next-gen prover using Circle STARKs over Mersenne-31
 # VENDORED: Using local copy in ../libs/stwo to apply patches for latest nightly compatibility
 # The gpu feature provides kernel source, cuda-runtime enables actual CUDA execution
-stwo-prover = { path = "../libs/stwo/crates/stwo", package = "stwo", features = ["prover", "parallel", "gpu"] }
-stwo-constraint-framework = { path = "../libs/stwo/crates/constraint-framework", features = ["prover", "parallel", "gpu"] }
+stwo-prover = { path = "../libs/stwo/crates/stwo", package = "stwo", features = ["prover", "parallel", "gpu", "cuda-runtime"] }
+stwo-constraint-framework = { path = "../libs/stwo/crates/constraint-framework", features = ["prover", "parallel", "gpu", "cuda-runtime"] }
 itertools = "0.12"  # Used for polynomial operations and by Stwo
 num-traits = "0.2"  # Numerical traits
 
