@@ -1039,9 +1039,11 @@ async fn register_with_coordinator(
             } else {
                 vec![]
             },
+            "supported_job_types": ["zkproof", "ai_inference", "rendering", "data_pipeline"],
             "max_concurrent_jobs": 4,
             "disk_gb": 500,
             "bandwidth_mbps": 1000,
+            "tee_cpu": false,
         },
         "wallet_address": wallet_address,
     });

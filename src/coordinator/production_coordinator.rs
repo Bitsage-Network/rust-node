@@ -51,11 +51,17 @@ pub struct GpuSpecification {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkerCapabilities {
+    #[serde(default)]
     pub cpu_cores: u32,
+    #[serde(default)]
     pub ram_mb: u64,
+    #[serde(default)]
     pub gpus: Vec<GpuSpecification>, // Support multi-GPU
+    #[serde(default)]
     pub bandwidth_mbps: u32,
+    #[serde(default)]
     pub supported_job_types: Vec<String>,
+    #[serde(default)]
     pub tee_cpu: bool, // CPU TEE (TDX/SEV)
 }
 
@@ -529,8 +535,9 @@ impl ProductionCoordinator {
 
     /// Hardware requirement matching logic
     fn worker_meets_requirements(&self, worker: &WorkerSlot, req: &JobRequirements) -> bool {
-        // 1. Job type support
-        if !worker.capabilities.supported_job_types.contains(&req.required_job_type) {
+        // 1. Job type support (case-insensitive)
+        let req_type_lower = req.required_job_type.to_lowercase();
+        if !worker.capabilities.supported_job_types.iter().any(|t| t.to_lowercase() == req_type_lower) {
             return false;
         }
 
