@@ -124,10 +124,14 @@ pub struct ZkProofRequest {
     /// Whether to compress the proof output
     #[serde(default = "default_true")]
     pub compress_output: bool,
+    /// Target trace length (number of VM steps). Higher = more work proven.
+    #[serde(default = "default_trace_length")]
+    pub trace_length: usize,
 }
 
 fn default_security_bits() -> usize { 128 }
 fn default_true() -> bool { true }
+fn default_trace_length() -> usize { 64 }
 
 /// Response from ZK proof generation
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1013,7 +1017,7 @@ impl JobExecutor {
         } else if self.enable_proofs {
             info!("🔐 Generating ZK proof for job {}", job_id);
 
-            match self.obelysk_executor.execute_with_proof(&job_id, &job_type, &request.payload).await {
+            match self.obelysk_executor.execute_with_proof(&job_id, &job_type, &request.payload, default_trace_length()).await {
                 Ok(proof_result) => {
                     if proof_result.status == ObelyskJobStatus::Completed {
                         info!(
@@ -1757,10 +1761,11 @@ impl JobExecutor {
                 private_inputs: None,
                 security_bits: 128,
                 compress_output: true,
+                trace_length: default_trace_length(),
             });
 
         // Execute with Obelysk prover
-        match self.obelysk_executor.execute_with_proof(&job_id, &proof_request.circuit_type, &proof_request.public_inputs).await {
+        match self.obelysk_executor.execute_with_proof(&job_id, &proof_request.circuit_type, &proof_request.public_inputs, proof_request.trace_length).await {
             Ok(proof_result) => {
                 let proof_time_ms = start.elapsed().as_millis() as u64;
 

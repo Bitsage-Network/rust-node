@@ -223,14 +223,15 @@ impl ObelyskExecutor {
         job_id: &str,
         job_type: &str,
         payload: &[u8],
+        trace_length: usize,
     ) -> Result<ObelyskJobResult> {
         let total_start = Instant::now();
-        
-        info!("🚀 Executing Obelysk job: {} (type: {})", job_id, job_type);
-        
+
+        info!("🚀 Executing Obelysk job: {} (type: {}, target_trace_length: {})", job_id, job_type, trace_length);
+
         // Step 1: Execute the job in the OVM
         let vm_start = Instant::now();
-        let (trace, output) = self.execute_in_vm(job_type, payload).await
+        let (trace, output) = self.execute_in_vm(job_type, payload, trace_length).await
             .context("VM execution failed")?;
         let vm_time_ms = vm_start.elapsed().as_millis() as u64;
         
@@ -370,7 +371,7 @@ impl ObelyskExecutor {
 
         // Step 1: Execute the job in the OVM
         let vm_start = Instant::now();
-        let (trace, output) = self.execute_in_vm(job_type, payload).await
+        let (trace, output) = self.execute_in_vm(job_type, payload, 64).await
             .context("VM execution failed")?;
         let vm_time_ms = vm_start.elapsed().as_millis() as u64;
 
@@ -493,15 +494,16 @@ impl ObelyskExecutor {
         &self,
         job_type: &str,
         payload: &[u8],
+        trace_length: usize,
     ) -> Result<(ExecutionTrace, Vec<M31>)> {
         let mut vm = ObelyskVM::new();
-        
+
         // Convert payload to M31 inputs
         let inputs = self.payload_to_m31(payload);
         vm.set_public_inputs(inputs);
-        
+
         // Generate program based on job type
-        let program = self.generate_program(job_type, payload)?;
+        let program = self.generate_program(job_type, payload, trace_length)?;
         vm.load_program(program);
         
         // Execute and get trace
@@ -516,14 +518,18 @@ impl ObelyskExecutor {
     
     /// Generate ZK proof from execution trace
     async fn generate_proof(&self, trace: &ExecutionTrace) -> Result<StarkProof> {
-        if self.is_gpu_available() {
-            // Use GPU-accelerated prover
-            prove_with_stwo_gpu(trace, self.config.security_bits)
-                .map_err(|e| anyhow!("GPU proof generation failed: {:?}", e))
-        } else {
-            // Fall back to CPU prover
-            self.prover.prove_execution(trace)
-                .map_err(|e| anyhow!("CPU proof generation failed: {:?}", e))
+        // Try GPU first, fall back to CPU with diagnostic logging
+        match prove_with_stwo_gpu(trace, self.config.security_bits) {
+            Ok(proof) => Ok(proof),
+            Err(e) => {
+                tracing::warn!(
+                    "GPU proof failed (falling back to CPU): {:?}. \
+                     Check NVRTC availability: ldconfig -p | grep nvrtc",
+                    e
+                );
+                self.prover.prove_execution(trace)
+                    .map_err(|e| anyhow!("CPU proof generation failed: {:?}", e))
+            }
         }
     }
 
@@ -612,12 +618,12 @@ impl ObelyskExecutor {
     }
     
     /// Generate OVM program based on job type
-    fn generate_program(&self, job_type: &str, payload: &[u8]) -> Result<Vec<Instruction>> {
+    fn generate_program(&self, job_type: &str, payload: &[u8], trace_length: usize) -> Result<Vec<Instruction>> {
         let program = match job_type {
             "AIInference" => self.generate_ai_inference_program(payload),
             "DataPipeline" => self.generate_data_pipeline_program(payload),
             "ConfidentialVM" => self.generate_confidential_vm_program(payload),
-            "Generic" | _ => self.generate_generic_program(payload),
+            "Generic" | _ => self.generate_generic_program(payload, trace_length),
         };
 
         Ok(program)
@@ -830,11 +836,12 @@ impl ObelyskExecutor {
         program
     }
     
-    /// Generate generic program
-    fn generate_generic_program(&self, payload: &[u8]) -> Vec<Instruction> {
+    /// Generate generic program sized to the requested trace length
+    fn generate_generic_program(&self, payload: &[u8], trace_length: usize) -> Vec<Instruction> {
         let mut program = Vec::new();
-        
-        // Simple computation: sum all inputs
+        let inputs = self.payload_to_m31(payload);
+
+        // LoadImm r0 = 0 (accumulator)
         program.push(Instruction {
             opcode: OpCode::LoadImm,
             dst: 0,
@@ -843,19 +850,42 @@ impl ObelyskExecutor {
             immediate: Some(M31::from(0)),
             address: None,
         });
-        
-        let inputs = payload.len().min(8);
-        for i in 0..inputs {
+
+        // Load public inputs into registers r1..r31
+        let num_inputs = inputs.len().min(31);
+        for (i, &val) in inputs.iter().take(num_inputs).enumerate() {
             program.push(Instruction {
-                opcode: OpCode::Add,
-                dst: 0,
+                opcode: OpCode::LoadImm,
+                dst: (i + 1) as u8,
                 src1: 0,
-                src2: i as u8,
+                src2: 0,
+                immediate: Some(val),
+                address: None,
+            });
+        }
+
+        // Generate computation loop to reach target trace_length
+        // Each iteration: add, mul, or sub — cycling through operations
+        let preamble = 1 + num_inputs; // LoadImm + input loads
+        let remaining = trace_length.saturating_sub(preamble + 1); // -1 for Halt
+
+        for i in 0..remaining {
+            let src = ((i % num_inputs.max(1)) + 1) as u8;
+            let (opcode, dst, src1, src2) = match i % 3 {
+                0 => (OpCode::Add, 0, 0, src),
+                1 => (OpCode::Mul, 0, 0, src),
+                _ => (OpCode::Sub, 0, 0, src),
+            };
+            program.push(Instruction {
+                opcode,
+                dst,
+                src1,
+                src2,
                 immediate: None,
                 address: None,
             });
         }
-        
+
         program.push(Instruction {
             opcode: OpCode::Halt,
             dst: 0,
@@ -864,7 +894,7 @@ impl ObelyskExecutor {
             immediate: None,
             address: None,
         });
-        
+
         program
     }
     
@@ -905,7 +935,7 @@ impl ObelyskExecutor {
 
         // Execute a minimal OVM program that commits to the IO hashes
         let vm_start = Instant::now();
-        let (trace, output) = self.execute_in_vm("AIInference", &public_input_bytes).await
+        let (trace, output) = self.execute_in_vm("AIInference", &public_input_bytes, 64).await
             .context("VM execution for inference proof failed")?;
         let vm_time_ms = vm_start.elapsed().as_millis() as u64;
 
@@ -1026,7 +1056,7 @@ impl BatchObelyskExecutor {
                 
                 // Note: In production, this would use tokio::spawn for true parallelism
                 // For now, we execute sequentially to avoid lifetime issues
-                let result = executor.execute_with_proof(&job_id, &job_type, &payload).await;
+                let result = executor.execute_with_proof(&job_id, &job_type, &payload, 64).await;
                 results.push(result);
             }
         }
@@ -1044,7 +1074,7 @@ mod tests {
         let executor = ObelyskExecutor::with_defaults("test-worker".to_string());
 
         let payload = b"Hello, Obelysk!";
-        let result = executor.execute_with_proof("job-1", "Generic", payload).await;
+        let result = executor.execute_with_proof("job-1", "Generic", payload, 64).await;
 
         assert!(result.is_ok());
         let result = result.unwrap();
@@ -1057,7 +1087,7 @@ mod tests {
         let executor = ObelyskExecutor::with_defaults("test-worker".to_string());
 
         let payload = vec![1u8; 64];  // 64 bytes of input
-        let result = executor.execute_with_proof("job-ai", "AIInference", &payload).await;
+        let result = executor.execute_with_proof("job-ai", "AIInference", &payload, 64).await;
 
         assert!(result.is_ok(), "AI Inference job failed: {:?}", result.err());
         let result = result.unwrap();
@@ -1069,7 +1099,7 @@ mod tests {
         let executor = ObelyskExecutor::with_defaults("test-worker".to_string());
 
         let payload = b"SELECT * FROM data WHERE value > 100";
-        let result = executor.execute_with_proof("job-data", "DataPipeline", payload).await;
+        let result = executor.execute_with_proof("job-data", "DataPipeline", payload, 64).await;
 
         assert!(result.is_ok(), "Data pipeline job failed: {:?}", result.err());
     }
