@@ -38,7 +38,7 @@ use crate::obelysk::{
     submit_proof,
     ProofType,
 };
-use crate::obelysk::stwo_adapter::{prove_with_stwo_gpu, is_gpu_available};
+use crate::obelysk::stwo_adapter::{prove_with_stwo_gpu, prove_with_io_binding, is_gpu_available};
 
 /// Configuration for the Obelysk executor
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -314,12 +314,157 @@ impl ObelyskExecutor {
             gpu_speedup,
         };
 
+        let backend_label = if gpu_used { "GPU" } else { "CPU-SIMD" };
         info!(
-            "✅ Job {} completed: {}ms total, {}x GPU speedup, {} bytes compressed",
+            "✅ Job {} completed: {}ms total, {} backend{}, {} bytes compressed",
             job_id,
             total_time_ms,
-            gpu_speedup.map(|s| format!("{:.1}", s)).unwrap_or_else(|| "N/A".to_string()),
+            backend_label,
+            gpu_speedup.map(|s| format!(" ({:.1}x speedup)", s)).unwrap_or_default(),
             compressed_proof.compressed_size()
+        );
+
+        // Warn if proof is too large for on-chain
+        if !compressed_proof.is_valid_for_onchain() {
+            tracing::warn!(
+                "⚠️ Proof exceeds on-chain limit: {} bytes (max 256KB)",
+                compressed_proof.compressed_size()
+            );
+        }
+
+        Ok(ObelyskJobResult {
+            job_id: job_id.to_string(),
+            status: ObelyskJobStatus::Completed,
+            proof_attestation,
+            proof_hash,
+            proof_commitment,
+            compressed_proof: Some(compressed_proof),
+            full_proof: Some(proof),
+            metrics,
+            tee_attestation,
+        })
+    }
+
+    /// Execute a compute job with TRUE PROOF OF COMPUTATION
+    ///
+    /// This is the production entry point that:
+    /// 1. Executes the job in the OVM
+    /// 2. Generates a proof with cryptographic IO binding
+    /// 3. Embeds io_commitment = H(inputs || outputs) in proof
+    /// 4. Returns proof that can be verified on-chain with payment gating
+    ///
+    /// # Security Properties
+    /// - Proof is bound to specific inputs/outputs (prevents reuse)
+    /// - IO commitment is verified on-chain at proof_data[4]
+    /// - Payment only releases after cryptographic verification
+    #[instrument(skip(self, payload), fields(job_id = %job_id))]
+    pub async fn execute_with_io_binding(
+        &self,
+        job_id: &str,
+        job_type: &str,
+        payload: &[u8],
+    ) -> Result<ObelyskJobResult> {
+        let total_start = Instant::now();
+
+        info!("🔐 Executing TRUE PROOF OF COMPUTATION: {} (type: {})", job_id, job_type);
+
+        // Step 1: Execute the job in the OVM
+        let vm_start = Instant::now();
+        let (trace, output) = self.execute_in_vm(job_type, payload).await
+            .context("VM execution failed")?;
+        let vm_time_ms = vm_start.elapsed().as_millis() as u64;
+
+        info!("  VM execution: {}ms, {} steps", vm_time_ms, trace.steps.len());
+
+        // Step 2: Generate ZK proof WITH IO BINDING
+        let proof_start = Instant::now();
+        let proof = self.generate_proof_with_io_binding(&trace, job_id).await
+            .context("Proof generation with IO binding failed")?;
+        let proof_time_ms = proof_start.elapsed().as_millis() as u64;
+
+        // Verify IO commitment is present
+        let io_commitment = proof.io_commitment
+            .ok_or_else(|| anyhow!("IO commitment not embedded in proof"))?;
+
+        info!(
+            "  Proof generation: {}ms, io_commitment={}",
+            proof_time_ms,
+            hex::encode(&io_commitment[..8])
+        );
+
+        // Step 2.5: Submit to TEE-GPU pipeline for aggregation (if enabled)
+        if self.config.enable_proof_pipeline {
+            let job_id_u64 = job_id.parse::<u64>().unwrap_or(0);
+            let proof_type = self.infer_proof_type(job_type);
+
+            if let Err(e) = submit_proof(proof_type.clone(), proof.clone(), job_id_u64) {
+                tracing::warn!(
+                    "  Failed to submit proof to pipeline: {} (continuing with direct submission)",
+                    e
+                );
+            } else {
+                info!("  Proof submitted to TEE-GPU pipeline (type: {:?})", proof_type);
+            }
+        }
+
+        // Step 3: Extract 32-byte attestation (includes IO commitment)
+        let proof_attestation = self.extract_attestation(&proof, &output);
+
+        // Step 4: Serialize and compress proof for on-chain submission
+        let proof_bytes = bincode::serialize(&proof)
+            .context("Failed to serialize proof")?;
+        let proof_hash = compute_proof_hash(&proof_bytes);
+
+        // Compress proof using Zstd (best compression ratio for on-chain)
+        let compressed_proof = ProofCompressor::compress(&proof_bytes, CompressionAlgorithm::Zstd)
+            .context("Failed to compress proof")?;
+
+        info!(
+            "  Proof compression: {} -> {} bytes ({:.1}% reduction)",
+            proof_bytes.len(),
+            compressed_proof.compressed_size(),
+            (1.0 - compressed_proof.compression_ratio) * 100.0
+        );
+
+        // Compute proof commitment for on-chain verification
+        let proof_commitment = compute_proof_commitment(
+            &proof_hash,
+            job_id.parse::<u128>().unwrap_or(0),
+            &self.worker_id,
+        );
+
+        // Step 5: Generate TEE attestation if enabled
+        let tee_attestation = if self.config.enable_tee {
+            Some(self.generate_tee_attestation(job_id, &proof_attestation))
+        } else {
+            None
+        };
+
+        // Calculate metrics
+        let total_time_ms = total_start.elapsed().as_millis() as u64;
+        let gpu_used = self.is_gpu_available();
+
+        let estimated_cpu_time_ms = self.estimate_cpu_time(trace.steps.len());
+        let gpu_speedup = if gpu_used && proof_time_ms > 0 {
+            Some(estimated_cpu_time_ms as f64 / proof_time_ms as f64)
+        } else {
+            None
+        };
+
+        let metrics = ExecutionMetrics {
+            total_time_ms,
+            vm_time_ms,
+            proof_time_ms,
+            trace_length: trace.steps.len(),
+            proof_size_bytes: proof.metadata.proof_size_bytes,
+            gpu_used,
+            gpu_speedup,
+        };
+
+        info!(
+            "✅ TRUE PROOF OF COMPUTATION {} completed: {}ms total, io_bound=true",
+            job_id,
+            total_time_ms,
         );
 
         // Warn if proof is too large for on-chain
@@ -380,6 +525,23 @@ impl ObelyskExecutor {
             self.prover.prove_execution(trace)
                 .map_err(|e| anyhow!("CPU proof generation failed: {:?}", e))
         }
+    }
+
+    /// Generate ZK proof with IO binding for true proof of computation
+    ///
+    /// This method ensures the proof is cryptographically bound to specific
+    /// inputs and outputs, preventing proof reuse attacks.
+    async fn generate_proof_with_io_binding(
+        &self,
+        trace: &ExecutionTrace,
+        job_id: &str,
+    ) -> Result<StarkProof> {
+        // Use the IO binding path which:
+        // 1. Computes H(inputs || outputs) commitment
+        // 2. Embeds commitment in proof
+        // 3. Enables on-chain verification of input/output binding
+        prove_with_io_binding(trace, self.config.security_bits, job_id, &self.worker_id)
+            .map_err(|e| anyhow!("Proof generation with IO binding failed: {:?}", e))
     }
     
     /// Extract 32-byte attestation from proof
@@ -706,6 +868,112 @@ impl ObelyskExecutor {
         program
     }
     
+    /// Generate an IO-bound inference proof.
+    ///
+    /// Unlike `execute_with_proof` (which runs the full VM), this method generates
+    /// a STARK proof binding specific input/output hashes, model ID, and TEE attestation
+    /// as public inputs. Used for inference jobs where the actual computation happens
+    /// in vLLM/TEE rather than the OVM.
+    ///
+    /// Public inputs embedded in proof:
+    /// - `input_hash`: SHA-256 of the plaintext inference input
+    /// - `output_hash`: SHA-256 of the plaintext inference output
+    /// - `model_id`: identifier of the model used
+    /// - `tee_attestation`: optional TEE attestation bytes covering the computation
+    ///
+    /// Returns `ObelyskJobResult` with `io_commitment = H(input_hash || output_hash)`.
+    pub async fn generate_inference_proof(
+        &self,
+        job_id: &str,
+        input_hash: &[u8; 32],
+        output_hash: &[u8; 32],
+        model_id: &str,
+        tee_attestation: Option<&[u8]>,
+    ) -> Result<ObelyskJobResult> {
+        let total_start = Instant::now();
+
+        info!("🔐 Generating IO-bound inference proof for job {}", job_id);
+
+        // Build a compact payload encoding the public inputs
+        let mut public_input_bytes = Vec::with_capacity(64 + model_id.len() + 128);
+        public_input_bytes.extend_from_slice(input_hash);
+        public_input_bytes.extend_from_slice(output_hash);
+        public_input_bytes.extend_from_slice(model_id.as_bytes());
+        if let Some(att) = tee_attestation {
+            public_input_bytes.extend_from_slice(att);
+        }
+
+        // Execute a minimal OVM program that commits to the IO hashes
+        let vm_start = Instant::now();
+        let (trace, output) = self.execute_in_vm("AIInference", &public_input_bytes).await
+            .context("VM execution for inference proof failed")?;
+        let vm_time_ms = vm_start.elapsed().as_millis() as u64;
+
+        // Generate proof with IO binding (embeds H(inputs || outputs) in proof)
+        let proof_start = Instant::now();
+        let proof = prove_with_io_binding(&trace, self.config.security_bits, job_id, &self.worker_id)
+            .map_err(|e| anyhow!("Inference proof generation failed: {:?}", e))?;
+        let proof_time_ms = proof_start.elapsed().as_millis() as u64;
+
+        let io_commitment = proof.io_commitment
+            .ok_or_else(|| anyhow!("IO commitment not embedded in inference proof"))?;
+
+        info!(
+            "  Inference proof: {}ms, io_commitment={}",
+            proof_time_ms, hex::encode(&io_commitment[..8])
+        );
+
+        // Extract attestation and compress
+        let proof_attestation = self.extract_attestation(&proof, &output);
+        let proof_bytes = bincode::serialize(&proof)
+            .context("Failed to serialize inference proof")?;
+        let proof_hash = compute_proof_hash(&proof_bytes);
+        let compressed_proof = ProofCompressor::compress(&proof_bytes, CompressionAlgorithm::Zstd)
+            .context("Failed to compress inference proof")?;
+        let proof_commitment = compute_proof_commitment(
+            &proof_hash,
+            job_id.parse::<u128>().unwrap_or(0),
+            &self.worker_id,
+        );
+
+        let tee_att = if self.config.enable_tee {
+            Some(self.generate_tee_attestation(job_id, &proof_attestation))
+        } else {
+            None
+        };
+
+        let total_time_ms = total_start.elapsed().as_millis() as u64;
+        let gpu_used = self.is_gpu_available();
+
+        let metrics = ExecutionMetrics {
+            total_time_ms,
+            vm_time_ms,
+            proof_time_ms,
+            trace_length: trace.steps.len(),
+            proof_size_bytes: proof.metadata.proof_size_bytes,
+            gpu_used,
+            gpu_speedup: if gpu_used && proof_time_ms > 0 {
+                Some(self.estimate_cpu_time(trace.steps.len()) as f64 / proof_time_ms as f64)
+            } else {
+                None
+            },
+        };
+
+        info!("✅ IO-bound inference proof {} completed: {}ms", job_id, total_time_ms);
+
+        Ok(ObelyskJobResult {
+            job_id: job_id.to_string(),
+            status: ObelyskJobStatus::Completed,
+            proof_attestation,
+            proof_hash,
+            proof_commitment,
+            compressed_proof: Some(compressed_proof),
+            full_proof: Some(proof),
+            metrics,
+            tee_attestation: tee_att,
+        })
+    }
+
     /// Estimate CPU time for a given trace length
     fn estimate_cpu_time(&self, trace_length: usize) -> u64 {
         // Based on SIMD benchmarks:

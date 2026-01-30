@@ -102,19 +102,12 @@ impl CircuitType {
 
     /// Get the on-chain verifier contract address (Sepolia)
     pub fn verifier_address(&self) -> &'static str {
-        // These would be actual deployed contract addresses
+        // All circuit types verified via the deployed Job Manager contract on Sepolia.
+        // The Job Manager stores proof hashes on-chain and validates proof commitments.
+        // Per-circuit verifier contracts can be deployed later for specialized verification.
         match self {
-            CircuitType::GenericCompute => "0x01a2b3c4d5e6f7890123456789abcdef01234567890abcdef0123456789abcde",
-            CircuitType::MlInference => "0x02b3c4d5e6f7890123456789abcdef01234567890abcdef0123456789abcdef",
-            CircuitType::MlBatchInference => "0x03c4d5e6f7890123456789abcdef01234567890abcdef0123456789abcdef0",
-            CircuitType::EtlTransform => "0x04d5e6f7890123456789abcdef01234567890abcdef0123456789abcdef01",
-            CircuitType::GpuRender => "0x05e6f7890123456789abcdef01234567890abcdef0123456789abcdef012",
-            CircuitType::FheHomomorphic => "0x06f7890123456789abcdef01234567890abcdef0123456789abcdef0123",
-            CircuitType::TeeExecution => "0x07890123456789abcdef01234567890abcdef0123456789abcdef01234",
-            CircuitType::VideoTranscode => "0x0890123456789abcdef01234567890abcdef0123456789abcdef012345",
-            CircuitType::NlpProcess => "0x090123456789abcdef01234567890abcdef0123456789abcdef0123456",
-            CircuitType::ComputerVision => "0x0a0123456789abcdef01234567890abcdef0123456789abcdef01234567",
-            CircuitType::PipelineTest => "0x0b0123456789abcdef01234567890abcdef0123456789abcdef012345678",
+            // Job Manager contract handles proof verification for all types
+            _ => "0x355b8c5e9dd3310a3c361559b53cfcfdc20b2bf7d5bd87a84a83389b8cbb8d3",
         }
     }
 
@@ -467,13 +460,21 @@ impl ComputeInvoice {
         self.worker_reputation = worker_reputation;
         self.sage_price_usd = sage_price_usd;
 
-        // Calculate cost: (gpu_seconds / 3600) * hourly_rate
+        // Calculate cost: (gpu_seconds / 3600) * hourly_rate, minimum 1 cent
         let hours = gpu_seconds / 3600.0;
-        self.total_cost_cents = (hours * hourly_rate_cents as f64) as u64;
+        let raw_cost = (hours * hourly_rate_cents as f64) as u64;
+        self.total_cost_cents = if gpu_seconds > 0.0 && raw_cost == 0 { 1 } else { raw_cost };
 
         // 80/20 split
         self.worker_payment_cents = self.total_cost_cents * 80 / 100;
-        self.protocol_fee_cents = self.total_cost_cents * 20 / 100;
+        self.protocol_fee_cents = self.total_cost_cents - self.worker_payment_cents;
+
+        // Enforce minimum: worker gets at least 1 cent if compute was performed
+        if gpu_seconds > 0.0 && self.worker_payment_cents == 0 {
+            self.worker_payment_cents = 1;
+            self.total_cost_cents = self.total_cost_cents.max(2);
+            self.protocol_fee_cents = self.total_cost_cents - self.worker_payment_cents;
+        }
 
         // Convert to SAGE
         let decimals = 1_000_000_000_000_000_000u128;
@@ -710,6 +711,24 @@ mod tests {
         assert_eq!(invoice.circuit_type, CircuitType::MlInference);
         assert_eq!(invoice.worker_payment_cents, invoice.total_cost_cents * 80 / 100);
         println!("{}", invoice.summary());
+    }
+
+    #[test]
+    fn test_minimum_payout_not_zero() {
+        // 0.019 GPU seconds at $0.50/hr with SAGE at $0.10 should still yield non-zero worker payout
+        let invoice = InvoiceBuilder::new(
+            "job-min",
+            "AIInference",
+            "worker-min",
+            "0xminworker",
+        )
+        .with_billing(0.019, 50, 0.10, 50)
+        .build();
+
+        assert!(invoice.worker_payment_cents >= 1, "worker_payment_cents should be at least 1");
+        assert!(invoice.sage_to_worker > 0, "sage_to_worker should be > 0");
+        assert!(invoice.total_cost_cents >= 2, "total_cost_cents should be at least 2 when minimum enforced");
+        assert_eq!(invoice.total_cost_cents, invoice.worker_payment_cents + invoice.protocol_fee_cents);
     }
 
     #[test]

@@ -24,6 +24,7 @@ use crate::obelysk::worker_keys::WorkerKeyManager;
 use crate::obelysk::privacy_client::WorkerPrivacyManager;
 use crate::obelysk::privacy_swap::AssetId;
 use crate::obelysk::proof_compression::CompressedProof;
+use crate::obelysk::compute_invoice::ComputeInvoice;
 
 // ============================================================================
 // Payment Claim Types
@@ -48,6 +49,9 @@ pub struct PendingPaymentClaim {
     pub proof_commitment: Option<[u8; 32]>,
     /// Timestamp when claim was queued
     pub queued_at: u64,
+    /// Number of times this claim has been retried
+    #[serde(default)]
+    pub retry_count: u32,
 }
 
 // ============================================================================
@@ -107,6 +111,19 @@ pub struct WorkerConfig {
 
     /// vLLM endpoint URL (e.g. "http://localhost:8000") for real inference
     pub vllm_endpoint: Option<String>,
+
+    /// X25519 encryption public key for E2E encrypted job communication
+    #[serde(default)]
+    pub encryption_pubkey: Option<[u8; 32]>,
+
+    /// X25519 encryption secret key (raw bytes, for EncryptedJobManager initialization)
+    /// Must correspond to encryption_pubkey. If None but encryption_pubkey is Some,
+    /// a new ephemeral secret is generated (not recommended for production).
+    #[serde(skip)]
+    pub encryption_secret: Option<[u8; 32]>,
+
+    /// Automatically claim SAGE from the faucet on startup and periodically
+    pub auto_claim_rewards: bool,
 }
 
 impl Default for WorkerConfig {
@@ -136,6 +153,9 @@ impl Default for WorkerConfig {
             payment_claim_interval_secs: 30,
             payment_claim_batch_size: 10,
             vllm_endpoint: None,
+            encryption_pubkey: None,
+            encryption_secret: None,
+            auto_claim_rewards: false,
         }
     }
 }
@@ -329,6 +349,8 @@ pub struct Worker {
     claimed_payments: Arc<RwLock<HashMap<u128, HashSet<AssetId>>>>,
     /// Shutdown signal sender for payment claim loop
     shutdown_tx: Arc<RwLock<Option<watch::Sender<bool>>>>,
+    /// Optional database pool for invoice persistence
+    db: Option<sqlx::PgPool>,
 }
 
 impl Worker {
@@ -352,6 +374,39 @@ impl Worker {
         if let Some(ref endpoint) = config.vllm_endpoint {
             executor.set_vllm_endpoint(endpoint.clone());
         }
+
+        // Wire wallet address from config
+        if let Some(ref wallet) = config.wallet_address {
+            executor.set_wallet(wallet.clone());
+        }
+
+        // Wire GPU model, tier, and hourly rate from detected capabilities
+        if capabilities.gpu_count > 0 && !capabilities.gpu_model.is_empty() {
+            executor.set_gpu_model(capabilities.gpu_model.clone());
+            executor.set_gpu_tier(gpu_tier_from_model(&capabilities.gpu_model));
+            executor.set_hourly_rate(hourly_rate_for_tier(&capabilities.gpu_model));
+        }
+
+        // Wire E2E encryption if encryption pubkey is configured
+        if config.encryption_pubkey.is_some() {
+            use crate::network::encrypted_jobs::{EncryptedJobConfig, EncryptedJobManager, X25519SecretKey};
+
+            // Use the persistent secret key if provided, otherwise EncryptedJobManager
+            // will generate an ephemeral one (which won't match the published pubkey)
+            let node_secret = config.encryption_secret
+                .map(X25519SecretKey::from_bytes);
+
+            let enc_config = EncryptedJobConfig {
+                node_secret,
+                ..EncryptedJobConfig::default()
+            };
+            let enc_manager = EncryptedJobManager::new(enc_config);
+            executor.set_encryption_manager(std::sync::Arc::new(enc_manager));
+            executor.set_tee_enforced(has_tee);
+            info!("🔐 E2E encryption wired to job executor (persistent key: {}, TEE enforced: {})",
+                config.encryption_secret.is_some(), has_tee);
+        }
+
         let job_executor = Arc::new(executor);
 
         // Create event channel
@@ -401,7 +456,13 @@ impl Worker {
             pending_payment_claims: Arc::new(RwLock::new(VecDeque::new())),
             claimed_payments: Arc::new(RwLock::new(HashMap::new())),
             shutdown_tx: Arc::new(RwLock::new(None)),
+            db: None,
         })
+    }
+
+    /// Set a database pool for invoice persistence
+    pub fn set_db(&mut self, pool: sqlx::PgPool) {
+        self.db = Some(pool);
     }
 
     /// Create a worker with default configuration
@@ -500,6 +561,11 @@ impl Worker {
             None
         };
 
+        // Attempt initial faucet claim if enabled
+        if self.config.auto_claim_rewards && self.config.wallet_address.is_some() {
+            self.claim_faucet_sage().await;
+        }
+
         // Register with coordinator
         self.register_with_retries().await?;
 
@@ -511,6 +577,13 @@ impl Worker {
 
         // Spawn health monitoring task
         let health_handle = self.spawn_health_monitoring_task();
+
+        // Spawn periodic faucet claim task if enabled
+        let faucet_handle = if self.config.auto_claim_rewards && self.config.wallet_address.is_some() {
+            Some(self.spawn_faucet_claim_task())
+        } else {
+            None
+        };
 
         info!("✅ Worker {} is running", self.id_string);
         info!("🔄 Polling coordinator for jobs...");
@@ -527,6 +600,9 @@ impl Worker {
         heartbeat_handle.abort();
         health_handle.abort();
         if let Some(handle) = payment_claim_handle {
+            handle.abort();
+        }
+        if let Some(handle) = faucet_handle {
             handle.abort();
         }
 
@@ -745,6 +821,14 @@ impl Worker {
             }
 
             debug!("Including privacy public key in registration");
+        }
+
+        // Include X25519 encryption public key if configured
+        if let Some(ref enc_pubkey) = self.config.encryption_pubkey {
+            if let Some(obj) = payload.as_object_mut() {
+                obj.insert("encryption_pubkey".to_string(), serde_json::to_value(enc_pubkey)?);
+            }
+            debug!("Including X25519 encryption pubkey in registration");
         }
 
         debug!("Sending registration request to {}", url);
@@ -996,6 +1080,7 @@ impl Worker {
         let worker_id = self.id_string.clone();
         let pending_payment_claims = self.pending_payment_claims.clone();
         let enable_privacy_payments = self.config.enable_privacy_payments;
+        let db_pool = self.db.clone();
 
         // Track active job
         {
@@ -1033,6 +1118,11 @@ impl Worker {
                         stats.record_success(execution_time_ms, result.result_data.len() as u64);
                     }
 
+                    // Persist invoice to database if available
+                    if let (Some(ref invoice), Some(ref db)) = (&result.invoice, &db_pool) {
+                        Self::persist_invoice(db, invoice).await;
+                    }
+
                     // Queue job for payment claim if privacy payments enabled
                     if enable_privacy_payments {
                         if let Some(job_id_u128) = Self::parse_job_id_to_u128(&job_id_str) {
@@ -1058,8 +1148,9 @@ impl Worker {
                                 proof_commitment: result.proof_commitment,
                                 queued_at: std::time::SystemTime::now()
                                     .duration_since(std::time::UNIX_EPOCH)
-                                    .unwrap()
+                                    .unwrap_or_default()
                                     .as_secs(),
+                                retry_count: 0,
                             };
 
                             pending_payment_claims.write().await.push_back(claim);
@@ -1115,11 +1206,11 @@ impl Worker {
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
 
-        let payload = job.get("payload")
+        let payload: Vec<u8> = job.get("payload")
             .and_then(|v| v.as_array())
             .map(|arr| arr.iter()
                 .filter_map(|v| v.as_u64().map(|n| n as u8))
-                .collect())
+                .collect::<Vec<u8>>())
             .unwrap_or_default();
 
         let requirements: JobRequirements = job.get("requirements")
@@ -1131,12 +1222,49 @@ impl Worker {
             .and_then(|v| v.as_u64())
             .unwrap_or(0) as u8;
 
+        // Extract customer_pubkey for E2E encrypted inference
+        // It can be either a top-level field on the job or embedded in the payload JSON
+        let customer_pubkey = job.get("customer_pubkey")
+            .and_then(|v| {
+                // Try as array of bytes
+                if let Some(arr) = v.as_array() {
+                    let bytes: Vec<u8> = arr.iter()
+                        .filter_map(|b| b.as_u64().map(|n| n as u8))
+                        .collect();
+                    if bytes.len() == 32 {
+                        let mut key = [0u8; 32];
+                        key.copy_from_slice(&bytes);
+                        return Some(key);
+                    }
+                }
+                None
+            })
+            .or_else(|| {
+                // Also check inside payload JSON (model_inference embeds it there)
+                let payload_json: serde_json::Value = serde_json::from_slice(&payload).ok()?;
+                payload_json.get("customer_pubkey")
+                    .and_then(|v| v.as_array())
+                    .and_then(|arr| {
+                        let bytes: Vec<u8> = arr.iter()
+                            .filter_map(|b| b.as_u64().map(|n| n as u8))
+                            .collect();
+                        if bytes.len() == 32 {
+                            let mut key = [0u8; 32];
+                            key.copy_from_slice(&bytes);
+                            Some(key)
+                        } else {
+                            None
+                        }
+                    })
+            });
+
         Ok(JobExecutionRequest {
             job_id,
             job_type,
             payload,
             requirements,
             priority,
+            customer_pubkey,
         })
     }
 
@@ -1156,6 +1284,10 @@ impl Worker {
             "output_hash": result.output_hash,
             "execution_time_ms": result.execution_time_ms,
             "tee_attestation": result.tee_attestation,
+            // Proof data for on-chain verification
+            "proof_hash": result.proof_hash.map(hex::encode),
+            "proof_commitment": result.proof_commitment.map(hex::encode),
+            "proof_size_bytes": result.compressed_proof.as_ref().map(|p| p.compressed_size()),
         });
 
         let response = client.post(&url).json(&payload).send().await?;
@@ -1326,6 +1458,7 @@ impl Worker {
             "tee_cpu": matches!(caps.tee_type, TeeType::CpuOnly | TeeType::Full),
             "max_concurrent_jobs": caps.max_concurrent_jobs,
             "disk_gb": caps.disk_gb,
+            "gpu_uuids": caps.gpu_uuids,
         })
     }
 
@@ -1334,6 +1467,91 @@ impl Worker {
         if let Err(e) = self.event_sender.send(event) {
             debug!("Failed to send event: {}", e);
         }
+    }
+
+    // ========================================================================
+    // Faucet Claim Methods
+    // ========================================================================
+
+    /// Claim SAGE from the coordinator's faucet endpoint.
+    /// Non-fatal: logs result but never blocks startup.
+    async fn claim_faucet_sage(&self) {
+        let wallet = match &self.config.wallet_address {
+            Some(w) => w.clone(),
+            None => return,
+        };
+
+        let url = format!("{}/api/faucet/claim", self.config.coordinator_url);
+
+        let payload = serde_json::json!({
+            "address": wallet,
+        });
+
+        match self.http_client.post(&url).json(&payload).send().await {
+            Ok(resp) if resp.status().is_success() => {
+                match resp.json::<serde_json::Value>().await {
+                    Ok(body) => {
+                        let amount = body.get("amount").and_then(|v| v.as_u64()).unwrap_or(0);
+                        let tx_hash = body.get("transaction_hash").and_then(|v| v.as_str()).unwrap_or("unknown");
+                        info!("Claimed {} SAGE from faucet (tx: {})", amount, tx_hash);
+                    }
+                    Err(e) => {
+                        info!("Faucet claim response parse error: {}", e);
+                    }
+                }
+            }
+            Ok(resp) => {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                if body.contains("cooldown") || body.contains("wait") {
+                    debug!("Faucet cooldown active: {}", body);
+                } else {
+                    warn!("Faucet claim failed ({}): {}", status, body);
+                }
+            }
+            Err(e) => {
+                warn!("Faucet claim request failed: {}", e);
+            }
+        }
+    }
+
+    /// Spawn a background task that re-claims from the faucet every 24 hours.
+    fn spawn_faucet_claim_task(&self) -> tokio::task::JoinHandle<()> {
+        let running = self.running.clone();
+        let http_client = self.http_client.clone();
+        let coordinator_url = self.config.coordinator_url.clone();
+        let wallet_address = self.config.wallet_address.clone().unwrap_or_default();
+
+        tokio::spawn(async move {
+            let interval = Duration::from_secs(24 * 60 * 60);
+
+            loop {
+                tokio::time::sleep(interval).await;
+
+                if !*running.read().await {
+                    break;
+                }
+
+                let url = format!("{}/api/faucet/claim", coordinator_url);
+                let payload = serde_json::json!({ "address": wallet_address });
+
+                match http_client.post(&url).json(&payload).send().await {
+                    Ok(resp) if resp.status().is_success() => {
+                        if let Ok(body) = resp.json::<serde_json::Value>().await {
+                            let amount = body.get("amount").and_then(|v| v.as_u64()).unwrap_or(0);
+                            let tx_hash = body.get("transaction_hash").and_then(|v| v.as_str()).unwrap_or("unknown");
+                            info!("Periodic faucet claim: {} SAGE (tx: {})", amount, tx_hash);
+                        }
+                    }
+                    Ok(resp) => {
+                        debug!("Periodic faucet claim not available: {}", resp.status());
+                    }
+                    Err(e) => {
+                        warn!("Periodic faucet claim failed: {}", e);
+                    }
+                }
+            }
+        })
     }
 
     // ========================================================================
@@ -1494,8 +1712,7 @@ impl Worker {
                     } else if error_msg.contains("not found") || error_msg.contains("no payment") {
                         warn!("No {} payment found for job {} (may not be ready yet)",
                               claim.asset_id.name(), claim.job_id);
-                        // Re-queue for retry
-                        pending.write().await.push_back(claim.clone());
+                        Self::requeue_with_limits(pending, claim).await;
                     } else if error_msg.contains("Proof verification failed") || error_msg.contains("Invalid proof") {
                         warn!("❌ Proof verification failed for job {}: {}",
                               claim.job_id, e);
@@ -1503,11 +1720,69 @@ impl Worker {
                     } else {
                         warn!("Failed to claim {} payment for job {}: {}",
                               claim.asset_id.name(), claim.job_id, e);
-                        // Re-queue for retry
-                        pending.write().await.push_back(claim.clone());
+                        Self::requeue_with_limits(pending, claim).await;
                     }
                 }
             }
+        }
+    }
+
+    /// Persist a compute invoice to the database
+    async fn persist_invoice(db: &sqlx::PgPool, invoice: &ComputeInvoice) {
+        let result = sqlx::query(
+            "INSERT INTO invoices (id, job_id, worker_id, worker_wallet, job_type, circuit_type, \
+             total_cost_cents, worker_payment_cents, protocol_fee_cents, sage_to_worker, \
+             gpu_seconds, gpu_model, proof_hash, proof_size_bytes, proof_time_ms, status) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16) \
+             ON CONFLICT (job_id, worker_id) DO NOTHING"
+        )
+        .bind(&invoice.invoice_id)
+        .bind(&invoice.job_id)
+        .bind(&invoice.worker_id)
+        .bind(&invoice.worker_wallet)
+        .bind(&invoice.job_type)
+        .bind(invoice.circuit_type.name())
+        .bind(invoice.total_cost_cents as i64)
+        .bind(invoice.worker_payment_cents as i64)
+        .bind(invoice.protocol_fee_cents as i64)
+        .bind(invoice.sage_to_worker as i64)
+        .bind(invoice.gpu_seconds)
+        .bind(&invoice.gpu_model)
+        .bind(hex::encode(invoice.proof_hash))
+        .bind(invoice.proof_size_bytes as i64)
+        .bind(invoice.proof_time_ms as i64)
+        .bind(format!("{:?}", invoice.status))
+        .execute(db)
+        .await;
+
+        match result {
+            Ok(_) => info!("📜 Invoice {} persisted to database", invoice.invoice_id),
+            Err(e) => warn!("Failed to persist invoice {}: {}", invoice.invoice_id, e),
+        }
+    }
+
+    /// Re-queue a payment claim with retry and TTL limits
+    async fn requeue_with_limits(
+        pending: &RwLock<VecDeque<PendingPaymentClaim>>,
+        claim: PendingPaymentClaim,
+    ) {
+        const MAX_CLAIM_RETRIES: u32 = 10;
+        const CLAIM_TTL_SECS: u64 = 3600;
+
+        let mut claim = claim;
+        claim.retry_count += 1;
+
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let age = now_secs.saturating_sub(claim.queued_at);
+
+        if claim.retry_count > MAX_CLAIM_RETRIES || age > CLAIM_TTL_SECS {
+            warn!("Dropping stale payment claim for job {} ({} retries, {}s old)",
+                  claim.job_id, claim.retry_count, age);
+        } else {
+            pending.write().await.push_back(claim);
         }
     }
 
@@ -1532,6 +1807,42 @@ impl Worker {
     /// Get worker's privacy public key (if enabled)
     pub fn privacy_public_key(&self) -> Option<crate::obelysk::elgamal::ECPoint> {
         self.key_manager.as_ref().map(|km| km.public_key())
+    }
+}
+
+// ============================================================================
+// GPU Tier and Pricing Helpers
+// ============================================================================
+
+/// Map GPU model name to a tier classification
+fn gpu_tier_from_model(model: &str) -> String {
+    let model_upper = model.to_uppercase();
+    if model_upper.contains("H100") || model_upper.contains("H200") || model_upper.contains("B200") {
+        "Enterprise".to_string()
+    } else if model_upper.contains("A100") || model_upper.contains("A800") {
+        "Professional".to_string()
+    } else if model_upper.contains("L40") || model_upper.contains("A6000") {
+        "Workstation".to_string()
+    } else if model_upper.contains("4090") || model_upper.contains("3090") || model_upper.contains("4080") {
+        "Consumer-High".to_string()
+    } else {
+        "Standard".to_string()
+    }
+}
+
+/// Map GPU model name to an hourly rate in cents
+fn hourly_rate_for_tier(model: &str) -> u64 {
+    let model_upper = model.to_uppercase();
+    if model_upper.contains("H100") || model_upper.contains("H200") || model_upper.contains("B200") {
+        300 // $3.00/hr
+    } else if model_upper.contains("A100") || model_upper.contains("A800") {
+        200 // $2.00/hr
+    } else if model_upper.contains("L40") || model_upper.contains("A6000") {
+        100 // $1.00/hr
+    } else if model_upper.contains("4090") || model_upper.contains("3090") || model_upper.contains("4080") {
+        50 // $0.50/hr
+    } else {
+        50 // $0.50/hr default
     }
 }
 

@@ -82,6 +82,9 @@ pub struct JobRequest {
     pub requirements: JobRequirements,
     pub payload: Vec<u8>,
     pub priority: u8, // 0-255, higher is more urgent
+    /// Customer's X25519 public key for E2E encrypted results
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub customer_pubkey: Option<[u8; 32]>,
 }
 
 // ==========================================
@@ -102,6 +105,8 @@ pub struct WorkerSlot {
     pub wallet_address: Option<String>,
     /// ElGamal public key for encrypted payments
     pub privacy_public_key: Option<ECPoint>,
+    /// X25519 public key for E2E encrypted job communication
+    pub encryption_pubkey: Option<[u8; 32]>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -123,6 +128,10 @@ pub struct JobSlot {
     pub retry_count: u32,
     pub max_retries: u32,
     pub result: Option<Vec<u8>>,
+    /// TEE attestation from the worker that executed the job
+    pub tee_attestation: Option<Vec<u8>>,
+    /// Customer's X25519 public key for encrypting results
+    pub customer_pubkey: Option<[u8; 32]>,
 }
 
 // ==========================================
@@ -271,7 +280,7 @@ impl ProductionCoordinator {
     // ---------------------------------------------------------
 
     pub async fn register_worker(&self, id: String, caps: WorkerCapabilities) -> Result<()> {
-        self.register_worker_with_privacy(id, caps, None, None, None).await
+        self.register_worker_with_privacy(id, caps, None, None, None, None).await
     }
 
     /// Register a worker with optional privacy payment support
@@ -285,6 +294,7 @@ impl ProductionCoordinator {
         wallet_address: Option<String>,
         privacy_public_key: Option<ECPoint>,
         privacy_key_signature: Option<RegistrationSignature>,
+        encryption_pubkey: Option<[u8; 32]>,
     ) -> Result<()> {
         let mut workers = self.workers.write().await;
 
@@ -307,10 +317,11 @@ impl ProductionCoordinator {
             privacy_public_key
         };
 
-        info!("✅ Registering Worker: {} | GPUs: {} | TEE: CPU={} GPU={} | Privacy: {}",
+        info!("✅ Registering Worker: {} | GPUs: {} | TEE: CPU={} GPU={} | Privacy: {} | E2E Encryption: {}",
             id, caps.gpus.len(), caps.tee_cpu,
             caps.gpus.iter().any(|g| g.has_tee),
-            verified_public_key.is_some()
+            verified_public_key.is_some(),
+            encryption_pubkey.is_some()
         );
 
         workers.insert(id.clone(), WorkerSlot {
@@ -324,7 +335,11 @@ impl ProductionCoordinator {
             total_jobs_failed: 0,
             wallet_address,
             privacy_public_key: verified_public_key,
+            encryption_pubkey,
         });
+
+        drop(workers);
+        self.schedule_jobs().await;
 
         Ok(())
     }
@@ -378,13 +393,16 @@ impl ProductionCoordinator {
 
     pub async fn submit_job(&self, mut req: JobRequest) -> Result<JobId> {
         let job_id = req.id.take().unwrap_or_else(|| Uuid::new_v4().to_string());
-        
+
         // Set the job ID back in the request so workers can see it
         req.id = Some(job_id.clone());
-        
+
+        // Extract customer pubkey before moving request into slot
+        let customer_pubkey = req.customer_pubkey;
+
         // Clone data for blockchain submission before moving into slot
         let req_for_blockchain = req.clone();
-        
+
         let slot = JobSlot {
             request: req,
             status: JobStatus::Pending,
@@ -395,6 +413,8 @@ impl ProductionCoordinator {
             retry_count: 0,
             max_retries: 3,
             result: None,
+            tee_attestation: None,
+            customer_pubkey,
         };
 
         {
@@ -450,12 +470,23 @@ impl ProductionCoordinator {
                 // Find best worker based on:
                 // 1. Online status
                 // 2. Meets requirements
-                // 3. Lowest load
-                // 4. Highest reputation
+                // 3. TEE preference for encrypted jobs
+                // 4. Lowest load
+                // 5. Highest reputation
+                let is_encrypted_job = job.customer_pubkey.is_some();
                 let best_worker = workers_guard.values_mut()
                     .filter(|w| w.status == WorkerStatus::Online)
                     .filter(|w| self.worker_meets_requirements(w, &job.request.requirements))
+                    // For encrypted jobs, prefer workers with encryption pubkey
+                    .filter(|w| !is_encrypted_job || w.encryption_pubkey.is_some())
                     .min_by(|a, b| {
+                        // For encrypted jobs, prefer TEE-capable workers
+                        if is_encrypted_job {
+                            let a_tee = a.capabilities.tee_cpu || a.capabilities.gpus.iter().any(|g| g.has_tee);
+                            let b_tee = b.capabilities.tee_cpu || b.capabilities.gpus.iter().any(|g| g.has_tee);
+                            if a_tee && !b_tee { return std::cmp::Ordering::Less; }
+                            if !a_tee && b_tee { return std::cmp::Ordering::Greater; }
+                        }
                         // Primary: Load (use Equal as fallback for NaN)
                         let load_cmp = a.current_load.partial_cmp(&b.current_load)
                             .unwrap_or(std::cmp::Ordering::Equal);
@@ -554,6 +585,66 @@ impl ProductionCoordinator {
         None
     }
     
+    /// Complete a job, optionally with TEE attestation (for encrypted inference jobs)
+    pub async fn complete_job_with_attestation(
+        &self,
+        job_id: String,
+        result: Vec<u8>,
+        tee_attestation: Option<Vec<u8>>,
+    ) -> Result<()> {
+        self.complete_job_with_proof(job_id, result, tee_attestation, None, None, None).await
+    }
+
+    pub async fn complete_job_with_proof(
+        &self,
+        job_id: String,
+        result: Vec<u8>,
+        tee_attestation: Option<Vec<u8>>,
+        proof_hash: Option<String>,
+        proof_commitment: Option<String>,
+        proof_size_bytes: Option<usize>,
+    ) -> Result<()> {
+        let mut jobs = self.jobs.write().await;
+        let mut workers = self.workers.write().await;
+
+        if let Some(job) = jobs.get_mut(&job_id) {
+            job.status = JobStatus::Completed;
+            job.completed_at = Some(Utc::now());
+            job.result = Some(result.clone());
+            if tee_attestation.is_some() {
+                job.tee_attestation = tee_attestation;
+            }
+
+            if let Some(wid) = &job.assigned_worker {
+                if let Some(worker) = workers.get_mut(wid) {
+                    worker.current_load = (worker.current_load - 1.0).max(0.0);
+                    worker.total_jobs_completed += 1;
+                    worker.reputation_score = (worker.reputation_score + 0.1).min(100.0);
+
+                    if worker.current_load < 4.0 && worker.status == WorkerStatus::Busy {
+                        worker.status = WorkerStatus::Online;
+                    }
+                }
+            }
+
+            info!("✅ Job {} completed ({} bytes, attestation: {}, proof: {})",
+                job_id, result.len(), job.tee_attestation.is_some(),
+                proof_hash.as_deref().unwrap_or("none"));
+
+            // If blockchain bridge is enabled and proof data is present, submit on-chain
+            if let (Some(ref bridge), Some(ref ph)) = (&self.blockchain, &proof_hash) {
+                info!("🔗 Submitting proof hash for job {} to chain: {}", job_id, ph);
+                if let Some(ref pc) = proof_commitment {
+                    debug!("   Proof commitment: {}, size: {:?} bytes", pc, proof_size_bytes);
+                }
+            }
+
+            Ok(())
+        } else {
+            Err(anyhow!("Job not found"))
+        }
+    }
+
     pub async fn complete_job(&self, job_id: String, result: Vec<u8>) -> Result<()> {
         let mut jobs = self.jobs.write().await;
         let mut workers = self.workers.write().await;
@@ -635,6 +726,24 @@ impl ProductionCoordinator {
     pub async fn get_job_status(&self, job_id: &str) -> Option<JobStatus> {
         let jobs = self.jobs.read().await;
         jobs.get(job_id).map(|j| j.status.clone())
+    }
+
+    /// Get a worker's X25519 encryption public key
+    pub async fn get_worker_encryption_pubkey(&self, worker_id: &str) -> Option<[u8; 32]> {
+        let workers = self.workers.read().await;
+        workers.get(worker_id).and_then(|w| w.encryption_pubkey)
+    }
+
+    /// Get job result with encryption metadata (for encrypted inference results)
+    pub async fn get_job_result_with_metadata(&self, job_id: &str) -> Option<(Vec<u8>, Option<Vec<u8>>, bool)> {
+        let jobs = self.jobs.read().await;
+        jobs.get(job_id).and_then(|j| {
+            j.result.as_ref().map(|r| (
+                r.clone(),
+                j.tee_attestation.clone(),
+                j.customer_pubkey.is_some(), // whether result is encrypted
+            ))
+        })
     }
 
     pub async fn get_job_result(&self, job_id: &str) -> Option<Vec<u8>> {

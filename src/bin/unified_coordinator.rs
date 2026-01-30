@@ -333,6 +333,7 @@ async fn main() -> Result<()> {
         .route("/api/workers/register", post(register_worker))
         .route("/api/workers/heartbeat", post(worker_heartbeat))
         .route("/api/workers/:id/status", get(worker_status))
+        .route("/api/workers/:id/pubkey", get(worker_pubkey))
         .route("/api/workers/:id/poll", get(poll_for_work))
         .route("/api/workers/list", get(list_workers))
 
@@ -345,6 +346,7 @@ async fn main() -> Result<()> {
         .route("/api/jobs/:id/complete", post(complete_job))
         .route("/api/jobs/:id/fail", post(fail_job))
         .route("/api/jobs/:id/status", get(job_status))
+        .route("/api/jobs/:id/result", get(job_result))
         // ─────────────────────────────────────────────────────────────────────
         // GPU Pricing APIs
         // ─────────────────────────────────────────────────────────────────────
@@ -653,6 +655,9 @@ struct RegisterWorkerRequest {
     privacy_public_key: Option<ECPoint>,
     #[serde(default)]
     privacy_key_signature: Option<RegistrationSignature>,
+    /// X25519 public key for E2E encrypted job communication
+    #[serde(default)]
+    encryption_pubkey: Option<[u8; 32]>,
 }
 
 async fn register_worker(
@@ -666,6 +671,7 @@ async fn register_worker(
             req.wallet_address,
             req.privacy_public_key,
             req.privacy_key_signature,
+            req.encryption_pubkey,
         )
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -731,6 +737,21 @@ async fn worker_status(
     }
 }
 
+/// Get a worker's X25519 encryption public key (for clients to encrypt job payloads)
+async fn worker_pubkey(
+    State(state): State<AppState>,
+    Path(worker_id): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    match state.coordinator.get_worker_encryption_pubkey(&worker_id).await {
+        Some(pubkey) => Ok(Json(serde_json::json!({
+            "worker_id": worker_id,
+            "encryption_pubkey": hex::encode(pubkey),
+            "key_type": "X25519",
+        }))),
+        None => Err((StatusCode::NOT_FOUND, format!("Worker {} not found or has no encryption key", worker_id)))
+    }
+}
+
 async fn poll_for_work(
     State(state): State<AppState>,
     Path(worker_id): Path<String>,
@@ -776,6 +797,14 @@ async fn submit_job(
 #[derive(Debug, Deserialize)]
 struct CompleteJobRequest {
     result: Vec<u8>,
+    #[serde(default)]
+    tee_attestation: Option<String>,
+    #[serde(default)]
+    proof_hash: Option<String>,
+    #[serde(default)]
+    proof_commitment: Option<String>,
+    #[serde(default)]
+    proof_size_bytes: Option<usize>,
 }
 
 async fn complete_job(
@@ -783,8 +812,13 @@ async fn complete_job(
     Path(job_id): Path<String>,
     Json(req): Json<CompleteJobRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    // Use proof-aware completion path
+    let tee_bytes = req.tee_attestation.map(|s| s.into_bytes());
     state.coordinator
-        .complete_job(job_id, req.result)
+        .complete_job_with_proof(
+            job_id, req.result, tee_bytes,
+            req.proof_hash, req.proof_commitment, req.proof_size_bytes,
+        )
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
@@ -814,11 +848,50 @@ async fn job_status(
     Path(job_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     match state.coordinator.get_job_status(&job_id).await {
-        Some(status) => Ok(Json(serde_json::json!({
-            "job_id": job_id,
-            "status": format!("{:?}", status)
-        }))),
+        Some(status) => {
+            let mut response = serde_json::json!({
+                "job_id": job_id,
+                "status": format!("{:?}", status),
+            });
+
+            // If completed, include result metadata
+            if matches!(status, bitsage_node::coordinator::production_coordinator::JobStatus::Completed) {
+                if let Some((result, tee_att, is_encrypted)) = state.coordinator.get_job_result_with_metadata(&job_id).await {
+                    if let Some(obj) = response.as_object_mut() {
+                        obj.insert("result_size_bytes".to_string(), serde_json::json!(result.len()));
+                        obj.insert("encrypted".to_string(), serde_json::json!(is_encrypted));
+                        obj.insert("has_tee_attestation".to_string(), serde_json::json!(tee_att.is_some()));
+                        obj.insert("result_endpoint".to_string(),
+                            serde_json::json!(format!("/api/jobs/{}/result", job_id)));
+                    }
+                }
+            }
+
+            Ok(Json(response))
+        }
         None => Err((StatusCode::NOT_FOUND, "Job not found".to_string()))
+    }
+}
+
+/// Get job result (returns raw bytes — encrypted if customer_pubkey was set)
+async fn job_result(
+    State(state): State<AppState>,
+    Path(job_id): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    match state.coordinator.get_job_result_with_metadata(&job_id).await {
+        Some((result, tee_attestation, is_encrypted)) => {
+            // Hex-encode binary data for JSON transport
+            let result_hex = hex::encode(&result);
+            let tee_hex = tee_attestation.as_ref().map(|a| hex::encode(a));
+            Ok(Json(serde_json::json!({
+                "job_id": job_id,
+                "encrypted": is_encrypted,
+                "result_hex": result_hex,
+                "tee_attestation_hex": tee_hex,
+                "result_size_bytes": result.len(),
+            })))
+        }
+        None => Err((StatusCode::NOT_FOUND, "Job result not found".to_string()))
     }
 }
 
@@ -1109,6 +1182,7 @@ async fn deploy_model(
         },
         payload,
         priority: 100, // High priority for deployment
+        customer_pubkey: None,
     };
 
     let job_id = state.coordinator
@@ -1132,6 +1206,9 @@ struct ModelInferenceApiRequest {
     model_type: String,
     max_tokens: Option<u32>,
     temperature: Option<f32>,
+    /// Customer's X25519 public key for E2E encrypted results
+    #[serde(default)]
+    customer_pubkey: Option<[u8; 32]>,
 }
 
 fn default_llm() -> String { "llm".to_string() }
@@ -1142,12 +1219,14 @@ async fn model_inference(
     Json(req): Json<ModelInferenceApiRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     // Create an inference job
+    let requires_tee = req.customer_pubkey.is_some();
     let payload = serde_json::to_vec(&serde_json::json!({
         "model_id": model_id,
         "model_type": req.model_type,
         "input": req.input,
         "max_tokens": req.max_tokens,
         "temperature": req.temperature,
+        "customer_pubkey": req.customer_pubkey,
     })).unwrap_or_default();
 
     let job_req = JobRequest {
@@ -1157,10 +1236,11 @@ async fn model_inference(
             min_gpu_count: 1,
             required_job_type: "ModelInference".to_string(),
             timeout_seconds: 120,
-            requires_tee: false,
+            requires_tee,
         },
         payload,
         priority: 150, // High priority for inference
+        customer_pubkey: req.customer_pubkey,
     };
 
     let job_id = state.coordinator
@@ -1337,6 +1417,7 @@ async fn submit_training_job(
         },
         payload,
         priority: 50, // Lower priority than inference
+        customer_pubkey: None,
     };
 
     let job_id = state.coordinator
@@ -1419,6 +1500,7 @@ async fn submit_rl_training_job(
         },
         payload,
         priority: 50,
+        customer_pubkey: None,
     };
 
     let job_id = state.coordinator

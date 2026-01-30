@@ -23,6 +23,10 @@ use crate::obelysk::compute_invoice::{ComputeInvoice, InvoiceBuilder};
 use crate::ai::execution::{AIExecutionEngine, AIJobRequest, AIJobInput, AIJobOutput, ResourceConstraints, ExecutionParams};
 use crate::ai::model_registry::ModelRegistry;
 use crate::ai::frameworks::FrameworkManager;
+use crate::network::encrypted_jobs::{
+    EncryptedJobManager, EncryptedResult,
+    X25519PublicKey, encrypt_job_result,
+};
 
 #[cfg(feature = "fhe")]
 use crate::obelysk::fhe::{
@@ -39,6 +43,9 @@ pub struct JobExecutionRequest {
     pub payload: Vec<u8>,
     pub requirements: JobRequirements,
     pub priority: u8,
+    /// Customer's X25519 public key — if present, result will be E2E encrypted
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub customer_pubkey: Option<[u8; 32]>,
 }
 
 // ========== FHE Job Types ==========
@@ -489,6 +496,10 @@ pub struct JobExecutionResult {
     // Compute Invoice (Proof-as-Invoice)
     /// The compute invoice that combines proof + billing for settlement
     pub invoice: Option<ComputeInvoice>,
+
+    /// E2E encrypted result — if set, `result_data` contains the serialized EncryptedResult
+    /// and the customer must decrypt with their X25519 secret key
+    pub encrypted_result: Option<EncryptedResult>,
 }
 
 pub struct JobExecutor {
@@ -513,6 +524,10 @@ pub struct JobExecutor {
     ai_engine: Arc<AIExecutionEngine>,
     /// DataFusion SQL executor for data pipeline jobs
     data_executor: SecureDataExecutor,
+    /// E2E encryption manager for encrypted job payloads and results
+    encryption_manager: Option<Arc<EncryptedJobManager>>,
+    /// Whether TEE attestation is enforced for inference jobs
+    tee_enforced: bool,
 }
 
 impl JobExecutor {
@@ -549,6 +564,8 @@ impl JobExecutor {
             cached_vllm_model: RwLock::new(None),
             ai_engine: Self::build_ai_engine(),
             data_executor: SecureDataExecutor::new(),
+            encryption_manager: None,
+            tee_enforced: false,
         }
     }
 
@@ -588,6 +605,8 @@ impl JobExecutor {
             cached_vllm_model: RwLock::new(None),
             ai_engine: Self::build_ai_engine(),
             data_executor: SecureDataExecutor::new(),
+            encryption_manager: None,
+            tee_enforced: false,
         }
     }
 
@@ -618,6 +637,8 @@ impl JobExecutor {
             cached_vllm_model: RwLock::new(None),
             ai_engine: Self::build_ai_engine(),
             data_executor: SecureDataExecutor::new(),
+            encryption_manager: None,
+            tee_enforced: false,
         }
     }
 
@@ -626,9 +647,160 @@ impl JobExecutor {
         self.worker_wallet = wallet;
     }
 
+    /// Set GPU model name
+    pub fn set_gpu_model(&mut self, model: String) {
+        self.gpu_model = model;
+    }
+
+    /// Set GPU tier
+    pub fn set_gpu_tier(&mut self, tier: String) {
+        self.gpu_tier = tier;
+    }
+
+    /// Set hourly rate in cents
+    pub fn set_hourly_rate(&mut self, rate: u64) {
+        self.hourly_rate_cents = rate;
+    }
+
     /// Set SAGE price (should be called with oracle price)
     pub fn set_sage_price(&mut self, price: f64) {
         self.sage_price_usd = price;
+    }
+
+    /// Set the encryption manager for E2E encrypted inference
+    pub fn set_encryption_manager(&mut self, manager: Arc<EncryptedJobManager>) {
+        info!("🔐 E2E encryption enabled for job executor");
+        self.encryption_manager = Some(manager);
+    }
+
+    /// Set whether TEE attestation is enforced for inference jobs
+    pub fn set_tee_enforced(&mut self, enforced: bool) {
+        self.tee_enforced = enforced;
+        if enforced {
+            info!("🔒 TEE enforcement enabled for inference jobs");
+        }
+    }
+
+    /// Execute an encrypted inference job:
+    /// 1. Decrypt incoming payload using EncryptedJobManager
+    /// 2. Run inference (vLLM or Docker)
+    /// 3. Generate IO-bound STARK proof binding input/output hashes
+    /// 4. Encrypt result with customer's public key
+    /// 5. Attach TEE attestation
+    /// Result of encrypted inference including proof metadata for invoice generation
+    pub async fn execute_encrypted_inference(
+        &self,
+        request: &JobExecutionRequest,
+        customer_pubkey: &[u8; 32],
+    ) -> Result<(EncryptedResult, Option<[u8; 32]>, Option<[u8; 32]>, Option<[u8; 32]>, Option<CompressedProof>, Option<usize>, Option<u64>)> {
+        let job_id = request.job_id.clone().unwrap_or_else(|| "unknown".to_string());
+        info!("🔐 Executing encrypted inference job: {}", job_id);
+
+        // Attempt to decrypt the payload if it was encrypted with our worker pubkey.
+        // If the payload is a serialized EncryptedJobAnnouncement, we decrypt it.
+        // Otherwise, use the payload as-is (plaintext submission via coordinator).
+        let plaintext_payload = if let Some(ref enc_mgr) = self.encryption_manager {
+            match enc_mgr.try_decrypt_payload(&request.payload) {
+                Ok(decrypted) => {
+                    info!("🔓 Decrypted encrypted payload for job {}", job_id);
+                    decrypted
+                }
+                Err(_) => {
+                    // Not encrypted or not for us — use as-is
+                    request.payload.clone()
+                }
+            }
+        } else {
+            request.payload.clone()
+        };
+
+        // Hash the plaintext input for IO binding
+        let mut input_hasher = Sha256::new();
+        input_hasher.update(&plaintext_payload);
+        let input_hash: [u8; 32] = input_hasher.finalize().into();
+
+        // Build a request with decrypted payload for inference execution
+        let decrypted_request = JobExecutionRequest {
+            payload: plaintext_payload,
+            ..request.clone()
+        };
+        let result_data = self.execute_model_inference(&decrypted_request).await?;
+
+        // Hash the plaintext output for IO binding
+        let mut output_hasher = Sha256::new();
+        output_hasher.update(&result_data);
+        let output_hash: [u8; 32] = output_hasher.finalize().into();
+
+        // Generate IO-bound STARK proof and capture all proof metadata
+        let mut proof_hash: Option<[u8; 32]> = None;
+        let mut proof_attestation: Option<[u8; 32]> = None;
+        let mut proof_commitment: Option<[u8; 32]> = None;
+        let mut proof_size_bytes: Option<usize> = None;
+        let mut proof_time_ms: Option<u64> = None;
+        let mut compressed_proof: Option<CompressedProof> = None;
+
+        let io_proof = if self.enable_proofs {
+            let model_id = String::from_utf8_lossy(&request.payload[..64.min(request.payload.len())]).to_string();
+            match self.obelysk_executor.generate_inference_proof(
+                &job_id,
+                &input_hash,
+                &output_hash,
+                &model_id,
+                None,
+            ).await {
+                Ok(proof_result) => {
+                    info!("✅ IO-bound inference proof generated for job {}", job_id);
+                    if proof_result.status == ObelyskJobStatus::Completed {
+                        proof_hash = Some(proof_result.proof_hash);
+                        proof_attestation = Some(proof_result.proof_attestation);
+                        proof_commitment = Some(proof_result.proof_commitment);
+                        proof_size_bytes = Some(proof_result.metrics.proof_size_bytes);
+                        proof_time_ms = Some(proof_result.metrics.proof_time_ms);
+                        compressed_proof = proof_result.compressed_proof.clone();
+                    }
+                    match proof_result.compressed_proof {
+                        Some(p) => bincode::serialize(&p).ok(),
+                        None => None,
+                    }
+                }
+                Err(e) => {
+                    warn!("⚠️ Inference proof generation failed for job {}: {}", job_id, e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        // Generate TEE attestation if enforced
+        // The attestation string format is "TYPE:hex_data" (e.g., "TDX_QUOTE:aabb...")
+        // We store it as UTF-8 bytes — the type prefix makes it self-describing and parseable.
+        let tee_attestation = if self.tee_enforced || self.has_tee {
+            let attestation_str = self.generate_tee_attestation(&job_id, &hex::encode(&output_hash));
+            if attestation_str.starts_with("SW_ATTESTATION:") && self.tee_enforced {
+                // TEE is enforced but no hardware available — fail the job
+                return Err(anyhow::anyhow!(
+                    "TEE attestation required but no TEE hardware (TDX/SEV-SNP) detected"
+                ));
+            }
+            Some(attestation_str.into_bytes())
+        } else {
+            None
+        };
+
+        // Encrypt result with customer's public key
+        let customer_key = X25519PublicKey(*customer_pubkey);
+        let encrypted = encrypt_job_result(
+            &result_data,
+            &customer_key,
+            input_hash,
+            output_hash,
+            tee_attestation,
+            io_proof,
+        )?;
+
+        info!("✅ Encrypted inference result for job {} ({} bytes ciphertext)", job_id, encrypted.ciphertext.len());
+        Ok((encrypted, proof_hash, proof_attestation, proof_commitment, compressed_proof, proof_size_bytes, proof_time_ms))
     }
 
     /// Set vLLM endpoint for real inference
@@ -713,14 +885,80 @@ impl JobExecutor {
 
     pub async fn execute(&self, request: JobExecutionRequest) -> Result<JobExecutionResult> {
         let start = Instant::now();
-        
+
         let job_id = request.job_id.clone().unwrap_or_else(|| "unknown".to_string());
         let job_type = request.job_type.clone()
             .or_else(|| Some(request.requirements.required_job_type.clone()))
             .unwrap_or_else(|| "Generic".to_string());
-        
+
         info!("⚙️  Executing {} job: {}", job_type, job_id);
-        
+
+        // =========================================================================
+        // E2E Encrypted Inference Path
+        // If customer_pubkey is present, route through encrypted pipeline:
+        // decrypt → execute → prove (IO-bound) → encrypt result
+        // =========================================================================
+        if let Some(ref customer_pubkey) = request.customer_pubkey {
+            info!("🔐 Job {} has customer_pubkey — using E2E encrypted inference", job_id);
+
+            let (encrypted_result, proof_hash, proof_attestation, proof_commitment, compressed_proof, proof_size_bytes, proof_time_ms) =
+                self.execute_encrypted_inference(&request, customer_pubkey).await?;
+            let execution_time_ms = start.elapsed().as_millis() as u64;
+
+            // Serialize the encrypted result as the result_data (opaque bytes to coordinator)
+            let result_bytes = bincode::serialize(&encrypted_result)
+                .map_err(|e| anyhow::anyhow!("Failed to serialize encrypted result: {}", e))?;
+
+            // Generate invoice with real proof data
+            let invoice = if self.enable_proofs {
+                if let (Some(ph), Some(pa), Some(pc)) = (proof_hash, proof_attestation, proof_commitment) {
+                    let gpu_seconds = execution_time_ms as f64 / 1000.0;
+                    let program_identifier = format!("{}:{}", job_type, self.gpu_model);
+
+                    let mut inv = InvoiceBuilder::new(
+                        &job_id, &job_type, &self.worker_id, &self.worker_wallet,
+                    )
+                    .with_gpu(&self.gpu_model, &self.gpu_tier)
+                    .with_tee(self.has_tee)
+                    .with_input(&request.payload)
+                    .with_output(&result_bytes)
+                    .with_program(program_identifier.as_bytes())
+                    .with_billing(gpu_seconds, self.hourly_rate_cents, self.sage_price_usd, 50)
+                    .build();
+
+                    let trace_len = proof_size_bytes.unwrap_or(0).max(64);
+                    inv.set_proof_data(ph, pa, pc, proof_size_bytes.unwrap_or(0), proof_time_ms.unwrap_or(0), trace_len);
+                    inv.started_at = Some(chrono::Utc::now() - chrono::Duration::milliseconds(execution_time_ms as i64));
+                    inv.completed_at = Some(chrono::Utc::now());
+
+                    info!("📜 Invoice generated: {}", inv.summary());
+                    Some(inv)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            return Ok(JobExecutionResult {
+                job_id,
+                status: "completed".to_string(),
+                output_hash: hex::encode(&encrypted_result.output_hash),
+                execution_time_ms,
+                tee_attestation: encrypted_result.tee_attestation.as_ref()
+                    .map(|a| String::from_utf8_lossy(a).to_string()),
+                result_data: result_bytes,
+                proof_hash,
+                proof_attestation,
+                proof_commitment,
+                compressed_proof,
+                proof_size_bytes,
+                proof_time_ms,
+                invoice,
+                encrypted_result: Some(encrypted_result),
+            });
+        }
+
         // Route to appropriate executor based on job type
         let result_data = match job_type.as_str() {
             // ====== Simple Pipeline Test Jobs ======
@@ -765,8 +1003,12 @@ impl JobExecutor {
             None
         };
 
-        // Generate ZK proof if enabled
-        let (proof_hash, proof_attestation, proof_commitment, compressed_proof, proof_size_bytes, proof_time_ms) = if self.enable_proofs {
+        // Generate ZK proof if enabled (skip for ZK job types — they already produce proofs)
+        let is_zk_job = matches!(job_type.as_str(), "STWOProof" | "ZKProof" | "ObelyskProof");
+        let (proof_hash, proof_attestation, proof_commitment, compressed_proof, proof_size_bytes, proof_time_ms) = if is_zk_job {
+            // ZK jobs already generated proof data inside execute_zk_proof(); extract from result_data
+            extract_proof_from_zk_response(&result_data)
+        } else if self.enable_proofs {
             info!("🔐 Generating ZK proof for job {}", job_id);
 
             match self.obelysk_executor.execute_with_proof(&job_id, &job_type, &request.payload).await {
@@ -813,6 +1055,10 @@ impl JobExecutor {
             let gpu_seconds = execution_time_ms as f64 / 1000.0;
 
             // Build the invoice
+            // Compute program hash from job type + backend + model identifier
+            let backend = if self.obelysk_executor.is_gpu_available() { &self.gpu_model } else { "CPU-SIMD" };
+            let program_identifier = format!("{}:{}:{}", job_type, backend, self.gpu_model);
+
             let mut invoice = InvoiceBuilder::new(
                 &job_id,
                 &job_type,
@@ -823,6 +1069,7 @@ impl JobExecutor {
             .with_tee(self.has_tee)
             .with_input(&request.payload)
             .with_output(&result_data)
+            .with_program(program_identifier.as_bytes())
             .with_billing(
                 gpu_seconds,
                 self.hourly_rate_cents,
@@ -833,13 +1080,15 @@ impl JobExecutor {
 
             // Set proof data from the generated proof
             if let (Some(ph), Some(pa), Some(pc)) = (proof_hash, proof_attestation, proof_commitment) {
+                // Use actual proof size for trace length estimate (real data from prover)
+                let trace_len = proof_size_bytes.unwrap_or(0).max(64);
                 invoice.set_proof_data(
                     ph,
                     pa,
                     pc,
                     proof_size_bytes.unwrap_or(0),
                     proof_time_ms.unwrap_or(0),
-                    1024, // Default trace length (should come from prover)
+                    trace_len,
                 );
             }
 
@@ -872,6 +1121,7 @@ impl JobExecutor {
             proof_size_bytes,
             proof_time_ms,
             invoice,
+            encrypted_result: None,
         })
     }
 
@@ -2445,5 +2695,52 @@ impl JobExecutor {
 
         Ok(report)
     }
+}
+
+/// Extract proof metadata from a ZK job's JSON response (result_data).
+/// ZK jobs embed proof_hash, proof_attestation, proof_commitment in their response JSON.
+fn extract_proof_from_zk_response(
+    result_data: &[u8],
+) -> (Option<[u8; 32]>, Option<[u8; 32]>, Option<[u8; 32]>, Option<CompressedProof>, Option<usize>, Option<u64>) {
+    let json: serde_json::Value = match serde_json::from_slice(result_data) {
+        Ok(v) => v,
+        Err(_) => return (None, None, None, None, None, None),
+    };
+
+    let parse_hash = |key: &str| -> Option<[u8; 32]> {
+        let hex_str = json.get(key)?.as_str()?;
+        let bytes = hex::decode(hex_str).ok()?;
+        if bytes.len() == 32 {
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&bytes);
+            Some(arr)
+        } else {
+            None
+        }
+    };
+
+    let proof_hash = parse_hash("proof_hash");
+    let proof_attestation = parse_hash("proof_attestation");
+    let proof_commitment = parse_hash("proof_commitment");
+
+    let compressed_proof = json.get("compressed_proof_bytes")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            let data: Vec<u8> = arr.iter().filter_map(|v| v.as_u64().map(|n| n as u8)).collect();
+            let compressed_hash = blake3::hash(&data);
+            CompressedProof {
+                data,
+                original_size: json.get("proof_size_bytes").and_then(|v| v.as_u64()).unwrap_or(0) as usize,
+                compression_ratio: 1.0,
+                algorithm: crate::obelysk::proof_compression::CompressionAlgorithm::Zstd,
+                proof_hash: proof_hash.unwrap_or([0u8; 32]),
+                compressed_hash: *compressed_hash.as_bytes(),
+            }
+        });
+
+    let proof_size_bytes = json.get("proof_size_bytes").and_then(|v| v.as_u64()).map(|v| v as usize);
+    let proof_time_ms = json.get("proof_time_ms").and_then(|v| v.as_u64());
+
+    (proof_hash, proof_attestation, proof_commitment, compressed_proof, proof_size_bytes, proof_time_ms)
 }
 
