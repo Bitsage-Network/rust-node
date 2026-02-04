@@ -22,7 +22,7 @@ use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::io::{Write, stdout};
-use tracing::{info, warn, error};
+use tracing::{info, warn};
 
 // =============================================================================
 // CLI DEFINITION
@@ -323,7 +323,7 @@ async fn cmd_setup(
     // Try to deploy account via relayer (gasless onboarding)
     // Read the public key from the private key file
     let private_key = std::fs::read_to_string(&wallet_config.private_key_path)?;
-    let pk_clean = private_key.trim().strip_prefix("0x").unwrap_or(private_key.trim());
+    let _pk_clean = private_key.trim().strip_prefix("0x").unwrap_or(private_key.trim());
 
     // Derive public key from private key (simplified - just use address as identifier)
     let public_key = &wallet_config.address;
@@ -774,6 +774,7 @@ struct DeployAccountResult {
 }
 
 /// Fund account from faucet via relayer
+#[allow(dead_code)]
 async fn fund_from_faucet(
     coordinator_url: &str,
     account_address: &str,
@@ -912,6 +913,7 @@ async fn register_session_key(
 }
 
 /// Check if session key is still valid
+#[allow(dead_code)]
 fn is_session_key_valid(session_key: &SessionKeyConfig) -> bool {
     // Check expiry if set — expired keys are always invalid
     if let Some(expires_at) = session_key.expires_at {
@@ -1219,7 +1221,24 @@ async fn run_worker(config: WorkerConfig, vllm_endpoint: Option<String>) -> Resu
     use bitsage_node::node::worker::{Worker, WorkerConfig as NodeWorkerConfig};
     use bitsage_node::types::{WorkerCapabilities, TeeType};
     use bitsage_node::network::encrypted_jobs::X25519SecretKey;
+    use bitsage_node::obelysk::stwo_adapter::prewarm_gpu;
     use std::path::PathBuf;
+
+    // =========================================================================
+    // GPU Pre-warming: compile CUDA PTX kernels before any proofs
+    // Eliminates ~1.2s cold-start on first proof generation
+    // =========================================================================
+    if config.gpu.detected {
+        info!("Pre-warming GPU for proof generation...");
+        let prewarm_start = std::time::Instant::now();
+        let gpu_ready = prewarm_gpu();
+        let prewarm_ms = prewarm_start.elapsed().as_millis();
+        if gpu_ready {
+            info!("GPU pre-warmed in {}ms — zero cold-start for proofs", prewarm_ms);
+        } else {
+            info!("GPU pre-warm skipped ({}ms) — will use CPU SIMD", prewarm_ms);
+        }
+    }
 
     // =========================================================================
     // E2E Encryption: Generate or load X25519 keypair

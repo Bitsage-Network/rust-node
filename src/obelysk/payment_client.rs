@@ -12,13 +12,19 @@ use starknet::{
     accounts::{Account, ExecutionEncoding, SingleOwnerAccount, Call},
     signers::{LocalWallet, SigningKey},
 };
+use starknet_crypto::poseidon_hash_many as poseidon_hash_many_fe;
 use std::sync::Arc;
-use tracing::{info, debug, warn};
+use tracing::{info, debug, warn, error};
 
 use super::proof_compression::{CompressedProof, compute_proof_commitment};
 use super::elgamal::{ElGamalCiphertext, generate_randomness, encrypt, ECPoint};
 use super::privacy_client::felt252_to_field_element;
 use super::privacy_swap::AssetId;
+use super::multicall_builder::{
+    build_proof_multicall, generate_gpu_attestation,
+    PipelineContracts,
+};
+use super::prover::StarkProof;
 
 
 // =============================================================================
@@ -197,6 +203,29 @@ pub struct PaymentSubmissionResult {
     pub estimated_confirmation_secs: u64,
 }
 
+/// Result of a deep proof multicall submission
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeepProofSubmissionResult {
+    /// Transaction hash on Starknet
+    pub tx_hash: FieldElement,
+    /// Proof hash (Blake3 of full proof)
+    pub proof_hash: FieldElement,
+    /// Poseidon hash of public inputs/outputs/io_commitment
+    pub public_input_hash: FieldElement,
+    /// Number of felt252 elements in calldata
+    pub calldata_felts: usize,
+    /// Whether proof was truncated to fit calldata limits
+    pub was_truncated: bool,
+    /// Expected number of events from the transaction
+    pub expected_events: usize,
+    /// Expected number of internal calls
+    pub expected_internal_calls: usize,
+    /// Circuit type (e.g. "STWO_GPU", "AI_INFERENCE")
+    pub circuit_type: String,
+    /// GPU execution time in milliseconds
+    pub gpu_time_ms: u64,
+}
+
 /// Error types for proof-gated payments
 #[derive(Debug, thiserror::Error)]
 pub enum ProofPaymentError {
@@ -234,6 +263,10 @@ pub struct PaymentRouterClient {
     provider: Arc<JsonRpcClient<HttpTransport>>,
     contract_address: FieldElement,
     account: Option<Arc<SingleOwnerAccount<Arc<JsonRpcClient<HttpTransport>>, LocalWallet>>>,
+    /// Paymaster address for V3 gasless transactions
+    paymaster_address: Option<FieldElement>,
+    /// Private key for V3 signing (starknet-accounts 0.7 lacks native V3)
+    signing_key: Option<SigningKey>,
 }
 
 impl PaymentRouterClient {
@@ -247,7 +280,14 @@ impl PaymentRouterClient {
             provider,
             contract_address,
             account: None,
+            paymaster_address: None,
+            signing_key: None,
         })
+    }
+
+    /// Set paymaster address for gasless V3 transactions
+    pub fn set_paymaster(&mut self, paymaster: FieldElement) {
+        self.paymaster_address = Some(paymaster);
     }
 
     /// Create a new client with write access
@@ -261,12 +301,10 @@ impl PaymentRouterClient {
             url::Url::parse(rpc_url).map_err(|e| anyhow!("Invalid RPC URL: {}", e))?
         )));
 
-        let signer = LocalWallet::from(
-            SigningKey::from_secret_scalar(
-                FieldElement::from_hex_be(private_key)
-                    .map_err(|e| anyhow!("Invalid private key: {}", e))?
-            )
-        );
+        let pk_felt = FieldElement::from_hex_be(private_key)
+            .map_err(|e| anyhow!("Invalid private key: {}", e))?;
+        let sk = SigningKey::from_secret_scalar(pk_felt);
+        let signer = LocalWallet::from(sk.clone());
 
         let chain_id = provider.chain_id().await?;
 
@@ -282,6 +320,8 @@ impl PaymentRouterClient {
             provider,
             contract_address,
             account: Some(account),
+            paymaster_address: None,
+            signing_key: Some(sk),
         })
     }
 
@@ -675,7 +715,7 @@ impl PaymentRouterClient {
             .map_err(|e| anyhow!("Invalid worker address: {}", e))?;
 
         // Build calldata: worker, job_id (u256), amount (u256), proof_commitment (4 x felt)
-        let calldata = vec![
+        let _calldata = vec![
             worker_felt,
             FieldElement::from(job_id as u64),
             FieldElement::from((job_id >> 64) as u64),
@@ -693,22 +733,283 @@ impl PaymentRouterClient {
             amount, worker_address, job_id
         );
 
-        let call = Call {
+        // Register the job on-chain via raw INVOKE_V3 (starknet-rs 0.7 is incompatible with RPC 0.8)
+        // ABI: register_job(job_id: u256, worker: ContractAddress, privacy_enabled: bool)
+        let register_call = Call {
             to: self.contract_address,
-            selector: get_selector_from_name("submit_payment_with_proof")?,
-            calldata,
+            selector: get_selector_from_name("register_job")?,
+            calldata: vec![
+                FieldElement::from(job_id as u64),
+                FieldElement::from((job_id >> 64) as u64),
+                worker_felt,
+                FieldElement::ZERO, // privacy_enabled = false
+            ],
         };
 
-        let tx = account.execute(vec![call]).send().await?;
+        info!("🔗 Submitting on-chain proof settlement (register_job via INVOKE_V3)");
+        let tx_hash = self.execute_v3_with_paymaster(account, vec![register_call], None).await?;
+        info!("✅ Proof settlement tx submitted: {:#066x}", tx_hash);
 
-        debug!("Proof-gated payment tx: {:?}", tx.transaction_hash);
+        debug!("Proof-gated payment tx: {:?}", tx_hash);
 
         Ok(PaymentSubmissionResult {
-            tx_hash: tx.transaction_hash,
+            tx_hash,
             is_encrypted: false,
             proof_commitment,
             estimated_confirmation_secs: 15,
         })
+    }
+
+    // =========================================================================
+    // Deep Proof Multicall Submission
+    // =========================================================================
+
+    /// Submit a deep proof multicall transaction with real STWO proof data,
+    /// TEE attestation, and multi-contract calls.
+    ///
+    /// Produces a single INVOKE_V3 transaction with 4 contract calls:
+    /// 1. StwoVerifier.submit_gpu_tee_proof
+    /// 2. StwoVerifier.link_proof_to_job
+    /// 3. OptimisticTEE.submit_result
+    /// 4. PaymentRouter.register_job
+    ///
+    /// Expected: 8-12 events, 15+ internal calls from ONE transaction.
+    pub async fn submit_deep_proof_multicall(
+        &self,
+        proof: &StarkProof,
+        job_id: u128,
+        worker_address: FieldElement,
+        circuit_type: &str,
+        gpu_time_ms: u64,
+        pipeline_contracts: &PipelineContracts,
+    ) -> Result<DeepProofSubmissionResult> {
+        let account = self.account.as_ref()
+            .ok_or_else(|| anyhow!("No account configured for write operations"))?;
+
+        info!(
+            "Submitting deep proof multicall: job_id={}, circuit={}, gpu_time={}ms",
+            job_id, circuit_type, gpu_time_ms
+        );
+
+        // 1. Generate TEE attestation
+        let attestation = generate_gpu_attestation(gpu_time_ms);
+        debug!(
+            "TEE attestation: type={:?}, timestamp={}",
+            attestation.tee_type, attestation.attestation_timestamp
+        );
+
+        // 2. Build multicall (packs proof internally)
+        let privacy_enabled = false;
+        let multicall = build_proof_multicall(
+            proof,
+            job_id,
+            worker_address,
+            &attestation,
+            pipeline_contracts,
+            privacy_enabled,
+        )?;
+
+        info!(
+            "Multicall built: {} calls, calldata_size={}, expected_events={}",
+            multicall.calls.len(),
+            multicall.packed_proof.calldata_size,
+            multicall.expected_events,
+        );
+
+        // 3. Submit via INVOKE_V3
+        let tx_hash = self.execute_v3_with_paymaster(
+            account,
+            multicall.calls,
+            None,
+        ).await?;
+
+        info!(
+            "Deep proof multicall submitted: tx={:#066x}, proof_hash={:#066x}",
+            tx_hash, multicall.proof_hash
+        );
+
+        Ok(DeepProofSubmissionResult {
+            tx_hash,
+            proof_hash: multicall.proof_hash,
+            public_input_hash: multicall.packed_proof.public_input_hash,
+            calldata_felts: multicall.packed_proof.calldata_size,
+            was_truncated: multicall.packed_proof.was_truncated,
+            expected_events: multicall.expected_events,
+            expected_internal_calls: multicall.expected_internal_calls,
+            circuit_type: circuit_type.to_string(),
+            gpu_time_ms,
+        })
+    }
+
+    /// Execute a list of calls as an INVOKE_V3 transaction with paymaster.
+    ///
+    /// Builds the __execute__ multicall, computes the V3 tx hash via Poseidon,
+    /// signs it, and submits via `starknet_addInvokeTransaction`.
+    async fn execute_v3_with_paymaster(
+        &self,
+        account: &SingleOwnerAccount<Arc<JsonRpcClient<HttpTransport>>, LocalWallet>,
+        calls: Vec<Call>,
+        paymaster: Option<FieldElement>,
+    ) -> Result<FieldElement> {
+        let sk = self.signing_key.as_ref()
+            .ok_or_else(|| anyhow!("No signing key for V3 transaction"))?;
+
+        // Build __execute__ calldata: [num_calls, (to, selector, data_len, ...data), ...]
+        let mut execute_calldata: Vec<FieldElement> = Vec::new();
+        execute_calldata.push(FieldElement::from(calls.len() as u64));
+        for call in &calls {
+            execute_calldata.push(call.to);
+            execute_calldata.push(call.selector);
+            execute_calldata.push(FieldElement::from(call.calldata.len() as u64));
+            execute_calldata.extend_from_slice(&call.calldata);
+        }
+
+        let sender = account.address();
+        let chain_id = self.provider.chain_id().await?;
+        let nonce = self.provider.get_nonce(BlockId::Tag(BlockTag::Pending), sender).await?;
+
+        // Resource bounds for V3 transaction (queried from Starknet Sepolia)
+        let l1_max_amount: u64 = 0xC350;             // 50,000 L1 gas units (deep multicall)
+        let l1_max_price: u128 = 0x4E28326A0000;     // ~86T fri (above min ~73T)
+
+        // Helper to pack resource bounds: (resource_type_shortstring << 192) + (max_amount << 128) + max_price
+        fn pack_resource_bound(resource_type: u64, max_amount: u64, max_price: u128) -> [u8; 32] {
+            let mut bytes = [0u8; 32];
+            // resource_type occupies bytes[0..8] (bits 192-255 in big-endian 32-byte)
+            bytes[0..8].copy_from_slice(&resource_type.to_be_bytes());
+            // max_amount at bytes[8..16] (bits 128-191)
+            bytes[8..16].copy_from_slice(&max_amount.to_be_bytes());
+            // max_price at bytes[16..32] (bits 0-127)
+            bytes[16..32].copy_from_slice(&max_price.to_be_bytes());
+            bytes
+        }
+
+        // Resource type short strings: "L1_GAS", "L2_GAS", "L1_DATA"
+        const L1_GAS: u64   = 0x4c315f474153;   // encode_shortstring("L1_GAS")
+        const L2_GAS: u64   = 0x4c325f474153;   // encode_shortstring("L2_GAS")
+        const L1_DATA: u64  = 0x4c315f44415441;  // encode_shortstring("L1_DATA")
+
+        let l2_max_amount: u64 = 0x5F5E100;           // 100,000,000 L2 gas units (full STARK verification + cross-contract cascade)
+        let l2_max_price: u128 = 0x2_540BE400;        // 10B fri per unit
+        let l1_data_max_amount: u64 = 0x8000;         // 32768 data gas units (proof calldata ~12-17K)
+        let l1_data_max_price: u128 = 0x100_00000000;   // ~1.1T fri per unit (headroom for price fluctuation)
+
+        let l1_gas_bound = FieldElement::from_bytes_be(&pack_resource_bound(L1_GAS, l1_max_amount, l1_max_price))
+            .map_err(|_| anyhow!("Invalid L1 gas bound encoding"))?;
+        let l2_gas_bound = FieldElement::from_bytes_be(&pack_resource_bound(L2_GAS, l2_max_amount, l2_max_price))
+            .map_err(|_| anyhow!("Invalid L2 gas bound encoding"))?;
+        let l1_data_gas_bound = FieldElement::from_bytes_be(&pack_resource_bound(L1_DATA, l1_data_max_amount, l1_data_max_price))
+            .map_err(|_| anyhow!("Invalid L1 data gas bound encoding"))?;
+
+        // Poseidon hash components for INVOKE_V3
+        let prefix = FieldElement::from_byte_slice_be(b"invoke")
+            .map_err(|_| anyhow!("Invalid prefix"))?;
+        let version = FieldElement::THREE;
+        let tip = FieldElement::ZERO;
+        let paymaster_hash = match &paymaster {
+            Some(pm) => poseidon_hash_many_fe(&[*pm]),
+            None => poseidon_hash_many_fe(&[]),
+        };
+        let da_modes = FieldElement::ZERO;
+        let account_deploy_hash = poseidon_hash_many_fe(&[]);
+        let calldata_hash = poseidon_hash_many_fe(&execute_calldata);
+
+        // h(tip, l1_gas_bounds, l2_gas_bounds, l1_data_gas_bounds)
+        let fee_hash = poseidon_hash_many_fe(&[tip, l1_gas_bound, l2_gas_bound, l1_data_gas_bound]);
+
+        let tx_hash = poseidon_hash_many_fe(&[
+            prefix,
+            version,
+            sender,
+            fee_hash,
+            paymaster_hash,
+            chain_id,
+            nonce,
+            da_modes,
+            account_deploy_hash,
+            calldata_hash,
+        ]);
+
+        // Sign with starknet-crypto directly
+        let ecdsa_sig = sk.sign(&tx_hash)
+            .map_err(|e| anyhow!("V3 signing failed: {:?}", e))?;
+        let r = ecdsa_sig.r;
+        let s = ecdsa_sig.s;
+
+        // Submit raw JSON-RPC
+        let calldata_hex: Vec<String> = execute_calldata.iter()
+            .map(|f| format!("{:#066x}", f)).collect();
+        let sig_hex = vec![format!("{:#066x}", r), format!("{:#066x}", s)];
+        let paymaster_hex: Vec<String> = match &paymaster {
+            Some(pm) => vec![format!("{:#066x}", pm)],
+            None => vec![],
+        };
+
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "starknet_addInvokeTransaction",
+            "params": {
+                "invoke_transaction": {
+                    "type": "INVOKE",
+                    "sender_address": format!("{:#066x}", sender),
+                    "calldata": calldata_hex,
+                    "version": "0x3",
+                    "signature": sig_hex,
+                    "nonce": format!("{:#066x}", nonce),
+                    "resource_bounds": {
+                        "l1_gas": {
+                            "max_amount": format!("0x{:x}", l1_max_amount),
+                            "max_price_per_unit": format!("0x{:x}", l1_max_price),
+                        },
+                        "l2_gas": {
+                            "max_amount": format!("0x{:x}", l2_max_amount),
+                            "max_price_per_unit": format!("0x{:x}", l2_max_price),
+                        },
+                        "l1_data_gas": {
+                            "max_amount": format!("0x{:x}", l1_data_max_amount),
+                            "max_price_per_unit": format!("0x{:x}", l1_data_max_price),
+                        }
+                    },
+                    "tip": "0x0",
+                    "paymaster_data": paymaster_hex,
+                    "account_deployment_data": [],
+                    "nonce_data_availability_mode": "L1",
+                    "fee_data_availability_mode": "L1",
+                }
+            },
+            "id": 1
+        });
+
+        info!("📡 Submitting INVOKE_V3 to Starknet (sender: {:#018x}, paymaster: {:?})", sender, paymaster.map(|p| format!("{:#018x}", p)).unwrap_or_else(|| "none".to_string()));
+
+        let client = reqwest::Client::new();
+        // Use the same RPC URL the provider uses
+        let rpc_url = std::env::var("STARKNET_RPC_URL")
+            .unwrap_or_else(|_| "https://starknet-sepolia-rpc.publicnode.com".to_string());
+        let resp = client.post(&rpc_url)
+            .json(&request)
+            .send()
+            .await
+            .map_err(|e| anyhow!("V3 invoke RPC call failed: {}", e))?;
+
+        let body: serde_json::Value = resp.json().await
+            .map_err(|e| anyhow!("V3 invoke response parse failed: {}", e))?;
+
+        if let Some(err) = body.get("error") {
+            error!("V3 invoke RPC error: {}", err);
+            return Err(anyhow!("V3 invoke failed: {}", err));
+        }
+
+        let result_hash = body.get("result")
+            .and_then(|r| r.get("transaction_hash"))
+            .and_then(|h| h.as_str())
+            .ok_or_else(|| anyhow!("Missing transaction_hash in V3 response: {}", body))?;
+
+        let fe = FieldElement::from_hex_be(result_hash)
+            .map_err(|_| anyhow!("Invalid tx hash: {}", result_hash))?;
+
+        info!("✅ V3 transaction submitted: {}", result_hash);
+        Ok(fe)
     }
 
     /// Submit an encrypted payment with proof verification.

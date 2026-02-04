@@ -518,7 +518,7 @@ pub fn get_gpu_pricing() -> HashMap<&'static str, GpuModel> {
 }
 
 /// Get pricing for a specific GPU model
-pub fn get_gpu_rate(gpu_name: &str) -> Option<&'static GpuModel> {
+pub fn get_gpu_rate(_gpu_name: &str) -> Option<&'static GpuModel> {
     // Use lazy_static or similar in production
     // For now, this is a helper function
     None // TODO: implement with static storage

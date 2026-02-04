@@ -199,6 +199,37 @@ impl ProductionCoordinator {
         Ok(coord)
     }
 
+    /// Create coordinator with blockchain integration and signing credentials
+    pub fn with_blockchain_credentials(
+        rpc_url: String,
+        job_manager_address: String,
+        proof_verifier_address: String,
+        private_key: &str,
+        account_address: &str,
+    ) -> Result<Self> {
+        let blockchain = Arc::new(BlockchainBridge::with_credentials(
+            rpc_url,
+            job_manager_address,
+            proof_verifier_address,
+            private_key,
+            account_address,
+        )?);
+
+        let coord = Self {
+            workers: Arc::new(RwLock::new(HashMap::new())),
+            jobs: Arc::new(RwLock::new(HashMap::new())),
+            pending_queue: Arc::new(RwLock::new(Vec::new())),
+            heartbeat_timeout: Duration::seconds(60),
+            blockchain: Some(blockchain),
+            consensus: None,
+            staking_client: None,
+        };
+
+        coord.spawn_maintenance_loop();
+        info!("✅ Production Coordinator initialized with blockchain + signing credentials");
+        Ok(coord)
+    }
+
     /// Add consensus system to coordinator (optional, for production deployments)
     pub fn with_consensus(
         mut self,
@@ -642,7 +673,7 @@ impl ProductionCoordinator {
                 proof_hash.as_deref().unwrap_or("none"));
 
             // If blockchain bridge is enabled and proof data is present, submit on-chain
-            if let (Some(ref bridge), Some(ref ph)) = (&self.blockchain, &proof_hash) {
+            if let (Some(ref _bridge), Some(ref ph)) = (&self.blockchain, &proof_hash) {
                 info!("🔗 Submitting proof hash for job {} to chain: {}", job_id, ph);
                 if let Some(ref pc) = proof_commitment {
                     debug!("   Proof commitment: {}, size: {:?} bytes", pc, proof_size_bytes);

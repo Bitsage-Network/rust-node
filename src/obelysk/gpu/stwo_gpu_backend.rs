@@ -18,7 +18,9 @@ use std::sync::Arc;
 use std::time::{Instant, Duration};
 use tracing::info;
 
-use super::{GpuBackend, GpuBackendType, GpuBuffer};
+use super::GpuBackend as GpuBackendTrait;
+
+use super::{GpuBackendType, GpuBuffer};
 use crate::obelysk::field::M31;
 
 /// Threshold below which GPU overhead isn't worth it

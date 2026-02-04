@@ -6,9 +6,8 @@
 // - Support for various integer types (u8, u16, u32, u64)
 // - Vector encryption for batch processing
 
-use super::keys::{FheClientKey, FhePublicKey, FheServerKey};
+use super::keys::{FheClientKey, FhePublicKey};
 use super::types::{FheError, SerializedCiphertext, ValueType};
-use std::sync::Arc;
 
 #[cfg(feature = "fhe")]
 use tfhe::{

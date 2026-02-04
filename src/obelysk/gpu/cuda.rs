@@ -9,12 +9,11 @@
 
 #[cfg(feature = "cuda")]
 use cudarc::driver::*;
-#[cfg(feature = "cuda")]
-use cudarc::nvrtc::compile_ptx;
+
 
 use anyhow::{Result, anyhow, Context};
 use std::sync::Arc;
-use tracing::{info, debug};
+use tracing::info;
 use crate::obelysk::field::M31;
 use super::{GpuBackend, GpuBuffer};
 

@@ -904,7 +904,7 @@ async fn get_network_stats(
         .unwrap_or(0.0);
 
     // Get total staked from staking contract via metrics aggregator
-    let total_staked = if let Some(ref aggregator) = state.metrics_aggregator {
+    let total_staked = if let Some(ref _aggregator) = state.metrics_aggregator {
         // Query total staked from staking events
         let staked_result = sqlx::query_scalar::<_, i64>(
             "SELECT COALESCE(SUM(amount), 0)::bigint FROM staking_events WHERE event_type = 'stake'"

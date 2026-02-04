@@ -26,7 +26,6 @@
 //! └─────────────────────────────────────────────────────────────────┘
 //! ```
 
-use std::time::Instant;
 use serde::{Serialize, Deserialize};
 #[cfg(feature = "cuda")]
 use std::sync::Arc;
@@ -153,6 +152,7 @@ pub struct GpuFheStats {
 }
 
 /// GPU-accelerated FHE engine
+#[allow(dead_code)]
 pub struct GpuFheEngine {
     config: GpuFheConfig,
     stats: GpuFheStats,

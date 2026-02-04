@@ -1624,7 +1624,7 @@ async fn generate_merkle_proof_from_db(
     let mut current_level: Vec<String> = commitments;
     let mut current_index = leaf_index;
 
-    for level in 0..depth {
+    for _level in 0..depth {
         let sibling_index = if current_index % 2 == 0 {
             current_index + 1
         } else {

@@ -5,6 +5,7 @@
 //! and worker reputation management.
 
 use anyhow::{Result, anyhow, Context};
+use starknet::accounts::Account;
 use starknet::core::types::FieldElement;
 use tracing::{info, warn, debug};
 use std::sync::Arc;
@@ -860,6 +861,35 @@ impl BlockchainBridge {
             exec_time,
             success,
         ])
+    }
+
+    /// Execute a generic multicall (Vec<Call>) via INVOKE V3 on Starknet.
+    ///
+    /// Uses INVOKE V3 (STRK fee token) which is required on Sepolia.
+    /// This is the entry point used by the proof pipeline to submit packed proof
+    /// multicalls built by `multicall_builder::build_proof_multicall()`.
+    pub async fn execute_multicall(
+        &self,
+        calls: Vec<starknet::accounts::Call>,
+    ) -> Result<FieldElement> {
+        if !self.enabled {
+            debug!("Blockchain disabled, skipping multicall execution");
+            return Ok(FieldElement::ZERO);
+        }
+
+        if calls.is_empty() {
+            return Err(anyhow!("Cannot execute empty multicall"));
+        }
+
+        let creds = self.require_credentials()?;
+        info!("Executing V3 multicall with {} calls", calls.len());
+
+        crate::obelysk::multicall_builder::execute_v3_multicall(
+            &calls,
+            creds.private_key,
+            creds.account_address,
+        )
+        .await
     }
 
     /// Get optimal batch size based on network conditions

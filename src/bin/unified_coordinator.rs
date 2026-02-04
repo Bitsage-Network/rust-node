@@ -37,11 +37,10 @@ use bitsage_node::coordinator::gpu_pricing::{
     get_gpu_pricing, calculate_job_cost, get_pricing_summary, GpuTier,
 };
 use bitsage_node::coordinator::supply_router::{
-    SupplyRouter, SupplySource, RoutingPreference, RouteDecision,
-    RegisteredMiner, MinerStatus, MinerRegistrationRequest,
+    SupplyRouter, SupplySource, RoutingPreference,
+    RegisteredMiner, MinerStatus,
     // Job execution types
     JobSubmitRequest as SupplyJobSubmitRequest, JobResult as SupplyJobResult,
-    MinerJobAssignment, SagePayout,
 };
 use bitsage_node::cloud::provider_integration::ProviderManager;
 use bitsage_node::obelysk::elgamal::ECPoint;
@@ -71,7 +70,9 @@ use bitsage_node::api::{
     // Worker Heartbeat API
     worker_heartbeat_routes, WorkerHeartbeatState,
     // Gasless transaction relayer
-    relayer_routes, RelayerState, RelayerConfig,
+    relayer_routes, RelayerState,
+    // Metrics
+    metrics_routes,
     // Caching
     DashboardCache, CacheConfig, cache_cleanup_task,
 };
@@ -168,8 +169,51 @@ async fn main() -> Result<()> {
     // Core State Initialization
     // =========================================================================
 
-    // Production coordinator for worker management
-    let coordinator = Arc::new(ProductionCoordinator::new());
+    // Production coordinator for worker management (with blockchain integration)
+    let job_manager_addr = std::env::var("JOB_MANAGER_ADDRESS")
+        .unwrap_or_else(|_| "0x355b8c5e9dd3310a3c361559b53cfcfdc20b2bf7d5bd87a84a83389b8cbb8d3".to_string());
+    let proof_verifier_addr = std::env::var("PROOF_VERIFIER_ADDRESS")
+        .unwrap_or_else(|_| "0x17ada59ab642b53e6620ef2026f21eb3f2d1a338d6e85cb61d5bcd8dfbebc8b".to_string());
+
+    let signer_pk = std::env::var("SIGNER_PRIVATE_KEY").ok().filter(|s| !s.is_empty());
+    let deployer_addr = std::env::var("DEPLOYER_ADDRESS").ok().filter(|s| !s.is_empty());
+
+    let coordinator = if let (Some(pk), Some(addr)) = (&signer_pk, &deployer_addr) {
+        match ProductionCoordinator::with_blockchain_credentials(
+            cli.rpc_url.clone(),
+            job_manager_addr.clone(),
+            proof_verifier_addr.clone(),
+            pk,
+            addr,
+        ) {
+            Ok(c) => Arc::new(c),
+            Err(e) => {
+                warn!("⚠️ Blockchain+credentials init failed ({}), trying without credentials", e);
+                match ProductionCoordinator::with_blockchain(
+                    cli.rpc_url.clone(), job_manager_addr, proof_verifier_addr,
+                ) {
+                    Ok(c) => Arc::new(c),
+                    Err(e2) => {
+                        warn!("⚠️ Blockchain bridge init failed ({}), running without on-chain settlement", e2);
+                        Arc::new(ProductionCoordinator::new())
+                    }
+                }
+            }
+        }
+    } else {
+        if signer_pk.is_none() {
+            warn!("⚠️ SIGNER_PRIVATE_KEY not set — on-chain proof settlement disabled");
+        }
+        match ProductionCoordinator::with_blockchain(
+            cli.rpc_url.clone(), job_manager_addr, proof_verifier_addr,
+        ) {
+            Ok(c) => Arc::new(c),
+            Err(e) => {
+                warn!("⚠️ Blockchain bridge init failed ({}), running without on-chain settlement", e);
+                Arc::new(ProductionCoordinator::new())
+            }
+        }
+    };
 
     // Initialize cloud provider manager with static pricing
     let provider_manager = Arc::new(ProviderManager::new(vec![]));
@@ -430,6 +474,11 @@ async fn main() -> Result<()> {
         // Gasless Transaction Relayer (for Privacy Operations)
         // ─────────────────────────────────────────────────────────────────────
         .merge(relayer_routes(relayer_state))
+
+        // ─────────────────────────────────────────────────────────────────────
+        // Prometheus Metrics & Health
+        // ─────────────────────────────────────────────────────────────────────
+        .merge(metrics_routes())
 
         .layer(CorsLayer::permissive());
 
@@ -899,6 +948,7 @@ async fn job_result(
 // Job Estimation Handler
 // =============================================================================
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 struct EstimateJobRequest {
     job_type: String,
@@ -1774,7 +1824,7 @@ async fn route_job(
     }
 }
 
-async fn list_cloud_instances(State(state): State<AppState>) -> Json<serde_json::Value> {
+async fn list_cloud_instances(State(_state): State<AppState>) -> Json<serde_json::Value> {
     // Get instances from provider manager (accessed through supply router's internal state)
     // For now, return the static pricing data
     let gpus = get_gpu_pricing();
@@ -1814,6 +1864,7 @@ use std::collections::HashMap;
 // Miner Registration Handlers
 // =============================================================================
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 struct RegisterMinerRequest {
     wallet_address: String,
@@ -1886,6 +1937,7 @@ async fn register_miner(
     })))
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 struct MinerHeartbeatRequest {
     miner_id: String,

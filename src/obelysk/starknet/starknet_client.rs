@@ -969,6 +969,7 @@ impl StarknetClient {
     }
 
     /// Estimate fee for a V3 transaction
+    #[allow(dead_code)]
     async fn estimate_fee_v3(&self, calldata: &[Felt252]) -> Result<u64, StarknetError> {
         let account = self.config.account_address
             .ok_or(StarknetError::NoAccount)?;

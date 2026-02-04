@@ -21,7 +21,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use anyhow::{Result, anyhow};
-use tracing::{info, warn, debug, error};
+use tracing::info;
 use chrono::{DateTime, Utc};
 
 /// Cloud provider identifier
@@ -230,6 +230,7 @@ impl Default for ProviderConfig {
 }
 
 /// Provider integration manager
+#[allow(dead_code)]
 pub struct ProviderManager {
     /// HTTP client for API calls
     client: reqwest::Client,
@@ -686,7 +687,7 @@ impl ProviderManager {
     pub async fn provision_instance(
         &self,
         instance_type: &CloudGpuInstance,
-        ssh_public_key: &str,
+        _ssh_public_key: &str,
     ) -> Result<ProvisionedInstance> {
         let config = self.configs.get(&instance_type.provider)
             .ok_or_else(|| anyhow!("Provider {:?} not configured", instance_type.provider))?;

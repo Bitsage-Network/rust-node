@@ -21,6 +21,8 @@ pub mod ml_gadgets;   // ML operations (MatMul, ReLU, etc.) (Phase 3) ✅
 pub mod etl;          // ETL verification (Phase 4) ✅
 pub mod stwo_adapter; // Real Stwo integration layer (Phase 5) ✅
 pub mod gpu;          // GPU acceleration (CUDA/ROCm) (Phase 6) 🚀
+#[cfg(feature = "cuda")]
+pub mod poseidon_gpu; // Poseidon2 CUDA kernel for 10-15x speedup 🚀
 pub mod starknet;     // Starknet L2 on-chain verification (Phase 7) ⛓️
 pub mod proof_aggregation; // Recursive proof aggregation (80% gas savings) ⛓️
 pub mod elgamal;      // ElGamal EC encryption for privacy payments (Phase 8) 🔐
@@ -38,6 +40,8 @@ pub mod nullifier_tree;       // Incremental Merkle Tree for Nullifiers (Phase 1
 pub mod fhe;                  // Fully Homomorphic Encryption (Phase 15) 🔒
 pub mod compute_invoice;      // Proof-as-Invoice System (Phase 16) 📜
 pub mod privacy_state;        // Privacy State Machine (Phase 17) 🔐
+pub mod proof_packer;         // Pack StarkProof → felt252[] for on-chain submission (Phase 18) 📦
+pub mod multicall_builder;    // Deep multicall builder for proof pipeline (Phase 18) 🔗
 
 // Re-exports for convenience
 pub use vm::{ObelyskVM, OpCode, Instruction, ExecutionTrace};
@@ -84,6 +88,7 @@ pub use payment_client::{
     PaymentRouterClient, PaymentToken, PaymentQuote, PaymentCalculator,
     FeeDistribution, DiscountTiers, OTCConfig,
     ProofGatedPayment, EncryptedPaymentData, PaymentSubmissionResult, ProofPaymentError,
+    DeepProofSubmissionResult,
 };
 pub use worker_keys::{
     WorkerKeyManager, PublicKeyExport, RegistrationSignature,
@@ -195,6 +200,16 @@ pub use io_binder::{
     // Constants
     IO_COMMITMENT_SIZE, IO_COMMITMENT_M31_COUNT,
 };
+pub use proof_packer::{
+    PackedProof, CompactPackedProof, pack_proof, pack_proof_compact,
+    compute_public_input_hash, grind_pow_nonce_parallel,
+};
+pub use multicall_builder::{
+    MulticallResult, PipelineContracts, GpuTeeAttestation, TeeType,
+    build_proof_multicall, build_gpu_tee_multicall, build_compact_proof_multicall,
+    generate_gpu_attestation,
+};
+pub use stwo_adapter::prewarm_gpu;
 pub use privacy_state::{
     // Privacy state machine
     PrivacyState, PrivacyTransition, TransitionOperation,

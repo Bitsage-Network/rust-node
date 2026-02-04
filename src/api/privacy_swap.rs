@@ -64,12 +64,12 @@ use tracing::{info, warn, debug};
 
 use crate::obelysk::{
     field::M31,
-    prover::{ObelyskProver, StarkProof},
+    prover::StarkProof,
     vm::{ObelyskVM, Instruction, OpCode},
     stwo_adapter::{prove_with_stwo_gpu, is_gpu_available},
-    elgamal::{Felt252, ECPoint, generate_randomness, hash_felts},
-    privacy_swap::{AssetId, SwapManager, ExchangeRate},
-    tee_proof_pipeline::{TeeGpuProofPipeline, ProofType},
+    elgamal::{Felt252, generate_randomness, hash_felts},
+    privacy_swap::{AssetId, SwapManager},
+    tee_proof_pipeline::TeeGpuProofPipeline,
 };
 
 // =============================================================================

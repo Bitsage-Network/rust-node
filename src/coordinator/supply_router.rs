@@ -31,7 +31,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use anyhow::{Result, anyhow};
-use tracing::{info, warn, debug, error};
+use tracing::{info, warn, debug};
 use chrono::{DateTime, Utc, Duration};
 
 use crate::cloud::provider_integration::{ProviderManager, CloudGpuInstance};
@@ -772,7 +772,7 @@ impl SupplyRouter {
         job.result = Some(result.clone());
 
         // Calculate payout
-        let route = job.route_decision.as_ref()
+        let _route = job.route_decision.as_ref()
             .ok_or_else(|| anyhow!("No route decision for job"))?;
 
         // Get miner info for wallet address

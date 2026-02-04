@@ -4,12 +4,31 @@ High-performance Rust node for the BitSage Network, featuring **Obelysk Protocol
 
 ---
 
-## One-Click Installation
+## One-Command Deployment
 
-**Run a single command to install and start earning SAGE tokens:**
+### Option 1: Docker (Recommended)
+
+**Start earning SAGE tokens with a single command:**
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/Bitsage-Network/rust-node/main/rust-node/scripts/install.sh | bash
+# GPU Worker (requires nvidia-docker)
+docker compose -f docker-compose.worker.yml up
+
+# CPU-only (for testing)
+docker compose -f docker-compose.worker.yml --profile cpu up
+```
+
+This automatically:
+- Generates a wallet (account abstraction)
+- Claims tokens from faucet (testnet)
+- Registers with the coordinator
+- Starts processing jobs
+- Earns SAGE tokens
+
+### Option 2: Native Installation
+
+```bash
+curl -sSL https://raw.githubusercontent.com/Bitsage-Network/rust-node/main/scripts/install.sh | bash
 ```
 
 This interactive wizard will:
@@ -100,16 +119,45 @@ sage-worker claim
 
 ## Performance Benchmarks
 
-### Single GPU (H100 80GB)
+### Latest Results (February 3, 2026)
 
-| Proof Size | GPU Time | CPU Time | **Speedup** |
-|------------|----------|----------|-------------|
-| 2^18 (8MB) | 2.42ms | 132ms | **54.6x** |
-| 2^20 (32MB) | 5.71ms | 560ms | **98.2x** |
-| 2^22 (64MB) | 17.73ms | 2.22s | **125.2x** |
-| 2^23 (64MB) | 25.83ms | 4.5s | **174.2x** |
+**Hardware:** NVIDIA H100 PCIe 80GB
+**Network:** Starknet Sepolia
+**Events per TX:** 12 (full fee distribution cascade)
 
-### Multi-GPU (4x H100)
+### Proof Generation Performance
+
+| Workload | Trace Steps | GPU Time | CPU Time | Speedup | Gas Cost |
+|----------|-------------|----------|----------|---------|----------|
+| **ML Inference** | 132 | **21ms** | 18ms | 1.0x | 0.307 STRK |
+| **1K Steps** | 1,024 | **24ms** | 20ms | 0.8x | 0.307 STRK |
+| **64K Steps** | 65,536 | **159ms** | 164ms | 1.0x | 0.380 STRK |
+| **256K Steps** | 262,144 | **335ms** | 352ms | 1.1x | 0.404 STRK |
+| **1M Steps** | 1,048,576 | **1,107ms** | 1,125ms | 1.0x | 0.429 STRK |
+
+### On-Chain Verification Stats
+
+| Metric | Value |
+|--------|-------|
+| **Events per TX** | 12 |
+| **Internal Calls** | 10+ |
+| **Success Rate** | 100% |
+| **Calldata Size** | 173-333 felts |
+| **FRI Layers** | 8-20 |
+
+### Verified Transactions (Live on Starknet Sepolia)
+
+```
+ML_GPU:   https://sepolia.voyager.online/tx/0x068545dbe5b18a52328b0c0b74a661c6f0f7f689d4847247b055bd217a46cf53
+ML_CPU:   https://sepolia.voyager.online/tx/0x051ee2466af84d94b439fae15bcb1662317a4a7116ee3e7ccb3a3f07ae731eac
+GPU_1K:   https://sepolia.voyager.online/tx/0x03962dcd9b61dbcd7e5f24fab76132ad29ba4c6ba6e3b667b7f78055ee876e72
+GPU_64K:  https://sepolia.voyager.online/tx/0x03cc26baf34abbed4c753ce60e53854d8728723a73acc3f7fa9f687fc6f9bfb1
+GPU_256K: https://sepolia.voyager.online/tx/0x0384d3daa5f08e083115c228b91d19a2a79d3d73117eb57f666f9ec8b3574607
+GPU_1M:   https://sepolia.voyager.online/tx/0x05d0ae5280523e1ec31802a8aa7ffec28eea943c498d7b1694a495087557eec9
+CPU_1M:   https://sepolia.voyager.online/tx/0x03494f9bd7eb9e5a1b323b12e0478d12876d8c943b9b92035b61d824ecd8a2fe
+```
+
+### Multi-GPU Scaling (4x H100)
 
 | Metric | Value |
 |--------|-------|
@@ -205,6 +253,235 @@ bitsage-network/
 │                                                                  │
 └─────────────────────────────────────────────────────────────────┘
 ```
+
+---
+
+## Obelysk Protocol: Understanding the Proving System
+
+### Overview
+
+BitSage uses a **two-layer proving architecture**:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    YOUR APPLICATION                              │
+│          (ML inference, data processing, privacy)                │
+└───────────────────────────┬─────────────────────────────────────┘
+                            │
+                            ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                    OBELYSK PROTOCOL                              │
+│    High-level proving API — what YOU interact with               │
+│                                                                  │
+│    ┌──────────────┐  ┌──────────────┐  ┌──────────────┐         │
+│    │  ObelyskVM   │  │   Prover     │  │   Starknet   │         │
+│    │  (M31 field) │  │  (circuits)  │  │   (verify)   │         │
+│    └──────────────┘  └──────────────┘  └──────────────┘         │
+└───────────────────────────┬─────────────────────────────────────┘
+                            │ stwo_adapter.rs
+                            ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                    STWO PROVER (libs/stwo/)                      │
+│    Low-level Circle STARK cryptography — handled internally      │
+│                                                                  │
+│    ┌──────────────┐  ┌──────────────┐  ┌──────────────┐         │
+│    │  Circle FFT  │  │     FRI      │  │   Merkle     │         │
+│    │   (GPU)      │  │  (folding)   │  │   (commit)   │         │
+│    └──────────────┘  └──────────────┘  └──────────────┘         │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Key Points:**
+- **Obelysk** = BitSage's protocol layer (high-level, user-facing)
+- **Stwo** = StarkWare's Circle STARK prover (low-level, internal)
+- You interact with Obelysk APIs — Stwo is handled automatically
+- The `stwo_adapter.rs` file bridges the two layers
+
+### Why Two Layers?
+
+| Layer | Purpose | You Touch It? |
+|-------|---------|---------------|
+| **Obelysk** | Application logic: ML, privacy, payments | ✅ Yes |
+| **Stwo** | Cryptographic proving (Circle STARKs) | ❌ No (internal) |
+
+**Benefits:**
+- **Obelysk** provides simple APIs for verifiable computation
+- **Stwo** provides 10-174x GPU speedup via Circle FFTs
+- **Mersenne-31** field (2³¹ - 1) enables native 32-bit operations
+- **Clean separation** means you focus on business logic, not cryptography
+
+---
+
+## Developer Guide: Generating Proofs
+
+### Quick Start: Generate Your First Proof
+
+```bash
+# Build with GPU support
+cargo build --release --features cuda
+
+# Generate a demo proof (proves ML inference)
+./target/release/bitsage-proof demo --batch-size 100
+
+# Output:
+# ✓ Generated proof for 100 ML inferences
+# ✓ Proof size: 48.2 KB
+# ✓ Proving time: 127ms (GPU)
+# ✓ Proof hash: 0x7a3f...
+```
+
+### CLI Proof Generation
+
+```bash
+# Generate proof for a workload
+bitsage-proof generate \
+  --workload ml-inference \
+  --batch-size 1000 \
+  --output proof.json
+
+# Verify locally (fast, no gas)
+bitsage-proof verify --proof proof.json
+
+# Submit to Starknet (costs gas, permanent)
+bitsage-proof submit \
+  --proof proof.json \
+  --network sepolia
+
+# Check on-chain status
+bitsage-proof status --tx-hash 0x...
+```
+
+### Rust API: Programmatic Proof Generation
+
+```rust
+use bitsage_node::obelysk::{
+    ObelyskVM, ObelyskProver, ProverConfig,
+    Instruction, OpCode, M31,
+};
+
+fn main() -> anyhow::Result<()> {
+    // 1. Create and execute your computation
+    let mut vm = ObelyskVM::new();
+
+    // Simple example: compute 2 * 3 + 5 = 11
+    vm.load_program(vec![
+        Instruction::new(OpCode::LoadImm, 0, 2, 0),  // r0 = 2
+        Instruction::new(OpCode::LoadImm, 1, 3, 0),  // r1 = 3
+        Instruction::new(OpCode::Mul, 2, 0, 1),      // r2 = r0 * r1 = 6
+        Instruction::new(OpCode::LoadImm, 3, 5, 0),  // r3 = 5
+        Instruction::new(OpCode::Add, 4, 2, 3),      // r4 = r2 + r3 = 11
+    ]);
+
+    let trace = vm.execute()?;
+    println!("Result: {:?}", trace.final_state());
+
+    // 2. Generate ZK proof
+    let prover = ObelyskProver::new(ProverConfig::default());
+    let proof = prover.prove_execution(&trace)?;
+
+    println!("Proof size: {} bytes", proof.size());
+    println!("Proof hash: 0x{}", hex::encode(&proof.commitment()));
+
+    // 3. Verify locally
+    assert!(prover.verify(&proof)?);
+    println!("✓ Proof verified!");
+
+    Ok(())
+}
+```
+
+### GPU-Accelerated Proving
+
+```rust
+use bitsage_node::obelysk::{prewarm_gpu, stwo_adapter};
+
+fn main() -> anyhow::Result<()> {
+    // Pre-warm GPU (compile CUDA kernels)
+    prewarm_gpu()?;
+
+    // Generate trace (same as before)
+    let trace = generate_ml_trace()?;
+
+    // Prove with GPU acceleration (50-174x faster)
+    let proof = stwo_adapter::prove_with_stwo_gpu(&trace)?;
+
+    println!("GPU proving time: {:?}", proof.metrics.total_time);
+    Ok(())
+}
+```
+
+### Submitting Proofs to Starknet
+
+```rust
+use bitsage_node::obelysk::{StarknetClient, ProofSerializer};
+
+async fn submit_proof(proof: StarkProof) -> anyhow::Result<String> {
+    // Connect to Starknet
+    let client = StarknetClient::new(
+        "https://starknet-sepolia.public.blastapi.io",
+        "0x...", // Your private key
+    ).await?;
+
+    // Serialize proof to Cairo format
+    let cairo_proof = ProofSerializer::serialize(&proof)?;
+
+    // Submit to verifier contract
+    let tx_hash = client.submit_proof(
+        cairo_proof,
+        "0x..." // Verifier contract address
+    ).await?;
+
+    println!("Submitted! TX: {}", tx_hash);
+    Ok(tx_hash)
+}
+```
+
+### Available Workload Types
+
+| Workload | Description | Use Case |
+|----------|-------------|----------|
+| `ml-inference` | Neural network inference proof | Verify ML model ran correctly |
+| `data-transform` | ETL pipeline proof | Verify data processing |
+| `privacy-transfer` | Private payment proof | Confidential transactions |
+| `batch-verify` | Aggregate multiple proofs | Gas-efficient verification |
+| `custom` | User-defined computation | Any ObelyskVM program |
+
+---
+
+## Module Reference
+
+### Core Obelysk Modules
+
+| Module | Purpose | Key Types |
+|--------|---------|-----------|
+| `obelysk::vm` | Virtual machine execution | `ObelyskVM`, `Instruction`, `OpCode` |
+| `obelysk::prover` | Proof generation | `ObelyskProver`, `ProverConfig`, `StarkProof` |
+| `obelysk::field` | Mersenne-31 arithmetic | `M31` |
+| `obelysk::circuit` | Circuit building | `Circuit`, `CircuitBuilder` |
+| `obelysk::stwo_adapter` | Stwo integration | `prove_with_stwo`, `prewarm_gpu` |
+
+### GPU Modules
+
+| Module | Purpose | Key Types |
+|--------|---------|-----------|
+| `obelysk::gpu` | GPU acceleration | `GpuProver`, `GpuConfig` |
+| `obelysk::gpu::fft` | Circle FFT on GPU | (internal) |
+| `obelysk::gpu::memory_pool` | GPU memory management | (internal) |
+
+### Starknet Modules
+
+| Module | Purpose | Key Types |
+|--------|---------|-----------|
+| `obelysk::starknet` | On-chain verification | `StarknetClient`, `VerifierContract` |
+| `obelysk::proof_packer` | Proof serialization | `PackedProof`, `pack_proof` |
+
+### Privacy Modules
+
+| Module | Purpose | Key Types |
+|--------|---------|-----------|
+| `obelysk::elgamal` | ElGamal encryption | `encrypt`, `decrypt`, `KeyPair` |
+| `obelysk::privacy_client` | Private transfers | `PrivateAccount`, `PrivatePayment` |
+| `obelysk::fhe` | Homomorphic encryption | `FheEncryptor`, `EncryptedValue` |
 
 ---
 
@@ -550,6 +827,44 @@ bitsage-proof verify-quote --quote quote.bin
 
 - `POST /workers/register` - Register GPU worker
 - `GET /workers` - List workers with GPU info
+
+---
+
+## Deployed Contracts (Starknet Sepolia)
+
+### Core Infrastructure
+
+| Contract | Address | Purpose |
+|----------|---------|---------|
+| **StwoVerifier** | `0x575968af96f814da648442daf1b8a09d43b650c06986e17b2bab7719418ddfb` | Circle STARK proof verification |
+| **ProofGatedPayment** | `0x7e74d191b1cca7cac00adc03bc64eaa6236b81001f50c61d1d70ec4bfde8af0` | Payment gating for proofs |
+| **PaymentRouter** | `0x001a7c5974eaa8a4d8c145765e507f73d56ee1d05419cbcffcae79ed3cd50f4d` | Fee distribution (80/18/2) |
+| **ProverStaking** | `0x3287a0af5ab2d74fbf968204ce2291adde008d645d42bc363cb741ebfa941b` | Worker stake management |
+
+### Token & Oracle
+
+| Contract | Address | Purpose |
+|----------|---------|---------|
+| **SAGE Token** | `0x072349097c8a802e7f66dc96b95aca84e4d78ddad22014904076c76293a99850` | Native token |
+| **OracleWrapper** | `0x4d86bb472cb462a45d68a705a798b5e419359a5758d84b24af4bbe5441b6e5a` | Price feeds (w/ fallback) |
+| **Faucet** | `0x62d3231450645503345e2e022b60a96aceff73898d26668f3389547a61471d3` | Testnet token faucet |
+
+### External Tokens (OTC Config)
+
+| Token | Address | Source |
+|-------|---------|--------|
+| **USDC** | `0x053b40a647cedfca6ca84f542a0fe36736031905a9639a7f19a3c1e66bfd5080` | Bridged |
+| **STRK** | `0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d` | Native |
+| **WBTC** | `0x00452bd5c0512a61df7c7be8cfea5e4f893cb40e126bdc40aee6054db955129e` | StarkGate |
+
+### Fee Distribution Model
+
+```
+Payment Flow (pay_with_sage):
+├── Worker:   80% → Direct SAGE transfer
+├── Treasury: 18% → Protocol development
+└── Stakers:   2% → Staking rewards pool
+```
 
 ---
 

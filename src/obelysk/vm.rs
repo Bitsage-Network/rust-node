@@ -286,7 +286,7 @@ impl ObelyskVM {
             self.step()?;
             
             // Safety check: prevent infinite loops
-            if self.cycle > 1_000_000 {
+            if self.cycle > 4_000_000 {
                 return Err(VMError::CycleLimitExceeded);
             }
         }

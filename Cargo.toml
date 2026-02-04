@@ -45,14 +45,16 @@ p256 = { version = "0.13", features = ["ecdsa", "sha256"] }  # ECDSA P-256 for T
 # Note: Stwo is StarkWare's next-gen prover using Circle STARKs over Mersenne-31
 # VENDORED: Using local copy in ../libs/stwo to apply patches for latest nightly compatibility
 # The gpu feature provides kernel source, cuda-runtime enables actual CUDA execution
-stwo-prover = { path = "../libs/stwo/crates/stwo", package = "stwo", features = ["prover", "parallel", "gpu", "cuda-runtime"] }
-stwo-constraint-framework = { path = "../libs/stwo/crates/constraint-framework", features = ["prover", "parallel", "gpu", "cuda-runtime"] }
+stwo-prover = { path = "../libs/stwo/crates/stwo", package = "stwo", features = ["prover", "parallel"] }
+stwo-constraint-framework = { path = "../libs/stwo/crates/constraint-framework", features = ["prover", "parallel"] }
+stwo-examples = { path = "../libs/stwo/crates/examples", features = ["parallel"] }
+# GPU features activated via: cargo build --features cuda
 itertools = "0.12"  # Used for polynomial operations and by Stwo
 num-traits = "0.2"  # Numerical traits
 
 # ===== GPU Acceleration (Optional) =====
 # CUDA support for 50-100x speedup on proof generation
-cudarc = { version = "0.9", optional = true, features = ["driver", "nvrtc"] }
+cudarc = { version = "0.11", optional = true, features = ["driver", "nvrtc"] }
 half = { version = "2.3", optional = true }  # f16 support for GPU
 nvml-wrapper = { version = "0.10", optional = true }  # NVIDIA Management Library for GPU metrics
 
@@ -74,6 +76,7 @@ starknet-contract = "0.7"
 starknet-core = "0.7"
 starknet-crypto = "0.6"
 starknet-curve = "0.4"    # For EC point operations (ProjectivePoint, GENERATOR)
+starknet-ff = { version = "0.3.7", default-features = false, features = ["serde"] }
 
 # ===== Utilities =====
 chrono = { version = "=0.4.34", features = ["serde"] }
@@ -183,7 +186,7 @@ harness = false
 default = ["gpu-metrics"]
 # GPU acceleration with CUDA (requires NVIDIA GPU)
 # Usage: cargo build --features cuda
-cuda = ["cudarc", "half"]
+cuda = ["cudarc", "half", "stwo-prover/gpu", "stwo-prover/cuda-runtime", "stwo-constraint-framework/gpu", "stwo-constraint-framework/cuda-runtime"]
 # GPU metrics monitoring with NVML (requires NVIDIA GPU)
 gpu-metrics = ["nvml-wrapper"]
 # GPU acceleration with ROCm (future, for AMD GPUs)
@@ -199,10 +202,6 @@ redis-cache = ["redis"]
 fhe = ["tfhe"]
 
 [[bin]]
-name = "sage-worker-legacy"
-path = "src/bin/worker.rs"
-
-[[bin]]
 name = "sage-coordinator"
 path = "src/bin/unified_coordinator.rs"
 
@@ -213,6 +212,26 @@ path = "src/bin/proof_cli.rs"
 [[bin]]
 name = "sage-worker"
 path = "src/bin/sage_worker.rs"
+
+[[bin]]
+name = "bench_poseidon_vs_blake"
+path = "src/bin/bench_poseidon_vs_blake.rs"
+
+[[bin]]
+name = "test_poseidon_gpu"
+path = "src/bin/test_poseidon_gpu.rs"
+
+[[bin]]
+name = "bench_gpu_vs_cpu"
+path = "src/bin/bench_gpu_vs_cpu.rs"
+
+[[bin]]
+name = "benchmark_proof_pipeline"
+path = "src/bin/benchmark_proof_pipeline.rs"
+
+[[bin]]
+name = "benchmark_poseidon_gpu"
+path = "src/bin/benchmark_poseidon_gpu.rs"
 
 # [patch.crates-io]
 # No patches needed when using stable Rust

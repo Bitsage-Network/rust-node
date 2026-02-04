@@ -75,6 +75,7 @@ impl Default for ObelyskFheConfig {
 }
 
 /// Main entry point for FHE operations in BitSage
+#[allow(dead_code)]
 pub struct ObelyskFhe {
     config: ObelyskFheConfig,
     key_manager: FheKeyManager,

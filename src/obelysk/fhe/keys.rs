@@ -6,9 +6,8 @@
 // - Public key extraction (for encryption-only)
 // - Secure key serialization and deserialization
 
-use super::types::{FheConfig, FheError, KeyType, SerializedKey};
+use super::types::{FheError, KeyType, SerializedKey};
 use sha2::{Digest, Sha256};
-use std::sync::Arc;
 
 #[cfg(feature = "fhe")]
 use tfhe::{
@@ -270,6 +269,7 @@ impl FhePublicKey {
 }
 
 /// Key manager for FHE operations
+#[allow(dead_code)]
 pub struct FheKeyManager {
     config: KeyConfig,
 }

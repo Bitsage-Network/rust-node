@@ -523,6 +523,7 @@ const WORKER_ACCOUNT_CLASS_HASH: &str = "0x0"; // TODO: Set after deployment
 const FAUCET_ADDRESS_SEPOLIA: &str = "0x7d1a6c242a4f0573696e117790f431fd60518a000b85fe5ee507456049ffc53";
 
 // SAGE token address (Sepolia)
+#[allow(dead_code)]
 const SAGE_TOKEN_SEPOLIA: &str = "0x072349097c8a802e7f66dc96b95aca84e4d78ddad22014904076c76293a99850";
 
 /// Deploy a new worker account (gasless)
@@ -611,7 +612,7 @@ async fn deploy_worker_account(
     let account_address = format!("0x{}", &address_hex[2..66]);
 
     // Create relayer account for deployment
-    let relayer = state.create_account().map_err(|e| {
+    let _relayer = state.create_account().map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {

@@ -538,7 +538,7 @@ impl ComputeInvoice {
     }
 
     /// Mark as failed
-    pub fn mark_failed(&mut self, reason: &str) {
+    pub fn mark_failed(&mut self, _reason: &str) {
         self.status = InvoiceStatus::Failed;
         self.completed_at = Some(Utc::now());
     }

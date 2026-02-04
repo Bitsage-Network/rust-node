@@ -44,6 +44,7 @@ fn bit_reverse(mut x: usize, log_n: usize) -> usize {
 const GPU_FFT_THRESHOLD: usize = 1 << 14; // 16K elements
 
 /// GPU FFT executor
+#[allow(dead_code)]
 #[cfg(feature = "cuda")]
 pub struct GpuFft {
     device: std::sync::Arc<CudaDevice>,
@@ -384,6 +385,7 @@ impl GpuFft {
 }
 
 /// Standalone CPU FFT implementation for use when CUDA is not available
+#[allow(dead_code)]
 fn cpu_fft_impl(input: &[M31], twiddles: &[M31]) -> Vec<M31> {
     let n = input.len();
     if n <= 1 {
@@ -439,6 +441,7 @@ fn cpu_fft_impl(input: &[M31], twiddles: &[M31]) -> Vec<M31> {
 }
 
 /// Standalone CPU inverse FFT implementation
+#[allow(dead_code)]
 fn cpu_ifft_impl(input: &[M31], itwiddles: &[M31]) -> Vec<M31> {
     let n = input.len();
     if n <= 1 {

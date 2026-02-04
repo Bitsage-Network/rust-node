@@ -219,12 +219,40 @@ impl PrivacyRouterClient {
         let payment_router_address = FieldElement::from_hex_be(&contracts.payment_router)
             .map_err(|e| anyhow!("Invalid payment router address: {}", e))?;
 
-        let payment_router = PaymentRouterClient::new(
+        // Use deployer account for on-chain transactions (it's actually deployed on Starknet).
+        // Workers may not have deployed accounts, so the deployer submits proofs on their behalf.
+        let (tx_pk, tx_account) = match (
+            std::env::var("SIGNER_PRIVATE_KEY").ok().filter(|s| !s.is_empty()),
+            std::env::var("DEPLOYER_ADDRESS").ok().filter(|s| !s.is_empty()),
+        ) {
+            (Some(pk), Some(addr)) => {
+                let deployer_fe = FieldElement::from_hex_be(&addr)
+                    .map_err(|e| anyhow!("Invalid DEPLOYER_ADDRESS: {}", e))?;
+                info!("💳 PaymentRouter: Using deployer account {:#018x} for on-chain proof submissions", deployer_fe);
+                (pk, deployer_fe)
+            }
+            _ => {
+                info!("💳 PaymentRouter: Using worker account for on-chain proof submissions");
+                (private_key.to_string(), account_address)
+            }
+        };
+
+        let mut payment_router = PaymentRouterClient::new(
             rpc_url,
             payment_router_address,
-            private_key,
-            account_address,
+            &tx_pk,
+            tx_account,
         ).await?;
+
+        // Set paymaster for gasless V3 proof submissions
+        if let Ok(paymaster_str) = std::env::var("PAYMASTER_ADDRESS") {
+            if !paymaster_str.is_empty() && paymaster_str != "0x0" {
+                if let Ok(paymaster_felt) = FieldElement::from_hex_be(&paymaster_str) {
+                    payment_router.set_paymaster(paymaster_felt);
+                    info!("💳 PaymentRouter: V3 paymaster configured for gasless proof submission");
+                }
+            }
+        }
 
         client.payment_router = Some(Arc::new(payment_router));
 

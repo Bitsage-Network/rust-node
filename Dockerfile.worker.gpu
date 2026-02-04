@@ -1,77 +1,121 @@
 # =============================================================================
-# BitSage GPU Worker - Docker Image with NVIDIA CUDA Support
+# BitSage GPU Worker - Production Docker Image
 # =============================================================================
-# Usage:
-#   docker build -t bitsage/worker:gpu -f Dockerfile.worker.gpu .
-#   docker run --gpus all -e COORDINATOR_URL=... -e WALLET_ADDRESS=... bitsage/worker:gpu
+#
+# One-command deployment:
+#   docker compose -f docker-compose.worker.yml up
+#
+# Features:
+#   - NVIDIA CUDA 12.4 runtime
+#   - GPU-accelerated STWO proving (50-174x speedup)
+#   - Auto wallet generation (account abstraction)
+#   - Auto faucet claim (testnet)
+#   - Auto coordinator registration
+#
 # =============================================================================
 
-# Build stage
-FROM rust:1.75-bookworm AS builder
-
-WORKDIR /app
+# -----------------------------------------------------------------------------
+# Stage 1: Build
+# -----------------------------------------------------------------------------
+FROM rust:1.77-bookworm AS builder
 
 # Install build dependencies
 RUN apt-get update && apt-get install -y \
     build-essential \
     pkg-config \
     libssl-dev \
+    libpq-dev \
+    clang \
+    libclang-dev \
     protobuf-compiler \
+    cmake \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy manifests
+WORKDIR /build
+
+# Copy Cargo files first (for caching)
 COPY Cargo.toml Cargo.lock ./
+COPY ../libs ./libs
+
+# Create dummy src for dependency caching
+RUN mkdir -p src/bin && \
+    echo "fn main() {}" > src/bin/sage_worker.rs && \
+    echo "pub fn dummy() {}" > src/lib.rs
+
+# Build dependencies (cached layer)
+RUN cargo build --release --bin sage-worker 2>/dev/null || true
+
+# Copy actual source
 COPY src ./src
 COPY migrations ./migrations
+COPY config ./config
 
-# Build release binary
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/app/target \
-    cargo build --release --bin worker && \
-    cp target/release/worker /worker
+# Build the real binary
+RUN cargo build --release --bin sage-worker && \
+    cp target/release/sage-worker /sage-worker && \
+    strip /sage-worker
 
-# Runtime stage with CUDA
+# Also build proof CLI
+RUN cargo build --release --bin bitsage-proof && \
+    cp target/release/bitsage-proof /bitsage-proof && \
+    strip /bitsage-proof
+
+# -----------------------------------------------------------------------------
+# Stage 2: Runtime with CUDA
+# -----------------------------------------------------------------------------
 FROM nvidia/cuda:12.4-runtime-ubuntu22.04
 
 # Install runtime dependencies
 RUN apt-get update && apt-get install -y \
     ca-certificates \
     libssl3 \
+    libpq5 \
+    curl \
+    jq \
+    openssl \
     && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user
-RUN useradd -m -s /bin/bash bitsage
+RUN useradd -m -s /bin/bash -u 1000 bitsage
 
-# Copy binary from builder
-COPY --from=builder /worker /usr/local/bin/bitsage-worker
+# Copy binaries
+COPY --from=builder /sage-worker /usr/local/bin/sage-worker
+COPY --from=builder /bitsage-proof /usr/local/bin/bitsage-proof
 
-# Create config directory
-RUN mkdir -p /etc/bitsage /var/lib/bitsage && \
-    chown -R bitsage:bitsage /etc/bitsage /var/lib/bitsage
+# Copy entrypoint script
+COPY scripts/docker-entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
 
-# Default configuration
-COPY config/worker.toml /etc/bitsage/worker.toml
+# Create directories
+RUN mkdir -p /app/data /app/keys /app/config && \
+    chown -R bitsage:bitsage /app
 
-# Environment
-ENV RUST_LOG=info
-ENV COORDINATOR_URL=https://coordinator.bitsage.network
-ENV WALLET_ADDRESS=
-ENV WORKER_ID=
-ENV ENABLE_GPU=true
-ENV ENABLE_MULTI_GPU=false
+# Copy default config
+COPY config/worker.toml /app/config/worker.toml 2>/dev/null || true
+
+# Environment defaults
+ENV RUST_LOG=info \
+    BITSAGE_NETWORK=sepolia \
+    COORDINATOR_URL=https://coordinator.bitsage.network \
+    STARKNET_RPC_URL=https://rpc.starknet-testnet.lava.build \
+    AUTO_SETUP=true \
+    AUTO_WALLET=true \
+    AUTO_FAUCET=true \
+    AUTO_REGISTER=true \
+    GPU_ENABLED=true \
+    CONFIG_DIR=/app/data \
+    KEYS_DIR=/app/keys
 
 # Expose ports
-# 8081 - HTTP API
-# 4001 - P2P
-EXPOSE 8081 4001
+EXPOSE 8081 9001
 
 # Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
     CMD curl -f http://localhost:8081/health || exit 1
 
-# Switch to non-root user
+# Run as non-root
 USER bitsage
+WORKDIR /app
 
-# Entry point
-ENTRYPOINT ["bitsage-worker"]
-CMD ["--config", "/etc/bitsage/worker.toml"]
+# Entrypoint handles all auto-setup
+ENTRYPOINT ["/entrypoint.sh"]

@@ -31,6 +31,8 @@ use crate::coordinator::blockchain_bridge::{
 use crate::coordinator::mining_rewards::MiningRewardsManager;
 use crate::obelysk::starknet::{GpuTier, StakeStatus};
 use crate::obelysk::payment_client::PaymentRouterClient;
+use crate::coordinator::proof_verification::ProofVerificationCoordinator;
+use crate::obelysk::proof_compression::ProofCompressor;
 
 /// Job processor events
 #[derive(Debug, Clone)]
@@ -190,6 +192,9 @@ pub struct JobProcessor {
     // Payment client for proof-gated payments
     payment_client: Option<Arc<PaymentRouterClient>>,
 
+    // Proof verification coordinator for batched on-chain proof submission
+    proof_verification_coordinator: Option<Arc<ProofVerificationCoordinator>>,
+
     // Batch queues for blockchain submissions
     pending_job_submissions: Arc<Mutex<Vec<PendingSubmission>>>,
     pending_result_submissions: Arc<Mutex<Vec<PendingResult>>>,
@@ -240,6 +245,7 @@ impl JobProcessor {
             batch_config: BatchConfig::default(),
             mining_rewards: None,
             payment_client: None,
+            proof_verification_coordinator: None,
             pending_job_submissions: Arc::new(Mutex::new(Vec::new())),
             pending_result_submissions: Arc::new(Mutex::new(Vec::new())),
             pending_reward_distributions: Arc::new(Mutex::new(Vec::new())),
@@ -279,6 +285,12 @@ impl JobProcessor {
     pub fn set_payment_client(&mut self, payment_client: Arc<PaymentRouterClient>) {
         self.payment_client = Some(payment_client);
         info!("Payment client configured for proof-gated payments");
+    }
+
+    /// Set the proof verification coordinator for batched on-chain proof submission
+    pub fn set_proof_verification_coordinator(&mut self, coordinator: Arc<ProofVerificationCoordinator>) {
+        self.proof_verification_coordinator = Some(coordinator);
+        info!("Proof verification coordinator configured for batched on-chain submission");
     }
 
     /// Create with worker manager
@@ -613,6 +625,62 @@ impl JobProcessor {
                         }
                     }
                 }
+            }
+        }
+
+        // Queue proof for on-chain verification via the batched proof coordinator
+        if let Some(ref proof_coordinator) = self.proof_verification_coordinator {
+            // Reconstruct StarkProof from compressed_proof (real proof data)
+            // or fall back to proof_hash for minimal proof construction
+            let proof_opt: Option<crate::obelysk::prover::StarkProof> =
+                if let Some(compressed) = &result.compressed_proof {
+                    match ProofCompressor::decompress(compressed) {
+                        Ok(proof_bytes) => {
+                            match bincode::deserialize::<crate::obelysk::prover::StarkProof>(&proof_bytes) {
+                                Ok(proof) => Some(proof),
+                                Err(e) => {
+                                    warn!("Failed to deserialize proof for job {}: {}", job_id, e);
+                                    None
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            warn!("Failed to decompress proof for job {}: {}", job_id, e);
+                            None
+                        }
+                    }
+                } else {
+                    None
+                };
+
+            if let Some(proof) = proof_opt {
+                let io_commitment = result.proof_commitment.unwrap_or_else(|| {
+                    proof.io_commitment.unwrap_or([0u8; 32])
+                });
+
+                let worker_id_str = worker_id
+                    .map(|w| w.to_string())
+                    .unwrap_or_else(|| "unknown".to_string());
+
+                match proof_coordinator
+                    .submit_proof(&job_id.to_string(), proof, io_commitment, &worker_id_str)
+                    .await
+                {
+                    Ok(proof_id) => {
+                        info!(
+                            "Proof {} queued for batched on-chain verification (job {})",
+                            proof_id, job_id
+                        );
+                    }
+                    Err(e) => {
+                        error!(
+                            "Failed to queue proof for on-chain verification (job {}): {}",
+                            job_id, e
+                        );
+                    }
+                }
+            } else {
+                debug!("No decompressible proof in job result, skipping proof verification for job {}", job_id);
             }
         }
 

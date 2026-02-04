@@ -499,19 +499,19 @@ impl NetworkContracts {
         Self {
             // Core contracts
             sage_token: "0x04321b7282ae6aa354988eed57f2ff851314af8524de8b1f681a128003cc4ea5".to_string(),
-            prover_staking: "0x0165fe12b09dd5e6b692cbf59f9c3ea0af30a2616f248c150357b07b967039da".to_string(),
+            prover_staking: "0x0342c77730637af3827840fc30d2094f87809b5aac0a8d75a7793df57c84e835".to_string(),
             reputation_manager: "0x019c05a8f648c835e66e98c700b628d14ed4249e5e60e32c7f779d38da90e9d9".to_string(),
             job_manager: "0x0534a8f5cc1399b368b5be211df25e370f4a74d3d5b2d040f9d5b69981b069ed".to_string(),
             cdc_pool: "0x012c8ab3fad97954eafbf99ab9d76a9c8e85dd0f6b38139d12d3c5e3f14f950b".to_string(),
-            payment_router: "0x006bfcc028c9976c18f8e22c2472df36d8d7848e7b55b814a5f15d339b97e1fe".to_string(),
+            payment_router: "0x3a3d409738734ae42365a20ae217687991cbba9db743c30d87f6a6dbaf523c6".to_string(),
             faucet: Some("0x07943ad334da99ab3dd138ff14d2045a7d962f1a426a4dd909fda026f37acf9f".to_string()),
 
             // Obelysk privacy/TEE contracts
-            optimistic_tee: "0x04ea542ccad82e75681f438e1667baaeaca5285791dc2449e0f9f3df3e998b49".to_string(),
+            optimistic_tee: "0x015254251ece80bcdba0be2b2d8956c116866b4fc34f42263b61bf409b6681b9".to_string(),
             proof_verifier: "0x06c27c897108f20afbd045e561e465e0843d85e84fe7dfd55f910ee75df6385a".to_string(),
             validator_registry: "0x0252d13615dd74b70c9d653250fe8baa66130f683783c542c582dbc9709ee2cd".to_string(),
             privacy_router: "0x0051e114ec3d524f203900c78e5217f23de51e29d6a6ecabb6dc92fb8ccca6e0".to_string(),
-            stwo_verifier: "0x00555555e154e28a596a59f98f857ec85f6dc7038f8d18dd1a08364d8e76dd47".to_string(),
+            stwo_verifier: "0x02c7fd025e5c3652ae46d2fcd5f4b83aa8001160f1920c32535e29d14dc18c6e".to_string(),
             prover_registry: "0x005d46ac3e32242c2681a5171551abb773464812b77eec7e52d60ec612e9bf3a".to_string(),
             worker_staking: "0x064df40ab00145394de98676d0934e49c0f436c4589d4d35ffa720e45c3de7e7".to_string(),
             worker_privacy_helper: "0x06219e1e40b7a07c0a07fa38e4c19b661943d2f410839ddfe5e3bf7376206e47".to_string(),
@@ -519,7 +519,7 @@ impl NetworkContracts {
             // Economics contracts
             collateral: "0x01384e775b5b19bd8756d5a77c7d9e99a739b35523915a1ad0b4c3c4d0b00f7c".to_string(),
             escrow: "0x045aa77cfaf3a902d879f3a26165922a423f5902c9d1647dbfe0274328930d4f".to_string(),
-            fee_manager: "0x0762a276d38f66b6fe8cf3eb140247624f02bb87e32917dffbad197c73f3fb56".to_string(),
+            fee_manager: "0x02dd21bf676da2b1e553f7bfcbce6852d15c629ce36bee72e21a3638dc8bc750".to_string(),
             reward_vesting: "0x07bb26a7d6d97e8292af9bb14244afbaaf2d722140111b8cced185bbde1a026d".to_string(),
 
             // Game mechanics contracts
@@ -528,7 +528,7 @@ impl NetworkContracts {
 
             // Payment contracts
             metered_billing: "0x058b10cf0a1369fca1a90192d5b58a757a30a93af2ce5c3af0c16001fb57bb4b".to_string(),
-            proof_gated_payment: "0x06f153aff8835202fb3183ddf2edde40b1ca0360cdf20611649f05a16ca04cc7".to_string(),
+            proof_gated_payment: "0x01ea5ee7311c2f498232c19f1296d025e355eb9f4ce786c8ebdb1228fcd73194".to_string(),
 
             // Oracle integration
             oracle_wrapper: "0x0020ba92a5df4c7719decbc8e43d5475059311b0b8bb2cdd623f5f29d61f0f2d".to_string(),

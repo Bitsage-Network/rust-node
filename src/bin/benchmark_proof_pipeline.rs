@@ -52,7 +52,8 @@ fn load_contracts() -> PipelineContracts {
         stwo_verifier: FieldElement::from_hex_be(&load_env("STWO_VERIFIER_ADDRESS")).unwrap(),
         proof_gated_payment: FieldElement::from_hex_be(&load_env("PROOF_GATED_PAYMENT_ADDRESS")).unwrap(),
         payment_router: FieldElement::from_hex_be(&load_env("PAYMENT_ROUTER_ADDRESS")).unwrap(),
-        // Skip OptimisticTEE call — WorkerStaking lacks is_eligible() entrypoint
+        // OptimisticTEE requires worker to be staked in ProverStaking
+        // Disabled until deployer is registered as staked worker
         optimistic_tee: FieldElement::ZERO,
         prover_staking: FieldElement::from_hex_be(&load_env("WORKER_STAKING_ADDRESS")).unwrap(),
     }
@@ -86,9 +87,9 @@ struct BenchResult {
 /// Build a real neural network inference program for the ObelyskVM.
 /// Architecture: 4 inputs → 8 hidden (ReLU) → 3 outputs (classification)
 /// Returns (program, input_features) for the VM.
-fn build_ml_inference_program() -> (Vec<Instruction>, Vec<M31>) {
+fn build_ml_inference_program(job_id: u128) -> (Vec<Instruction>, Vec<M31>) {
     let input_features = vec![
-        M31::new(128),  // horizontal edge density
+        M31::new(128 + (job_id % 100) as u32),  // horizontal edge density (varied per job)
         M31::new(64),   // vertical edge density
         M31::new(200),  // center pixel intensity
         M31::new(32),   // corner density
@@ -257,11 +258,10 @@ fn generate_benchmark_program(target_steps: usize, job_id: u128) -> Vec<Instruct
 /// (name, trace_size, use_gpu, is_ml_inference)
 fn test_matrix() -> Vec<(&'static str, usize, bool, bool)> {
     vec![
-        // Real ML inference (small trace from actual neural network)
-        ("ML_GPU",       0, true,  true),     // Real 4→8→3 neural network
-        ("ML_CPU",       0, false, true),      // Same inference, CPU prover
-
-        // Scaled workloads — GPU vs CPU
+        // ML inference (real neural network)
+        ("ML_GPU",       0,       true,  true),
+        ("ML_CPU",       0,       false, true),
+        // Synthetic workloads: GPU vs CPU at multiple sizes
         ("GPU_1K",       1024,    true,  false),
         ("CPU_1K",       1024,    false, false),
         ("GPU_64K",      65536,   true,  false),
@@ -431,7 +431,7 @@ async fn run_benchmark(
     let mut vm = ObelyskVM::new();
 
     if is_ml {
-        let (program, _inputs) = build_ml_inference_program();
+        let (program, _inputs) = build_ml_inference_program(job_id);
         println!("  ML inference: 4→8→3 neural network ({} instructions)", program.len());
         vm.load_program(program);
     } else {

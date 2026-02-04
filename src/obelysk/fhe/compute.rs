@@ -8,10 +8,9 @@
 //
 // All operations are performed on ciphertexts without decryption
 
-use super::encryption::{EncryptedValue, EncryptedU8, EncryptedU16, EncryptedU32, EncryptedU64};
+use super::encryption::EncryptedValue;
 use super::keys::FheServerKey;
 use super::types::{FheError, ComputeResultWithProof, FheIOCommitment};
-use std::sync::Arc;
 use sha2::{Sha256, Digest};
 
 #[cfg(feature = "fhe")]

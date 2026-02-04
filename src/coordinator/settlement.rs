@@ -101,6 +101,7 @@ pub enum SettlementStatus {
 // =============================================================================
 
 /// On-chain settlement service
+#[allow(dead_code)]
 pub struct SettlementService {
     /// JSON-RPC provider
     provider: Arc<JsonRpcClient<HttpTransport>>,

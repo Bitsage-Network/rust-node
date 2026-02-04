@@ -150,10 +150,33 @@ pub fn build_proof_multicall(
 
     let mut calls = vec![call_1, call_2];
 
-    // Call 3: OptimisticTEE.submit_result (skip if contract not deployed)
+    // Call 3: PaymentRouter.register_job — registers job/worker mapping
+    // REQUIRES: PaymentRouter.set_authorized_submitter(deployer_address) to be called first
+    if contracts.payment_router != FieldElement::ZERO {
+        let call_3 = build_register_job_call(
+            contracts.payment_router,
+            job_id,
+            worker_address,
+            privacy_enabled,
+        )?;
+        calls.push(call_3);
+
+        // Call 4: PaymentRouter.pay_with_sage — triggers FULL fee distribution cascade
+        // 80% worker, 20% protocol (70% burn, 20% treasury, 10% stakers)
+        // This produces 10+ events from token transfers, burns, etc.
+        let call_4 = build_pay_with_sage_call(
+            contracts.payment_router,
+            sage_amount_low,  // 1 SAGE
+            job_id,
+        )?;
+        calls.push(call_4);
+    }
+
+    // Call 5: OptimisticTEE.submit_result (skip if contract not deployed)
+    // This adds GPU attestation to the proof for TEE-verified submissions
     if contracts.optimistic_tee != FieldElement::ZERO {
         let result_hash = poseidon_hash_many_fe(&[proof_hash, expected_io_hash]);
-        let call_3 = build_submit_result_call(
+        let call_5 = build_submit_result_call(
             contracts.optimistic_tee,
             job_id,
             worker_address,
@@ -161,11 +184,8 @@ pub fn build_proof_multicall(
             attestation.enclave_measurement,
             attestation.quote_hash,
         )?;
-        calls.push(call_3);
+        calls.push(call_5);
     }
-
-    // Call 4: ProverStaking — skipped; deployed contract doesn't have record_success.
-    // Staking reputation is updated via update_reputation() by the job manager.
 
     debug!(
         "Deep multicall built: {} calls, proof_hash={:#066x}, io_hash={:#066x}",
@@ -177,13 +197,14 @@ pub fn build_proof_multicall(
         packed_proof: packed,
         job_id,
         proof_hash,
-        expected_events: 15,        // JobPaymentRegistered, ProofSubmitted, ProofVerified,
-                                     // ProofLinkedToJob, ProofVerifiedPaymentReady,
-                                     // PaymentReleased, FeesDistributed, WorkerPaid,
-                                     // ResultSubmitted, ProofSuccessRecorded,
-                                     // TokenBurned, + 3-4 ERC20 Transfer events
-        expected_internal_calls: 25, // verify_proof internals + callback chain + fee distribution
-                                     // + TEE result submission + staking record
+        expected_events: 12,         // JobPaymentRegistered, ProofSubmitted, ProofVerified,
+                                     // ProofLinkedToJob, JobRegistered, PaymentExecuted,
+                                     // WorkerPaid, SAGE.Transfer (worker 80%),
+                                     // SAGE.Transfer (burn 14%), SAGE.Transfer (treasury 4%),
+                                     // SAGE.Transfer (stakers 2%)
+        expected_internal_calls: 10, // __execute__ + register_job_payment + submit_and_verify
+                                     // + register_job + pay_with_sage + _distribute_fees
+                                     // + SAGE transfers + oracle.get_price
     })
 }
 
@@ -371,6 +392,30 @@ fn build_register_job_call(
     Ok(Call {
         to: payment_router,
         selector: get_selector_from_name("register_job")?,
+        calldata,
+    })
+}
+
+/// Build Call: PaymentRouter.pay_with_sage
+/// Triggers full fee distribution: 80% worker, 20% protocol (70% burn, 20% treasury, 10% stakers)
+/// Cairo signature: pay_with_sage(amount: u256, job_id: u256)
+fn build_pay_with_sage_call(
+    payment_router: FieldElement,
+    amount: FieldElement,
+    job_id: u128,
+) -> Result<Call> {
+    let calldata = vec![
+        // amount as u256 (low, high) - amount is already low part, high is 0
+        amount,
+        FieldElement::ZERO,
+        // job_id as u256 (low, high)
+        FieldElement::from(job_id as u64),
+        FieldElement::from((job_id >> 64) as u64),
+    ];
+
+    Ok(Call {
+        to: payment_router,
+        selector: get_selector_from_name("pay_with_sage")?,
         calldata,
     })
 }

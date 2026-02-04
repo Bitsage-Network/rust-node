@@ -620,8 +620,8 @@ impl<T: Serialize + for<'de> Deserialize<'de>> PrivateData<T> {
     /// Commit to blockchain
     pub fn commit_to_chain(
         mut self,
-        block_number: u64,
-        tx_hash: [u8; 32],
+        _block_number: u64,
+        _tx_hash: [u8; 32],
     ) -> Result<Self, PrivacyError> {
         if !self.state.can_transition_to(PrivacyState::Committed) {
             return Err(PrivacyError::InvalidTransition {
@@ -781,6 +781,7 @@ fn aes_gcm_encrypt(
     Ok((ct, tag))
 }
 
+#[allow(dead_code)]
 fn aes_gcm_decrypt(
     ciphertext: &[u8],
     key: &[u8; 32],
@@ -806,6 +807,7 @@ fn aes_gcm_decrypt(
 }
 
 #[cfg(feature = "fhe")]
+#[allow(dead_code)]
 fn fhe_encrypt(
     plaintext: &[u8],
     _fhe_pk: &crate::obelysk::fhe::FhePublicKey,
@@ -815,6 +817,7 @@ fn fhe_encrypt(
 }
 
 #[cfg(not(feature = "fhe"))]
+#[allow(dead_code)]
 fn fhe_encrypt(
     plaintext: &[u8],
     _fhe_pk: &(),
@@ -823,6 +826,7 @@ fn fhe_encrypt(
 }
 
 #[cfg(feature = "tee")]
+#[allow(dead_code)]
 fn is_inside_tee() -> bool {
     // Check for TEE environment
     std::path::Path::new("/dev/sgx_enclave").exists() ||
@@ -831,6 +835,7 @@ fn is_inside_tee() -> bool {
 }
 
 #[cfg(not(feature = "tee"))]
+#[allow(dead_code)]
 fn is_inside_tee() -> bool {
     false
 }

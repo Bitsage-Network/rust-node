@@ -43,6 +43,23 @@ use crate::obelysk::{
     starknet::proof_serializer::Felt252,
 };
 
+/// Data passed to the batch-ready callback, including proofs for multicall building.
+#[derive(Debug, Clone)]
+pub struct BatchReadyData {
+    /// The batch verification result (metadata, job IDs, gas savings)
+    pub result: BatchVerificationResult,
+    /// The original proofs included in this batch (for building multicalls)
+    pub proofs: Vec<PendingProof>,
+}
+
+/// Callback type for when a batch is ready for on-chain submission.
+/// Receives the batch data (result + original proofs) and should submit on-chain.
+pub type BatchReadyCallback = Arc<
+    dyn Fn(BatchReadyData) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>>
+        + Send
+        + Sync,
+>;
+
 /// Configuration for the proof verification coordinator
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProofVerificationConfig {
@@ -178,8 +195,9 @@ pub struct ProofVerificationCoordinator {
     config: ProofVerificationConfig,
     pending_proofs: Arc<Mutex<Vec<PendingProof>>>,
     stats: Arc<RwLock<CoordinatorStats>>,
-    batch_sender: Option<mpsc::Sender<Vec<PendingProof>>>,
+    batch_sender: Arc<Mutex<Option<mpsc::Sender<Vec<PendingProof>>>>>,
     shutdown: Arc<RwLock<bool>>,
+    on_batch_ready: Arc<RwLock<Option<BatchReadyCallback>>>,
 }
 
 impl ProofVerificationCoordinator {
@@ -189,9 +207,16 @@ impl ProofVerificationCoordinator {
             config,
             pending_proofs: Arc::new(Mutex::new(Vec::new())),
             stats: Arc::new(RwLock::new(CoordinatorStats::default())),
-            batch_sender: None,
+            batch_sender: Arc::new(Mutex::new(None)),
             shutdown: Arc::new(RwLock::new(false)),
+            on_batch_ready: Arc::new(RwLock::new(None)),
         }
+    }
+
+    /// Set a callback that fires when a batch has been aggregated and is ready
+    /// for on-chain submission (e.g., building a multicall and executing it).
+    pub async fn set_on_batch_ready(&self, callback: BatchReadyCallback) {
+        *self.on_batch_ready.write().await = Some(callback);
     }
 
     /// Submit a proof for batched verification
@@ -228,7 +253,8 @@ impl ProofVerificationCoordinator {
             // Check if we should trigger aggregation
             if queue.len() >= self.config.min_batch_size {
                 // Trigger batch processing
-                if let Some(sender) = &self.batch_sender {
+                let sender_guard = self.batch_sender.lock().await;
+                if let Some(sender) = sender_guard.as_ref() {
                     let batch: Vec<PendingProof> = queue.drain(..).collect();
                     let _ = sender.send(batch).await;
                 }
@@ -248,6 +274,9 @@ impl ProofVerificationCoordinator {
     pub async fn process_batch(&self, proofs: Vec<PendingProof>) -> Result<BatchVerificationResult> {
         let batch_id = format!("batch-{}", uuid::Uuid::new_v4());
         let proof_count = proofs.len();
+
+        // Clone proofs for the callback (before aggregation consumes them)
+        let proofs_for_callback = proofs.clone();
 
         info!("Processing batch {} with {} proofs", batch_id, proof_count);
 
@@ -269,7 +298,7 @@ impl ProofVerificationCoordinator {
         }
 
         // Aggregate proofs
-        let aggregated = if self.config.enable_recursive_aggregation && proof_count > 4 {
+        let _aggregated = if self.config.enable_recursive_aggregation && proof_count > 4 {
             self.aggregate_recursive(&proofs).await?
         } else {
             aggregator.aggregate()?
@@ -308,7 +337,7 @@ impl ProofVerificationCoordinator {
                 + aggregation_time_ms as f64) / stats.total_batches as f64;
         }
 
-        Ok(BatchVerificationResult {
+        let mut batch_result = BatchVerificationResult {
             batch_id,
             proof_count,
             job_ids,
@@ -319,7 +348,29 @@ impl ProofVerificationCoordinator {
             gas_saved_percent,
             aggregation_time_ms,
             submission_time_ms: 0,
-        })
+        };
+
+        // Invoke the on_batch_ready callback for on-chain submission
+        if let Some(callback) = self.on_batch_ready.read().await.as_ref() {
+            let submit_start = Instant::now();
+            let batch_data = BatchReadyData {
+                result: batch_result.clone(),
+                proofs: proofs_for_callback,
+            };
+            match callback(batch_data).await {
+                Ok(()) => {
+                    batch_result.submission_time_ms = submit_start.elapsed().as_millis() as u64;
+                    info!("Batch {} submitted on-chain in {}ms", batch_result.batch_id, batch_result.submission_time_ms);
+                }
+                Err(e) => {
+                    error!("Failed to submit batch {} on-chain: {}", batch_result.batch_id, e);
+                    let mut stats = self.stats.write().await;
+                    stats.failed_submissions += 1;
+                }
+            }
+        }
+
+        Ok(batch_result)
     }
 
     /// Aggregate proofs using recursive STARK aggregation
@@ -369,13 +420,14 @@ impl ProofVerificationCoordinator {
     }
 
     /// Start the background batch processor
-    pub async fn start_background_processor(&mut self) {
+    pub async fn start_background_processor(&self) {
         let (tx, mut rx) = mpsc::channel::<Vec<PendingProof>>(100);
-        self.batch_sender = Some(tx);
+        *self.batch_sender.lock().await = Some(tx);
 
         let pending_proofs = Arc::clone(&self.pending_proofs);
         let stats = Arc::clone(&self.stats);
         let shutdown = Arc::clone(&self.shutdown);
+        let on_batch_ready = Arc::clone(&self.on_batch_ready);
         let config = self.config.clone();
         let timeout = Duration::from_secs(config.batch_timeout_secs);
 
@@ -387,8 +439,9 @@ impl ProofVerificationCoordinator {
                             config: config.clone(),
                             pending_proofs: Arc::clone(&pending_proofs),
                             stats: Arc::clone(&stats),
-                            batch_sender: None,
+                            batch_sender: Arc::new(Mutex::new(None)),
                             shutdown: Arc::clone(&shutdown),
+                            on_batch_ready: Arc::clone(&on_batch_ready),
                         };
                         if let Err(e) = coordinator.process_batch(batch).await {
                             error!("Batch processing failed: {}", e);
@@ -406,8 +459,9 @@ impl ProofVerificationCoordinator {
                                 config: config.clone(),
                                 pending_proofs: Arc::clone(&pending_proofs),
                                 stats: Arc::clone(&stats),
-                                batch_sender: None,
+                                batch_sender: Arc::new(Mutex::new(None)),
                                 shutdown: Arc::clone(&shutdown),
+                                on_batch_ready: Arc::clone(&on_batch_ready),
                             };
                             if let Err(e) = coordinator.process_batch(batch).await {
                                 error!("Timeout batch processing failed: {}", e);

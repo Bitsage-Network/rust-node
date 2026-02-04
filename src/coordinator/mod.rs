@@ -21,6 +21,7 @@ pub mod gpu_pricing;
 pub mod supply_router;
 pub mod settlement;
 pub mod proof_verification; // Batched proof verification coordinator
+pub mod event_handler; // PaymentReleased event reactor
 
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -42,6 +43,9 @@ use crate::network::NetworkCoordinator;
 use crate::storage::Database;
 use crate::types::NodeId;
 use crate::obelysk::starknet::{StakingClientConfig, ReputationClientConfig};
+use crate::coordinator::proof_verification::{ProofVerificationCoordinator, ProofVerificationConfig};
+use crate::coordinator::blockchain_bridge::BlockchainBridge;
+use crate::obelysk::multicall_builder::{build_proof_multicall, generate_gpu_attestation, PipelineContracts};
 
 // Re-export main components
 pub use kafka::{KafkaConfig, KafkaEvent};
@@ -91,6 +95,15 @@ pub struct EnhancedCoordinator {
     starknet_client: Arc<StarknetClient>,
     job_manager_contract: Arc<JobManagerContract>,
     
+    // Proof verification coordinator for batched on-chain proof submission
+    proof_verification_coordinator: Arc<ProofVerificationCoordinator>,
+
+    // PaymentReleased event handler
+    payment_event_handler: Arc<crate::coordinator::event_handler::PaymentEventHandler>,
+
+    // Blockchain bridge for on-chain multicall execution
+    blockchain_bridge: Option<Arc<BlockchainBridge>>,
+
     // Internal state
     running: Arc<RwLock<bool>>,
     node_id: NodeId,
@@ -172,13 +185,45 @@ impl EnhancedCoordinator {
             job_manager_contract.clone(),
         ));
         
-        // Initialize job processor
-        let job_processor = Arc::new(JobProcessor::new(
+        // Initialize proof verification coordinator with testnet-friendly defaults
+        let proof_verification_config = ProofVerificationConfig {
+            min_batch_size: 1, // Testnet: submit immediately
+            max_batch_size: 256,
+            batch_timeout_secs: 30,
+            enable_recursive_aggregation: false, // Keep simple for testnet
+            max_recursion_depth: 4,
+            verifier_contract: config.blockchain.job_manager_address.clone(),
+            auto_submit: true,
+            retry_failed: true,
+            max_retries: 3,
+        };
+        let proof_verification_coordinator = Arc::new(
+            ProofVerificationCoordinator::new(proof_verification_config),
+        );
+
+        // Initialize blockchain bridge for proof multicall execution
+        let blockchain_bridge_opt: Option<Arc<BlockchainBridge>> = None;
+        // Note: blockchain_bridge is configured externally via set_blockchain_bridge()
+        // when account credentials are available
+
+        // Initialize job processor and wire proof coordinator
+        let mut job_processor_inner = JobProcessor::new(
             config.job_processor.clone(),
             database.clone(),
             job_manager_contract.clone(),
-        ));
-        
+        );
+        job_processor_inner.set_proof_verification_coordinator(
+            Arc::clone(&proof_verification_coordinator),
+        );
+        let job_processor = Arc::new(job_processor_inner);
+
+        // Initialize payment event handler for PaymentReleased reactions
+        let payment_event_handler = Arc::new(
+            crate::coordinator::event_handler::PaymentEventHandler::new(
+                Arc::clone(&job_processor),
+            ),
+        );
+
         // Initialize metrics collector
         let metrics_collector = Arc::new(MetricsCollector::new(config.metrics.clone()));
         
@@ -195,6 +240,9 @@ impl EnhancedCoordinator {
             database,
             starknet_client,
             job_manager_contract,
+            proof_verification_coordinator,
+            payment_event_handler,
+            blockchain_bridge: blockchain_bridge_opt,
             running: Arc::new(RwLock::new(false)),
             node_id,
         })
@@ -239,6 +287,9 @@ impl EnhancedCoordinator {
         // Start metrics collection
         self.start_metrics_collection().await?;
 
+        // Start PaymentReleased event polling
+        self.start_payment_event_polling().await?;
+
         info!("Enhanced Coordinator started successfully");
         Ok(())
     }
@@ -257,6 +308,137 @@ impl EnhancedCoordinator {
 
         info!("Enhanced Coordinator stopped");
         Ok(())
+    }
+
+    /// Configure the blockchain bridge for proof multicall execution.
+    ///
+    /// This wires the proof verification coordinator's batch-ready callback
+    /// to build and execute multicalls via the bridge using `build_proof_multicall()`.
+    ///
+    /// `contracts` specifies the on-chain contract addresses for the proof pipeline:
+    /// StwoVerifier, ProofGatedPayment, PaymentRouter, OptimisticTEE, ProverStaking.
+    pub async fn set_blockchain_bridge(
+        &mut self,
+        bridge: Arc<BlockchainBridge>,
+        contracts: PipelineContracts,
+    ) {
+        self.blockchain_bridge = Some(Arc::clone(&bridge));
+
+        // Wire the on_batch_ready callback: for each proof in the batch,
+        // build a multicall via build_proof_multicall() and execute it on-chain.
+        let bridge_for_callback = Arc::clone(&bridge);
+        let contracts_for_callback = contracts;
+        let callback: crate::coordinator::proof_verification::BatchReadyCallback = Arc::new(
+            move |batch_data| {
+                let bridge = Arc::clone(&bridge_for_callback);
+                let contracts = contracts_for_callback.clone();
+                Box::pin(async move {
+                    let batch_result = &batch_data.result;
+                    info!(
+                        "Batch {} ready with {} proofs, building multicalls",
+                        batch_result.batch_id, batch_result.proof_count
+                    );
+
+                    let mut success_count = 0usize;
+                    let mut fail_count = 0usize;
+
+                    for pending_proof in &batch_data.proofs {
+                        // Convert job_id string to u128 for the multicall builder
+                        let job_id_u128: u128 = {
+                            if let Ok(uuid) = uuid::Uuid::parse_str(&pending_proof.job_id) {
+                                u128::from_be_bytes(*uuid.as_bytes())
+                            } else {
+                                // Hash the job_id string to get a deterministic u128
+                                let h = blake3::hash(pending_proof.job_id.as_bytes());
+                                u128::from_be_bytes(h.as_bytes()[..16].try_into().unwrap())
+                            }
+                        };
+
+                        // Generate GPU TEE attestation from proof metadata
+                        let attestation = generate_gpu_attestation(
+                            pending_proof.proof.metadata.generation_time_ms as u64,
+                        );
+
+                        // Worker address as FieldElement (hash the worker_id string)
+                        let worker_fe = {
+                            let h = blake3::hash(pending_proof.worker_id.as_bytes());
+                            starknet::core::types::FieldElement::from_byte_slice_be(&h.as_bytes()[..31])
+                                .unwrap_or(starknet::core::types::FieldElement::ZERO)
+                        };
+
+                        // Build the full proof multicall (4 calls: register_payment,
+                        // submit_and_verify, submit_result, record_proof_success)
+                        match build_proof_multicall(
+                            &pending_proof.proof,
+                            job_id_u128,
+                            worker_fe,
+                            &attestation,
+                            &contracts,
+                            false, // privacy_enabled
+                        ) {
+                            Ok(multicall_result) => {
+                                // Execute the multicall on-chain via the bridge
+                                match bridge.execute_multicall(multicall_result.calls).await {
+                                    Ok(tx_hash) => {
+                                        info!(
+                                            "Proof multicall executed for job {}: tx {:#x} ({} events expected)",
+                                            pending_proof.job_id,
+                                            tx_hash,
+                                            multicall_result.expected_events,
+                                        );
+                                        success_count += 1;
+                                    }
+                                    Err(e) => {
+                                        error!(
+                                            "Failed to execute proof multicall for job {}: {}",
+                                            pending_proof.job_id, e
+                                        );
+                                        fail_count += 1;
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                error!(
+                                    "Failed to build proof multicall for job {}: {}",
+                                    pending_proof.job_id, e
+                                );
+                                fail_count += 1;
+                            }
+                        }
+                    }
+
+                    info!(
+                        "Batch {} complete: {}/{} proofs submitted on-chain, {:.1}% gas savings",
+                        batch_result.batch_id,
+                        success_count,
+                        batch_data.proofs.len(),
+                        batch_result.gas_saved_percent,
+                    );
+
+                    if fail_count > 0 {
+                        warn!("{} proof submissions failed in batch {}", fail_count, batch_result.batch_id);
+                    }
+
+                    Ok(())
+                })
+            },
+        );
+
+        self.proof_verification_coordinator
+            .set_on_batch_ready(callback)
+            .await;
+
+        info!("Blockchain bridge configured for proof multicall execution");
+    }
+
+    /// Get the proof verification coordinator
+    pub fn proof_verification_coordinator(&self) -> Arc<ProofVerificationCoordinator> {
+        Arc::clone(&self.proof_verification_coordinator)
+    }
+
+    /// Get the payment event handler
+    pub fn payment_event_handler(&self) -> Arc<crate::coordinator::event_handler::PaymentEventHandler> {
+        Arc::clone(&self.payment_event_handler)
     }
 
     /// Start all coordinator components
@@ -278,6 +460,9 @@ impl EnhancedCoordinator {
         
         // Start metrics collector
         self.metrics_collector.start().await?;
+
+        // Start proof verification background processor
+        self.proof_verification_coordinator.start_background_processor().await;
 
         Ok(())
     }
@@ -377,6 +562,115 @@ impl EnhancedCoordinator {
             }
         });
 
+        Ok(())
+    }
+
+    /// Start the PaymentReleased event polling loop.
+    ///
+    /// Polls the Starknet provider for PaymentReleased events using
+    /// `get_events_by_key()` and feeds them into `PaymentEventHandler`.
+    async fn start_payment_event_polling(&self) -> Result<()> {
+        let payment_handler = Arc::clone(&self.payment_event_handler);
+        let starknet_client = Arc::clone(&self.starknet_client);
+        let running = Arc::clone(&self.running);
+
+        // PaymentReleased event key — starknet_keccak("PaymentReleased")
+        let payment_released_key = starknet::core::utils::get_selector_from_name("PaymentReleased")
+            .unwrap_or(starknet::core::types::FieldElement::ZERO);
+
+        // The ProofGatedPayment contract address (same as verifier for now)
+        let contract_address = starknet::core::types::FieldElement::from_hex_be(
+            &self.config.blockchain.job_manager_address,
+        ).unwrap_or(starknet::core::types::FieldElement::ZERO);
+
+        tokio::spawn(async move {
+            let mut last_block: u64 = 0;
+            let poll_interval = tokio::time::Duration::from_secs(15);
+            let mut interval = tokio::time::interval(poll_interval);
+
+            loop {
+                interval.tick().await;
+
+                if !*running.read().await {
+                    info!("Payment event polling stopping");
+                    break;
+                }
+
+                // Query latest block number
+                let current_block = match starknet_client.get_block_number().await {
+                    Ok(block) => block,
+                    Err(e) => {
+                        debug!("Failed to get latest block: {}", e);
+                        continue;
+                    }
+                };
+
+                if current_block <= last_block {
+                    continue;
+                }
+
+                // Start from recent blocks on first poll
+                let from_block = if last_block == 0 {
+                    current_block.saturating_sub(10)
+                } else {
+                    last_block + 1
+                };
+
+                match starknet_client.get_events_by_key(
+                    contract_address,
+                    payment_released_key,
+                    from_block,
+                    Some(current_block),
+                ).await {
+                    Ok(events) => {
+                        for event in &events {
+                            // Parse PaymentReleased event:
+                            // keys[0] = event selector, keys[1] = job_id
+                            // data[0] = worker_address, data[1] = amount_low, data[2] = amount_high
+                            if event.keys.len() >= 2 && event.data.len() >= 2 {
+                                // Extract job_id UUID from the 32-byte FieldElement (last 16 bytes)
+                                let fe_bytes = event.keys[1].to_bytes_be();
+                                let uuid_bytes: [u8; 16] = fe_bytes[16..32].try_into().unwrap_or([0; 16]);
+                                let job_id = crate::types::JobId::from(uuid::Uuid::from_bytes(uuid_bytes));
+
+                                let tx_hash = format!("{:#x}", event.transaction_hash);
+                                let worker_address = format!("{:#x}", event.data[0]);
+
+                                let amount_low = {
+                                    let bytes = event.data[1].to_bytes_be();
+                                    u128::from_be_bytes(
+                                        bytes[16..32].try_into().unwrap_or([0; 16])
+                                    )
+                                };
+
+                                if let Err(e) = payment_handler.handle_payment_released(
+                                    job_id,
+                                    &tx_hash,
+                                    &worker_address,
+                                    amount_low,
+                                ).await {
+                                    warn!("Failed to handle PaymentReleased event: {}", e);
+                                }
+                            }
+                        }
+
+                        if !events.is_empty() {
+                            debug!(
+                                "Processed {} PaymentReleased events (blocks {}-{})",
+                                events.len(), from_block, current_block
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        debug!("Failed to query payment events: {}", e);
+                    }
+                }
+
+                last_block = current_block;
+            }
+        });
+
+        info!("PaymentReleased event polling started");
         Ok(())
     }
 
