@@ -170,7 +170,7 @@ fn main() {
         }
         println!("    {:#066x} \\", nonce_felt);
         println!("    --account /tmp/account.json \\");
-        println!("    --private-key 0x02c22c55e9c3aae8293e99a8b5d4ee1862595936f5f15f7d1f6ddcf8b216c44d \\");
+        println!("    --private-key $STARKNET_PRIVATE_KEY \\");
         println!("    --rpc https://rpc.starknet-testnet.lava.build");
     } else {
         println!("\nNo valid nonce found after 10M iterations!");

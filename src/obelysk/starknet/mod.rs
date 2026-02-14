@@ -31,6 +31,9 @@ pub mod fraud_proof_client;
 // Account manager for transaction signing
 pub mod account_manager;
 
+// Admin wallet for faucet social task token distribution
+pub mod admin_wallet;
+
 pub use proof_serializer::{CairoSerializedProof, ProofSerializer};
 pub use starknet_client::{
     StarknetClient, StarknetClientConfig,
@@ -66,6 +69,8 @@ pub use fraud_proof_client::{
 pub use account_manager::{
     AccountManager, AccountManagerConfig, Keystore,
 };
+// Export admin wallet types
+pub use admin_wallet::StarknetAdminWallet;
 // Export verifier optimization types
 pub use verifier_optimization::{
     // Sparse encoding

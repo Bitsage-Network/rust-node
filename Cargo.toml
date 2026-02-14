@@ -48,6 +48,8 @@ p256 = { version = "0.13", features = ["ecdsa", "sha256"] }  # ECDSA P-256 for T
 stwo-prover = { path = "../libs/stwo/crates/stwo", package = "stwo", features = ["prover", "parallel"] }
 stwo-constraint-framework = { path = "../libs/stwo/crates/constraint-framework", features = ["prover", "parallel"] }
 stwo-examples = { path = "../libs/stwo/crates/examples", features = ["parallel"] }
+# ML inference proving via STWO Circle STARKs
+stwo-ml = { path = "../libs/stwo-ml", optional = true }
 # GPU features activated via: cargo build --features cuda
 itertools = "0.12"  # Used for polynomial operations and by Stwo
 num-traits = "0.2"  # Numerical traits
@@ -200,6 +202,10 @@ redis-cache = ["redis"]
 # Fully Homomorphic Encryption for encrypted compute
 # Usage: cargo build --features fhe
 fhe = ["tfhe"]
+# ML inference proving with stwo-ml (ZKML prover)
+# Usage: cargo build --features ml-prove
+ml-prove = ["stwo-ml"]
+ml-prove-gpu = ["ml-prove", "stwo-ml/cuda-runtime"]
 
 [[bin]]
 name = "sage-coordinator"

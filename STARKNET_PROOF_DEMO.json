@@ -1,0 +1,75 @@
+{
+  "title": "BitSage STWO Circle STARK Proof - ML Inference Demo",
+  "description": "Real ZK proof of neural network inference generated using STWO prover",
+  "generated_at": "2026-01-21",
+  
+  "proof_system": {
+    "name": "STWO Circle STARK",
+    "field": "Mersenne-31 (M31 = 2^31 - 1)",
+    "security_bits": 128,
+    "prover_version": "obelysk-stwo-real-0.1.0"
+  },
+  
+  "computation": {
+    "type": "Neural Network Inference",
+    "description": "2-layer feedforward network for classification",
+    "architecture": {
+      "input_layer": 4,
+      "hidden_layer": 8,
+      "output_layer": 3,
+      "activation": "ReLU (implicit in field operations)"
+    },
+    "input_features": [128, 64, 200, 32],
+    "output_logits": [107688, 110720, 104576],
+    "predicted_class": 1,
+    "total_parameters": 67
+  },
+  
+  "proof_metrics": {
+    "trace_length": 11,
+    "trace_width": 26,
+    "proof_size_bytes": 3156,
+    "generation_time_ms": 3,
+    "verification_time_ns": 42,
+    "fri_layers": 5,
+    "query_openings": 3,
+    "serialized_felt252_count": 58
+  },
+  
+  "starknet_submission": {
+    "network": "Sepolia Testnet",
+    "contract": "0x00555555e154e28a596a59f98f857ec85f6dc7038f8d18dd1a08364d8e76dd47",
+    "function": "submit_proof",
+    "public_input_hash": "0x02be3c46e5a06d7b3e438a9d698f4319dc628624a63e484d97f00b92d09edce7",
+    "proof_data_preview": [
+      "0x105e2530ba9ac87b58718b4a22fc4c4b068aebad31b1e668b620d0ec0eb1daa5",
+      "0x000000000000000000000000000000000000000000000000000000800000000b",
+      "0x000000000000000000000000000000000000000000000000000000000000001a",
+      "0x0000000000000000000000000000000000000000000000000000000000000005",
+      "... 54 more elements ..."
+    ]
+  },
+  
+  "trace_commitment": "0x105e2530ba9ac87b58718b4a22fc4c4b068aebad31b1e668b620d0ec0eb1daa5",
+  
+  "fri_layers_summary": [
+    {"layer": 0, "evaluations": [223630498, 666577364, 844249888, 141066512, 326858960, 59193033]},
+    {"layer": 1, "evaluations": [1252673071, 1251377599, 306788208, 1090021634, 803259892, 57491036]},
+    {"layer": 2, "evaluations": [273232310, 1725359234]},
+    {"layer": 3, "evaluations": [736184639, 1032325421, 1464491648, 2141703334]},
+    {"layer": 4, "evaluations": [1124838616, 1432028024]}
+  ],
+  
+  "verification_guarantee": [
+    "All M31 field arithmetic was computed correctly",
+    "Matrix multiplication W1 * input = hidden (8x4 @ 4x1 = 8x1)",
+    "Matrix multiplication W2 * hidden = output (3x8 @ 8x1 = 3x1)",
+    "Classification result is cryptographically bound to inputs"
+  ],
+  
+  "integration_notes": {
+    "compatibility": "Same field and proving system as Starknet's native STARK verifier",
+    "gas_efficiency": "Proof compressed to 58 felt252 elements for minimal calldata",
+    "verification": "Can be verified by calling verify_proof(proof_hash) after submission"
+  }
+}

@@ -76,7 +76,7 @@ use bitsage_node::api::{
     // Caching
     DashboardCache, CacheConfig, cache_cleanup_task,
 };
-use bitsage_node::obelysk::starknet::{FaucetClient, FaucetClientConfig};
+use bitsage_node::obelysk::starknet::{FaucetClient, FaucetClientConfig, StarknetAdminWallet};
 
 // Indexer imports
 use bitsage_node::indexer::{Indexer, IndexerConfig};
@@ -269,7 +269,40 @@ async fn main() -> Result<()> {
         ..Default::default()
     };
     let faucet_client = Arc::new(FaucetClient::new(faucet_config).expect("Failed to create faucet client"));
-    let faucet_state = Arc::new(FaucetApiState::new(faucet_client, &cli.network));
+
+    // Initialize admin wallet for social task token distribution (if env vars set)
+    let admin_wallet = match (
+        std::env::var("FAUCET_ADMIN_ADDRESS"),
+        std::env::var("FAUCET_ADMIN_PRIVATE_KEY"),
+    ) {
+        (Ok(addr), Ok(pk)) => {
+            let sage_token = std::env::var("SAGE_TOKEN_ADDRESS")
+                .unwrap_or_else(|_| "0x072349097c8a802e7f66dc96b95aca84e4d78ddad22014904076c76293a99850".to_string());
+            let admin_chain_id = if cli.network == "mainnet" {
+                starknet::core::types::FieldElement::from_hex_be("0x534e5f4d41494e").unwrap()
+            } else {
+                starknet::core::types::FieldElement::from_hex_be("0x534e5f5345504f4c4941").unwrap()
+            };
+            match StarknetAdminWallet::new(&cli.rpc_url, &addr, &pk, &sage_token, admin_chain_id) {
+                Ok(wallet) => {
+                    info!("Faucet admin wallet configured for social task rewards");
+                    Some(Arc::new(wallet))
+                }
+                Err(e) => {
+                    warn!("Failed to initialize faucet admin wallet: {} — social task rewards disabled", e);
+                    None
+                }
+            }
+        }
+        _ => {
+            warn!("FAUCET_ADMIN_ADDRESS / FAUCET_ADMIN_PRIVATE_KEY not set — social task rewards disabled");
+            None
+        }
+    };
+
+    let mut faucet_state = FaucetApiState::with_db(faucet_client, db_pool.clone(), &cli.network);
+    faucet_state.admin_wallet = admin_wallet;
+    let faucet_state = Arc::new(faucet_state);
 
     // Staking state
     let staking_state = Arc::new(StakingApiState::disabled(&cli.network));

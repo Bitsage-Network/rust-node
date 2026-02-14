@@ -1,0 +1,64 @@
+{
+  "proof_system": "STWO Circle STARK",
+  "field": "Mersenne-31 (2^31 - 1)",
+  "security_bits": 128,
+  "prover": "obelysk-stwo-real-0.1.0",
+  
+  "computation": {
+    "type": "Neural Network Inference",
+    "architecture": "4 -> 8 -> 3 (Input -> Hidden -> Output)",
+    "input_features": [128, 64, 200, 32],
+    "output_logits": [107688, 110720, 104576],
+    "predicted_class": 1
+  },
+  
+  "proof_metrics": {
+    "trace_length": 11,
+    "trace_width": 26,
+    "proof_size_bytes": 3156,
+    "generation_time_ms": 3,
+    "fri_layers": 5,
+    "query_openings": 3
+  },
+  
+  "commitments": {
+    "trace_commitment_hex": "0x105e2530ba9ac87b5871894a22fc4c4b068aebad31b1e668b620d0ec0eb1daa5",
+    "fri_layer_0_evals": [223630498, 666577364, 844249888, 141066512, 326858960, 59193033],
+    "fri_layer_1_evals": [1252673071, 1251377599, 306788208, 1090021634, 803259892, 57491036],
+    "fri_layer_2_evals": [273232310, 1725359234],
+    "fri_layer_3_evals": [736184639, 1032325421, 1464491648, 2141703334],
+    "fri_layer_4_evals": [1124838616, 1432028024]
+  },
+  
+  "public_data": {
+    "public_inputs": [11],
+    "public_outputs": [166533543, 30379017]
+  },
+  
+  "starknet_contracts": {
+    "network": "Sepolia",
+    "stwo_verifier": "0x00555555e154e28a596a59f98f857ec85f6dc7038f8d18dd1a08364d8e76dd47",
+    "proof_verifier": "0x06c27c897108f20afbd045e561e465e0843d85e84fe7dfd55f910ee75df6385a"
+  },
+  
+  "serialization": {
+    "felt252_elements": 50,
+    "public_input_hash": "0x009a7025bda9312b19",
+    "config": {
+      "log_blowup_factor": 4,
+      "log_last_layer_degree_bound": 5,
+      "n_queries": 30,
+      "pow_bits": 26
+    }
+  },
+  
+  "verification_steps": [
+    "1. Verify trace commitment matches FRI layer 0",
+    "2. Verify FRI folding through all 5 layers",
+    "3. Check query openings against Merkle paths",
+    "4. Verify public input/output constraints",
+    "5. Accept proof if all checks pass"
+  ],
+  
+  "generated_at": "2026-01-21T18:45:00Z"
+}

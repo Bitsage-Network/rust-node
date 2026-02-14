@@ -22,8 +22,15 @@ type Felt = FieldElement;
 
 const PROOF_VERIFIER: &str = "0x017ada59ab642b53e6620ef2026f21eb3f2d1a338d6e85cb61d5bcd8dfbebc8b";
 const RPC_URL: &str = "https://rpc.starknet-testnet.lava.build";
-const ACCOUNT_ADDRESS: &str = "0x01f9ebd4b60101259df3ac877a27a1a017e7961995fa913be1a6f189af664660";
-const PRIVATE_KEY: &str = "0x02c22c55e9c3aae8293e99a8b5d4ee1862595936f5f15f7d1f6ddcf8b216c44d";
+// Set via STARKNET_ACCOUNT_ADDRESS and STARKNET_PRIVATE_KEY env vars
+fn account_address() -> &'static str {
+    option_env!("STARKNET_ACCOUNT_ADDRESS")
+        .unwrap_or("0x0000000000000000000000000000000000000000000000000000000000000000")
+}
+fn private_key() -> &'static str {
+    option_env!("STARKNET_PRIVATE_KEY")
+        .unwrap_or("0x0000000000000000000000000000000000000000000000000000000000000000")
+}
 
 // M31 Prime for field validation
 const M31_PRIME: u64 = 2147483647;
@@ -241,7 +248,7 @@ async fn main() -> Result<()> {
         ));
         script.push_str(&format!(
             "    --account /tmp/account.json --private-key {} --rpc {} 2>&1 | tail -1\n\n",
-            PRIVATE_KEY, RPC_URL
+            private_key(), RPC_URL
         ));
     }
 
@@ -272,7 +279,7 @@ async fn main() -> Result<()> {
 
         script.push_str(&format!(
             "    --account /tmp/account.json --private-key {} --rpc {} 2>&1 | tail -1\n\n",
-            PRIVATE_KEY, RPC_URL
+            private_key(), RPC_URL
         ));
     }
 
