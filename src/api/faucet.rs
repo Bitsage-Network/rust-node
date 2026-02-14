@@ -16,7 +16,7 @@ use std::sync::Arc;
 use chrono::Utc;
 use tracing::{info, warn, error};
 
-use crate::obelysk::starknet::{FaucetClient, FaucetStatus};
+use crate::obelysk::starknet::{FaucetClient, FaucetStatus, StarknetAdminWallet};
 use super::captcha::{CaptchaVerifier, CaptchaConfig};
 
 /// Faucet API state
@@ -25,6 +25,7 @@ pub struct FaucetApiState {
     pub captcha_verifier: Arc<CaptchaVerifier>,
     pub db_pool: Option<Arc<PgPool>>,
     pub network: String,
+    pub admin_wallet: Option<Arc<StarknetAdminWallet>>,
 }
 
 impl FaucetApiState {
@@ -35,6 +36,7 @@ impl FaucetApiState {
             captcha_verifier: Arc::new(CaptchaVerifier::new(CaptchaConfig::default())),
             db_pool: None,
             network: network.to_string(),
+            admin_wallet: None,
         }
     }
 
@@ -45,6 +47,7 @@ impl FaucetApiState {
             captcha_verifier: Arc::new(CaptchaVerifier::new(captcha_config)),
             db_pool: None,
             network: network.to_string(),
+            admin_wallet: None,
         }
     }
 
@@ -55,6 +58,7 @@ impl FaucetApiState {
             captcha_verifier: Arc::new(CaptchaVerifier::new(CaptchaConfig::default())),
             db_pool: Some(Arc::new(db_pool)),
             network: network.to_string(),
+            admin_wallet: None,
         }
     }
 }
@@ -66,6 +70,8 @@ pub fn faucet_routes(state: Arc<FaucetApiState>) -> Router {
         .route("/api/faucet/claim", post(claim_tokens))
         .route("/api/faucet/config", get(get_faucet_config))
         .route("/api/faucet/history/:address", get(get_claim_history))
+        .route("/api/faucet/social-bonus", post(social_bonus))
+        .route("/api/faucet/social-tasks/:address", get(get_social_tasks))
         .with_state(state)
 }
 
@@ -159,6 +165,43 @@ pub struct ClaimHistoryResponse {
 pub struct HistoryQuery {
     pub limit: Option<i64>,
     pub offset: Option<i64>,
+}
+
+/// Social bonus request (from faucet frontend after OAuth verification)
+#[derive(Debug, Deserialize)]
+pub struct SocialBonusRequest {
+    pub wallet_address: String,
+    pub task_id: String,
+    pub platform: String,
+    pub task_type: String,
+    pub social_account: Option<String>,
+}
+
+/// Social bonus response
+#[derive(Debug, Serialize)]
+pub struct SocialBonusResponse {
+    pub success: bool,
+    pub reward_amount_formatted: String,
+    pub transaction_hash: Option<String>,
+    pub message: String,
+}
+
+/// Social task completion item
+#[derive(Debug, Serialize)]
+pub struct SocialTaskCompletion {
+    pub task_id: String,
+    pub platform: String,
+    pub task_type: String,
+    pub reward_amount_formatted: String,
+    pub completed_at: i64,
+    pub tx_hash: Option<String>,
+}
+
+/// Social tasks response
+#[derive(Debug, Serialize)]
+pub struct SocialTasksResponse {
+    pub completions: Vec<SocialTaskCompletion>,
+    pub total_earned_formatted: String,
 }
 
 // ============================================================================
@@ -513,6 +556,238 @@ async fn get_claim_history(
         total_claims: 0,
         total_claimed: "0".to_string(),
         total_claimed_formatted: "0 SAGE".to_string(),
+    }))
+}
+
+/// Record a social task bonus and distribute tokens
+async fn social_bonus(
+    State(state): State<Arc<FaucetApiState>>,
+    Json(request): Json<SocialBonusRequest>,
+) -> Result<Json<SocialBonusResponse>, (StatusCode, Json<ErrorResponse>)> {
+    // Validate address
+    if !is_valid_starknet_address(&request.wallet_address) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Invalid Starknet address format".to_string(),
+                code: "INVALID_ADDRESS".to_string(),
+            }),
+        ));
+    }
+
+    if request.task_id.is_empty() || request.platform.is_empty() || request.task_type.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Missing required fields: task_id, platform, task_type".to_string(),
+                code: "MISSING_FIELDS".to_string(),
+            }),
+        ));
+    }
+
+    let pool = match &state.db_pool {
+        Some(pool) => pool,
+        None => {
+            return Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(ErrorResponse {
+                    error: "Database not available".to_string(),
+                    code: "DB_UNAVAILABLE".to_string(),
+                }),
+            ));
+        }
+    };
+
+    // Determine reward: github_star tasks get 15 SAGE, others get 10 SAGE
+    let reward_sage: u128 = if request.task_type == "github_star" { 15 } else { 10 };
+    let reward_wei: u128 = reward_sage * 1_000_000_000_000_000_000; // 18 decimals
+
+    // Try to insert — UNIQUE(wallet_address, task_id) prevents duplicates
+    let insert_result = sqlx::query(
+        r#"
+        INSERT INTO social_task_completions
+            (wallet_address, task_id, platform, task_type, reward_amount, social_account)
+        VALUES ($1, $2, $3, $4, $5, $6)
+        "#
+    )
+    .bind(&request.wallet_address)
+    .bind(&request.task_id)
+    .bind(&request.platform)
+    .bind(&request.task_type)
+    .bind(reward_wei.to_string())
+    .bind(&request.social_account)
+    .execute(pool.as_ref())
+    .await;
+
+    match insert_result {
+        Err(e) => {
+            let err_str = e.to_string();
+            if err_str.contains("unique") || err_str.contains("duplicate") || err_str.contains("23505") {
+                return Err((
+                    StatusCode::CONFLICT,
+                    Json(ErrorResponse {
+                        error: "Task already completed for this wallet".to_string(),
+                        code: "ALREADY_COMPLETED".to_string(),
+                    }),
+                ));
+            }
+            error!("Failed to insert social task completion: {}", e);
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "Failed to record task completion".to_string(),
+                    code: "DB_ERROR".to_string(),
+                }),
+            ));
+        }
+        Ok(_) => {}
+    }
+
+    // Send SAGE tokens via admin wallet if configured
+    let tx_hash = if let Some(ref wallet) = state.admin_wallet {
+        match wallet.transfer_sage(&request.wallet_address, reward_wei).await {
+            Ok(hash) => {
+                // Update the tx_hash in the completion record
+                let _ = sqlx::query(
+                    "UPDATE social_task_completions SET tx_hash = $1 WHERE wallet_address = $2 AND task_id = $3"
+                )
+                .bind(&hash)
+                .bind(&request.wallet_address)
+                .bind(&request.task_id)
+                .execute(pool.as_ref())
+                .await;
+
+                // Also record in faucet_claims for audit trail
+                let _ = sqlx::query(
+                    r#"
+                    INSERT INTO faucet_claims (claimer_address, amount, claim_type, tx_hash)
+                    VALUES ($1, $2, 'social_task', $3)
+                    "#
+                )
+                .bind(&request.wallet_address)
+                .bind(reward_wei.to_string())
+                .bind(&hash)
+                .execute(pool.as_ref())
+                .await;
+
+                info!(
+                    "Social bonus: {} SAGE to {} for task {} (tx: {})",
+                    reward_sage, request.wallet_address, request.task_id, hash
+                );
+                Some(hash)
+            }
+            Err(e) => {
+                warn!(
+                    "Social task recorded but token transfer failed for {} / {}: {}",
+                    request.wallet_address, request.task_id, e
+                );
+                None
+            }
+        }
+    } else {
+        info!(
+            "Social bonus recorded (no admin wallet): {} SAGE for {} / {}",
+            reward_sage, request.wallet_address, request.task_id
+        );
+        None
+    };
+
+    Ok(Json(SocialBonusResponse {
+        success: true,
+        reward_amount_formatted: format!("{} SAGE", reward_sage),
+        transaction_hash: tx_hash,
+        message: format!("Earned {} SAGE for completing {}", reward_sage, request.task_id),
+    }))
+}
+
+/// Get completed social tasks for a wallet address
+async fn get_social_tasks(
+    State(state): State<Arc<FaucetApiState>>,
+    Path(address): Path<String>,
+) -> Result<Json<SocialTasksResponse>, (StatusCode, Json<ErrorResponse>)> {
+    if !is_valid_starknet_address(&address) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Invalid Starknet address format".to_string(),
+                code: "INVALID_ADDRESS".to_string(),
+            }),
+        ));
+    }
+
+    let pool = match &state.db_pool {
+        Some(pool) => pool,
+        None => {
+            // No DB = no completions
+            return Ok(Json(SocialTasksResponse {
+                completions: vec![],
+                total_earned_formatted: "0 SAGE".to_string(),
+            }));
+        }
+    };
+
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            task_id,
+            platform,
+            task_type,
+            reward_amount::text as reward_amount,
+            EXTRACT(EPOCH FROM completed_at)::bigint as completed_at,
+            tx_hash
+        FROM social_task_completions
+        WHERE wallet_address = $1
+        ORDER BY completed_at DESC
+        "#
+    )
+    .bind(&address)
+    .fetch_all(pool.as_ref())
+    .await;
+
+    let total_row = sqlx::query(
+        r#"
+        SELECT COALESCE(SUM(reward_amount), 0)::text as total_earned
+        FROM social_task_completions
+        WHERE wallet_address = $1
+        "#
+    )
+    .bind(&address)
+    .fetch_one(pool.as_ref())
+    .await;
+
+    use sqlx::Row;
+
+    let completions = match rows {
+        Ok(rows) => rows.iter().map(|row| {
+            let reward_str: String = row.get("reward_amount");
+            let reward_u64: u64 = reward_str.parse().unwrap_or(0);
+            SocialTaskCompletion {
+                task_id: row.get("task_id"),
+                platform: row.get("platform"),
+                task_type: row.get("task_type"),
+                reward_amount_formatted: format_sage_amount(reward_u64),
+                completed_at: row.get("completed_at"),
+                tx_hash: row.get("tx_hash"),
+            }
+        }).collect(),
+        Err(e) => {
+            error!("Failed to query social tasks for {}: {}", address, e);
+            vec![]
+        }
+    };
+
+    let total_earned = match total_row {
+        Ok(row) => {
+            let total_str: String = row.get("total_earned");
+            let total_u64: u64 = total_str.parse().unwrap_or(0);
+            format_sage_amount(total_u64)
+        }
+        Err(_) => "0 SAGE".to_string(),
+    };
+
+    Ok(Json(SocialTasksResponse {
+        completions,
+        total_earned_formatted: total_earned,
     }))
 }
 

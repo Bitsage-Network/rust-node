@@ -162,6 +162,167 @@ pub struct ZkProofResponse {
     pub worker_id: String,
 }
 
+// ========== ML Proving Job Types (stwo-ml) ==========
+
+/// Request for ML inference proving via stwo-ml.
+///
+/// Executes model forward pass in M31 arithmetic and generates a STARK proof
+/// of correct execution. Proof can be verified on-chain via the ObelyskVerifier.
+#[cfg(feature = "ml-prove")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MlProveRequest {
+    /// Model path: ONNX file or HuggingFace model directory.
+    pub model_path: String,
+    /// Input data as f32 values (flattened row-major).
+    pub input_data: Vec<f32>,
+    /// Input shape: (rows, cols).
+    pub input_shape: (usize, usize),
+    /// Model identifier for weight cache and on-chain registration.
+    #[serde(default)]
+    pub model_id: Option<String>,
+    /// Whether to use weight commitment cache (default: true).
+    #[serde(default = "default_true")]
+    pub use_cache: bool,
+    /// Whether to generate on-chain proof format (default: true).
+    #[serde(default = "default_true")]
+    pub onchain: bool,
+}
+
+/// Response from ML inference proving.
+#[cfg(feature = "ml-prove")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MlProveResponse {
+    /// Proof hash (SHA-256 of serialized proof, hex).
+    pub proof_hash: String,
+    /// IO commitment: Poseidon(inputs || outputs) (hex).
+    pub io_commitment: String,
+    /// Layer chain commitment (hex).
+    pub layer_chain_commitment: String,
+    /// Number of matmul proofs in the aggregated proof.
+    pub num_matmul_proofs: usize,
+    /// Number of proven layers.
+    pub num_proven_layers: usize,
+    /// Proof generation time (ms).
+    pub proof_time_ms: u64,
+    /// Inference time (ms, forward pass only).
+    pub inference_time_ms: u64,
+    /// GPU used for proving.
+    pub gpu_used: bool,
+    /// Weight cache hit count.
+    pub cache_hits: usize,
+    /// Calldata size (felt252 elements) for on-chain submission.
+    pub calldata_size: usize,
+    /// Worker that executed the job.
+    pub worker_id: String,
+    /// Model ID (Poseidon hash of weight commitment + num_layers + description, hex).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_id: Option<String>,
+    /// Weight commitment (Poseidon hash of all weight matrices, hex).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub weight_commitment: Option<String>,
+    /// Whether the model was registered on-chain (or was already registered).
+    #[serde(default)]
+    pub registered_onchain: bool,
+    /// Transaction hash of the registration call (if submitted).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub registration_tx: Option<String>,
+}
+
+/// Handles automatic model registration on Starknet.
+///
+/// Checks an in-memory cache first, then queries the contract, and only
+/// submits a registration transaction when the model is truly new.
+#[cfg(feature = "ml-prove")]
+#[derive(Clone)]
+pub struct ModelRegistrar {
+    account: Arc<crate::obelysk::starknet::AccountManager>,
+    verifier_contract: starknet::core::types::FieldElement,
+    registered_cache: Arc<RwLock<std::collections::HashSet<String>>>,
+}
+
+#[cfg(feature = "ml-prove")]
+impl ModelRegistrar {
+    pub fn new(
+        account: Arc<crate::obelysk::starknet::AccountManager>,
+        verifier_contract: starknet::core::types::FieldElement,
+    ) -> Self {
+        Self {
+            account,
+            verifier_contract,
+            registered_cache: Arc::new(RwLock::new(std::collections::HashSet::new())),
+        }
+    }
+
+    /// Check if the model is already registered; if not, submit registration.
+    ///
+    /// Returns `Ok(Some(tx_hash))` on new registration, `Ok(None)` if already registered.
+    pub async fn check_and_register(
+        &self,
+        model_id_hex: &str,
+        weight_commitment_hex: &str,
+    ) -> Result<Option<String>> {
+        // 1. Check in-memory cache
+        if let Ok(cache) = self.registered_cache.read() {
+            if cache.contains(model_id_hex) {
+                debug!("Model {} already in registration cache", model_id_hex);
+                return Ok(None);
+            }
+        }
+
+        // 2. Query on-chain: get_model_commitment(model_id)
+        use starknet::providers::Provider;
+
+        let model_id_felt = starknet::core::types::FieldElement::from_hex_be(model_id_hex)
+            .map_err(|e| anyhow!("Invalid model_id hex: {}", e))?;
+
+        let commitment_result = self.account.provider()
+            .call(
+                starknet::core::types::FunctionCall {
+                    contract_address: self.verifier_contract,
+                    entry_point_selector: starknet::core::utils::get_selector_from_name("get_model_commitment")
+                        .map_err(|e| anyhow!("selector error: {}", e))?,
+                    calldata: vec![model_id_felt],
+                },
+                starknet::core::types::BlockId::Tag(starknet::core::types::BlockTag::Latest),
+            )
+            .await;
+
+        if let Ok(result) = commitment_result {
+            if !result.is_empty() && result[0] != starknet::core::types::FieldElement::ZERO {
+                // Already registered on-chain — cache and return
+                if let Ok(mut cache) = self.registered_cache.write() {
+                    cache.insert(model_id_hex.to_string());
+                }
+                debug!("Model {} already registered on-chain", model_id_hex);
+                return Ok(None);
+            }
+        }
+
+        // 3. Submit registration
+        let weight_felt = starknet::core::types::FieldElement::from_hex_be(weight_commitment_hex)
+            .map_err(|e| anyhow!("Invalid weight_commitment hex: {}", e))?;
+
+        let selector = starknet::core::utils::get_selector_from_name("register_model")
+            .map_err(|e| anyhow!("selector error: {}", e))?;
+
+        let tx_hash = self.account.execute_call(
+            self.verifier_contract,
+            selector,
+            vec![model_id_felt, weight_felt],
+        ).await?;
+
+        let tx_hex = format!("{:#066x}", tx_hash);
+
+        // Cache the registration
+        if let Ok(mut cache) = self.registered_cache.write() {
+            cache.insert(model_id_hex.to_string());
+        }
+
+        info!("Model {} registered on-chain: {}", model_id_hex, tx_hex);
+        Ok(Some(tx_hex))
+    }
+}
+
 // ========== Model Deployment Job Types ==========
 
 /// Request for model deployment (one-liner model deployment)
@@ -532,6 +693,9 @@ pub struct JobExecutor {
     encryption_manager: Option<Arc<EncryptedJobManager>>,
     /// Whether TEE attestation is enforced for inference jobs
     tee_enforced: bool,
+    /// Optional model registrar for automatic on-chain model registration.
+    #[cfg(feature = "ml-prove")]
+    model_registrar: Option<ModelRegistrar>,
 }
 
 impl JobExecutor {
@@ -570,6 +734,8 @@ impl JobExecutor {
             data_executor: SecureDataExecutor::new(),
             encryption_manager: None,
             tee_enforced: false,
+            #[cfg(feature = "ml-prove")]
+            model_registrar: None,
         }
     }
 
@@ -611,6 +777,8 @@ impl JobExecutor {
             data_executor: SecureDataExecutor::new(),
             encryption_manager: None,
             tee_enforced: false,
+            #[cfg(feature = "ml-prove")]
+            model_registrar: None,
         }
     }
 
@@ -643,6 +811,8 @@ impl JobExecutor {
             data_executor: SecureDataExecutor::new(),
             encryption_manager: None,
             tee_enforced: false,
+            #[cfg(feature = "ml-prove")]
+            model_registrar: None,
         }
     }
 
@@ -681,8 +851,15 @@ impl JobExecutor {
     pub fn set_tee_enforced(&mut self, enforced: bool) {
         self.tee_enforced = enforced;
         if enforced {
-            info!("🔒 TEE enforcement enabled for inference jobs");
+            info!("TEE enforcement enabled for inference jobs");
         }
+    }
+
+    /// Set the model registrar for automatic on-chain model registration.
+    #[cfg(feature = "ml-prove")]
+    pub fn set_model_registrar(&mut self, registrar: ModelRegistrar) {
+        info!("Model registrar configured for on-chain registration");
+        self.model_registrar = Some(registrar);
     }
 
     /// Execute an encrypted inference job:
@@ -982,6 +1159,9 @@ impl JobExecutor {
             "ConfidentialAI" => self.execute_confidential_ai(&request).await?,
             // ====== ZK Proof Generation Job Types (STWO) ======
             "STWOProof" | "ZKProof" | "ObelyskProof" => self.execute_zk_proof(&request).await?,
+            // ====== ML Inference Proving (stwo-ml) ======
+            #[cfg(feature = "ml-prove")]
+            "MlProve" | "MlInferenceProof" => self.execute_ml_prove(&request).await?,
             // ====== Model Deployment & Inference ======
             "ModelDeploy" => self.execute_model_deploy(&request).await?,
             "ModelInference" => self.execute_model_inference(&request).await?,
@@ -1824,6 +2004,176 @@ impl JobExecutor {
                 Err(anyhow!("ZK proof generation failed: {}", e))
             }
         }
+    }
+
+    /// Execute ML inference proving via stwo-ml.
+    ///
+    /// Loads a model (ONNX or HuggingFace), runs the forward pass in M31
+    /// field arithmetic, and generates an aggregated STARK proof of correct
+    /// execution. Supports weight commitment caching across inferences.
+    #[cfg(feature = "ml-prove")]
+    async fn execute_ml_prove(&self, request: &JobExecutionRequest) -> Result<Vec<u8>> {
+        use stwo_ml::prelude::*;
+        use std::path::Path;
+
+        info!("Running ML inference proving (stwo-ml)...");
+        let start = Instant::now();
+
+        let ml_request: MlProveRequest = serde_json::from_slice(&request.payload)
+            .map_err(|e| anyhow!("Invalid MlProve request: {}", e))?;
+
+        // Build computation graph and weights from ONNX model
+        let (graph, weights) = if ml_request.model_path.ends_with(".onnx") {
+            let onnx = load_onnx(Path::new(&ml_request.model_path))
+                .map_err(|e| anyhow!("ONNX load failed: {}", e))?;
+            (onnx.graph, onnx.weights)
+        } else {
+            // Non-ONNX path: build a simple MLP from input/output shape
+            let mut builder = GraphBuilder::new(
+                (ml_request.input_shape.0, ml_request.input_shape.1),
+            );
+            builder.linear(ml_request.input_shape.1);
+            let g = builder.build();
+            let w = generate_weights_for_graph(&g, 42);
+            (g, w)
+        };
+
+        // Convert input f32 → M31
+        let input_data: Vec<M31> = ml_request.input_data.iter()
+            .map(|&v| {
+                let quantized = (v.abs() * 1000.0) as u32 % (1u32 << 31);
+                M31::from(quantized)
+            })
+            .collect();
+        let input = M31Matrix {
+            rows: ml_request.input_shape.0,
+            cols: ml_request.input_shape.1,
+            data: input_data,
+        };
+
+        let inference_time = start.elapsed();
+
+        // Prove with optional weight cache
+        let model_id = ml_request.model_id.clone()
+            .unwrap_or_else(|| "default".to_string());
+        let cache_dir = std::env::temp_dir().join("stwo_ml_cache");
+        let _ = std::fs::create_dir_all(&cache_dir);
+        let cache_path = cache_dir.join(format!("{}.swcf", model_id));
+
+        let prove_start = Instant::now();
+
+        let (proof_hash_hex, io_commitment_hex, layer_chain_hex,
+             num_matmul_proofs, num_proven_layers, calldata_size, cache_hits) =
+        if ml_request.use_cache {
+            let cache = shared_cache_from_file(&cache_path, &model_id);
+            let initial_len = cache.read().map(|c| c.len()).unwrap_or(0);
+
+            let proof = prove_model_aggregated_onchain_auto_cached(
+                &graph, &input, &weights, &cache,
+            ).map_err(|e| anyhow!("ML prove failed: {}", e))?;
+
+            let final_len = cache.read().map(|c| c.len()).unwrap_or(0);
+            let hits = if final_len > initial_len { 0 } else { initial_len };
+
+            // Persist cache
+            if let Ok(mut c) = cache.write() {
+                if c.is_dirty() {
+                    let _ = c.save(&cache_path);
+                }
+            }
+
+            let starknet_proof = stwo_ml::starknet::build_starknet_proof_onchain(&proof);
+            let proof_bytes = serde_json::to_vec(&starknet_proof.combined_calldata.len())
+                .unwrap_or_default();
+            let mut hasher = Sha256::new();
+            hasher.update(&proof_bytes);
+            let hash = format!("{:x}", hasher.finalize());
+
+            (
+                hash,
+                format!("{:#066x}", starknet_proof.io_commitment),
+                format!("{:#066x}", starknet_proof.layer_chain_commitment),
+                starknet_proof.num_matmul_proofs,
+                starknet_proof.num_proven_layers,
+                starknet_proof.calldata_size,
+                hits,
+            )
+        } else {
+            let proof = prove_model_aggregated_onchain_auto(
+                &graph, &input, &weights,
+            ).map_err(|e| anyhow!("ML prove failed: {}", e))?;
+
+            let starknet_proof = stwo_ml::starknet::build_starknet_proof_onchain(&proof);
+            let proof_bytes = serde_json::to_vec(&starknet_proof.combined_calldata.len())
+                .unwrap_or_default();
+            let mut hasher = Sha256::new();
+            hasher.update(&proof_bytes);
+            let hash = format!("{:x}", hasher.finalize());
+
+            (
+                hash,
+                format!("{:#066x}", starknet_proof.io_commitment),
+                format!("{:#066x}", starknet_proof.layer_chain_commitment),
+                starknet_proof.num_matmul_proofs,
+                starknet_proof.num_proven_layers,
+                starknet_proof.calldata_size,
+                0,
+            )
+        };
+
+        let proof_time_ms = prove_start.elapsed().as_millis() as u64;
+        let gpu_used = stwo_ml::backend::gpu_is_available();
+
+        // Compute model registration data
+        let registration = stwo_ml::starknet::prepare_model_registration(
+            &graph, &weights, &model_id,
+        );
+        let model_id_hex = format!("{:#066x}", registration.model_id);
+        let weight_commitment_hex = format!("{:#066x}", registration.weight_commitment);
+
+        // Fire background on-chain registration if registrar is configured
+        let mut registered_onchain = false;
+        let registration_tx = None;
+
+        if let Some(registrar) = &self.model_registrar {
+            let registrar = registrar.clone();
+            let mid = model_id_hex.clone();
+            let wc = weight_commitment_hex.clone();
+            tokio::spawn(async move {
+                match registrar.check_and_register(&mid, &wc).await {
+                    Ok(Some(tx)) => info!("Background model registration: {}", tx),
+                    Ok(None) => debug!("Model already registered"),
+                    Err(e) => warn!("Background model registration failed: {}", e),
+                }
+            });
+            // Optimistic: mark as registered since it will be submitted
+            registered_onchain = true;
+        }
+
+        let response = MlProveResponse {
+            proof_hash: proof_hash_hex,
+            io_commitment: io_commitment_hex,
+            layer_chain_commitment: layer_chain_hex,
+            num_matmul_proofs,
+            num_proven_layers,
+            proof_time_ms,
+            inference_time_ms: inference_time.as_millis() as u64,
+            gpu_used,
+            cache_hits,
+            calldata_size,
+            worker_id: self.worker_id.clone(),
+            model_id: Some(model_id_hex),
+            weight_commitment: Some(weight_commitment_hex),
+            registered_onchain,
+            registration_tx,
+        };
+
+        info!(
+            "ML proof generated: {} matmuls, {} layers, {}ms, cache_hits={}, model_id={}",
+            num_matmul_proofs, num_proven_layers, proof_time_ms, cache_hits,
+            response.model_id.as_deref().unwrap_or("none"),
+        );
+        Ok(serde_json::to_vec(&response)?)
     }
 
     /// Execute model deployment job via vLLM

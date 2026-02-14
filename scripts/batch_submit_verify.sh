@@ -4,7 +4,7 @@ source /home/shadeform/.starkli/env
 
 CONTRACT="0x017ada59ab642b53e6620ef2026f21eb3f2d1a338d6e85cb61d5bcd8dfbebc8b"
 ACCOUNT="/tmp/fetched_account.json"
-PRIVATE_KEY="0x02c22c55e9c3aae8293e99a8b5d4ee1862595936f5f15f7d1f6ddcf8b216c44d"
+PRIVATE_KEY="${STARKNET_PRIVATE_KEY:?Set STARKNET_PRIVATE_KEY in .env}"
 RPC="https://rpc.starknet-testnet.lava.build"
 
 echo "╔══════════════════════════════════════════════════════════════════════╗"
