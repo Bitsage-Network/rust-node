@@ -55,6 +55,28 @@ services:
       timeout: 5s
       retries: 5
 
+  audit-relay:
+    build:
+      context: ../../Obelysk-Protocol/services/audit-relay
+      dockerfile: Dockerfile
+    image: ghcr.io/bitsage-network/audit-relay:latest
+    container_name: obelysk-audit-relay
+    restart: unless-stopped
+    ports:
+      - "3002:3002"
+    environment:
+      - IRYS_TOKEN=${IRYS_TOKEN}
+      - IRYS_BUNDLER_URL=${IRYS_BUNDLER_URL:-https://node1.irys.xyz}
+      - ARWEAVE_GATEWAY=${ARWEAVE_GATEWAY:-https://arweave.net}
+      - PORT=3002
+      - RELAY_API_KEY=${AUDIT_RELAY_API_KEY:-}
+      - MAX_UPLOAD_MB=50
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O-", "http://localhost:3002/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
   nginx:
     image: nginx:alpine
     container_name: bitsage-nginx
