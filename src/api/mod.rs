@@ -29,6 +29,9 @@ pub mod wallet_db;
 pub mod network_db;
 pub mod dashboard_db;
 
+// Worker SSH provisioning (bitsage shell)
+pub mod worker_ssh;
+
 // Gasless transaction relayer
 pub mod relayer;
 
@@ -57,6 +60,9 @@ pub use earnings_db::{earnings_db_routes, EarningsDbState};
 pub use wallet_db::{wallet_db_routes, WalletDbState};
 pub use network_db::{network_db_routes, NetworkDbState};
 pub use dashboard_db::{dashboard_db_routes, DashboardDbState};
+
+// Worker SSH API exports
+pub use worker_ssh::{worker_ssh_routes, WorkerSshState};
 
 // Relayer API exports
 pub use relayer::{relayer_routes, RelayerState, RelayerConfig};
